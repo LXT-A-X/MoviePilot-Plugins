@@ -91,7 +91,7 @@ _EMBY_STRIP_FIELDS = frozenset([
 class EmbyPeopleLocalize(_PluginBase):
     plugin_name = "Emby 演职人员中文化"
     plugin_desc = "利用大模型把Emby里英文/罗马音/日文人名翻译为正式中文名并写回（可选库/全库）"
-    plugin_icon = "embypeoplelocalize.jpg"
+    plugin_icon = "embypeoplelocalize_icon.jpg"
     plugin_version = "0.3.1"
     plugin_author = "LXT-A-X"
     plugin_config_prefix = "embypeoplelocalize_"
@@ -1176,8 +1176,6 @@ class EmbyPeopleLocalize(_PluginBase):
         except Exception as e:
             logger.error(f"【{title}】翻译+写回 异常: {type(e).__name__}: {e}", exc_info=True)
             return 0
-        finally:
-            pass
 
     def sync_library(self):
         if not self._enabled:
