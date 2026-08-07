@@ -1,0 +1,20 @@
+{
+  "EmbyPeopleLocalize": {
+    "name": "Emby 演职人员中文化",
+    "description": "利用大模型把Emby里英文/罗马音/日文人名翻译为正式中文名并写回，支持自定义提示词、按库筛选、定时扫描。",
+    "labels": "Emby,翻译",
+    "version": "0.3.0",
+    "icon": "embypeoplelocalize.jpg",
+    "author": "LXT-A-X",
+    "level": 2,
+    "v2": true,
+    "history": {
+      "v0.3.0": "全新 Vue 自定义前端：搜索、按库分组折叠面板、图片预览、分页历史记录",
+      "v0.2.9": "LLM超时优化、代理配置调整、单条目200s超时保护",
+      "v0.2.7": "openai SDK + requests 双链路、Emby 端点404修复",
+      "v0.2.5": "集成 openai SDK、代理自动降级、新增插件图标",
+      "v0.2.0": "自定义大模型提示词、Emby服务器库选择、类型过滤",
+      "v0.1.0": "初始版本，基于 LLM Agent 进行角色中文化"
+    }
+  }
+}
