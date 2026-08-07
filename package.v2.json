@@ -1,20 +1,103 @@
 {
+  "SourceFileDeleteHelper": {
+    "name": "源文件删种助手",
+    "description": "监听源文件删除事件，自动删除下载器中对应的种子。当在历史记录中删除源文件或删除下载任务时，自动清理下载器中的对应种子。",
+    "labels": "下载器,删种",
+    "version": "1.0.0",
+    "icon": "sourcefiledeletehelper.png",
+    "author": "local",
+    "level": 1,
+    "history": {
+      "v1.0.0": "初始版本：监听源文件删除事件和下载任务删除事件，自动删种"
+    }
+  },
+  "EpisodeReleaserPlugin": {
+    "name": "集数释放器",
+    "description": "释放集数状态，强制全集包洗版",
+    "version": "1.0.1",
+    "author": "local",
+    "icon": "Moviepilot_A.png",
+    "level": 1,
+    "system_version": ">=2.12.0",
+    "history": {
+      "v1.0.1": "修复：stop→stop_service、DownloadCompleted→TransferComplete、移除无效season_pack参数、修复timedelta.minutes bug、修复tmdb_info缺mtype参数、修复delete_torrents ids类型、修复cols语法错误、补全中文docstring",
+      "v1.0.0": "初始版本：强制全集包洗版，分集不触发释放"
+    },
+    "v2": true,
+    "labels": "订阅,洗版,集数释放,全集包"
+  },
+  "BangumiSyncPlus": {
+    "name": "Bangumi打格子增强版",
+    "description": "将在看记录同步到Bangumi，支持webhook实时同步+定时批量同步+手动命令，匹配策略更宽松",
+    "labels": "Bangumi,同步,打格子",
+    "version": "1.0.2",
+    "icon": "bangumi.jpg",
+    "author": "local",
+    "level": 1,
+    "history": {
+      "v1.0.2": "修复：_lookup_episode中air_date取错剧集日期导致Bangumi搜索用错播出日期；_pick_best_subject硬编码season=1导致多季番剧验证错误；_batch_sync_from_emby硬编码服务器名",
+      "v1.0.1": "修复：移除不存在的scheduler_service调用，改用get_service框架标准方式注册定时服务；修复trigger字段格式",
+      "v1.0.0": "初始版本：基于BangumiSync增强，增加定时批量同步、手动命令/bangumi_sync、放宽匹配策略（多标题搜索+可调阈值）"
+    },
+    "v2": true
+  },
+  "EmbyBgmActorLocalize": {
+    "name": "Emby Bangumi声优本地化",
+    "description": "基于 Bangumi 数据将 Emby 中日番的声优名称替换为中文名，支持定时扫描、手动命令、入库自动处理",
+    "labels": "Emby,Bangumi,声优,演员,本地化",
+    "version": "1.7.4",
+    "icon": "bangumi.jpg",
+    "author": "local",
+    "level": 1,
+    "history": {
+      "v1.7.4": "头像下载全失败彻底解决（彻底放弃RequestUtils封装）+ 升级强制重试头像：1.直接用原生requests.get/post（100%可控）替代RequestUtils，timeout=(5,10)连接读取分离+proxies走settings.PROXY（代理失败自动裸连重试一次）+模拟Chrome完整请求头（User-Agent/Referer/Accept/Accept-Language/Cache-Control）绕过bgm防盗链 2.上传Emby也用原生requests，内网不走代理，verify=False避免内网证书问题，status_code 200/204才认为成功 3.魔数探测真实图片格式（PNG签名/GIF签名/JPEG SOI/RIFF WEBP）+ headers Content-Type + URL后缀三重判定MIME，不再误判变颜色 4._clean_person_img_inplace统一清洗person里的img/images/large/...所有URL（从缓存读出来时也洗一遍，解决旧缓存脏数据）5.版本不一致时清空_avatar_updated集合（v1.7.4首次加载自动清），让之前失败的头像全部重试 6.超详细确定性日志：下载成功打「N bytes ct=xxx /pic/xxx.jpg」，失败分类打ProxyError/Timeout/ConnectionError/HTTP码/魔数探测结果，不再笼统说无响应",
+      "v1.7.2": "头像下载全失败+卡死修复：1.头像URL前置清理：strip反引号/引号/空白符+校验http开头（日志里显示url前面有反引号`导致下载无响应）2.RequestUtils(timeout=5) 下载上传都设5秒超时（之前默认超时每个头像失败要卡20秒）3.Bangumi声优images字典里的每个large/medium/...取出来时都strip+去反引号 4.校验失败直接返回False不浪费时间",
+      "v1.7.1": "紧急修正+头像修复：1.声优匹配彻底取消按index直接替换（会导致花泽香菜→本城雄太郎这种错位），改为极简精确匹配（去空格/標點 + 舊字體轉簡體 + 子串包含），匹配不到绝不乱替换 2.新增_avatar_updated去重标记，成功才写入cache避免下次跳过 3.头像上传改为直接POST二进制resp.content（之前base64编码导致全失败），失败原因全部打INFO日志方便排查 4.常用日文舊字體(沢/嶋/斎/栄/広/岡/郷/黒/恵/輔/橋/浜 etc.)→简体字对照表，提高人名匹配率 5.Bangumi声优去重匹配(used_bgm_idxs)，避免两个Emby人匹配到同一位Bangumi声优",
+      "v1.6.7": "关键修复：1.Emby所有请求加UserId参数（Emby必须） 2.所有Emby返回无响应时打印status+body 3.激进匹配：只要People名字的Type是空/Actor/VoiceActor/含「声」「配音」「演」的候选全处理 4.解决中日汉字差异：连续2字共同汉字匹配 5.未匹配声优全部打INFO级别日志 6.POST更新前清除ImageTags等只读字段，避免Emby拒绝更新 7.打印所有People完整信息（Type/Role/Name）",
+      "v1.6.6": "1.修复_update_emby_actors重复请求条目导致的无响应：优先使用扫描时已获取的item_data，没带的话再查时明确指定?Fields=People 2.打印Emby声优列表和Bangumi声优列表方便调试未匹配问题 3.增强匹配：简化字符串（去掉空格・等）后再比 4.data参数透传整个链路",
+      "v1.6.5": "彻底移除对MediaServerChain的依赖，全部改用Emby原生REST API：1.用/Library/VirtualFolders获取媒体库 2.用/Items?ParentId=&Fields=直接一次性获取带People、Genres等完整字段的条目，省去再查一次详情的开销 3.完全不依赖MP内部类的签名，最稳定可靠",
+      "v1.6.4": "1.移除不稳定的inst.get_data()直接调用，完全使用_host/_apikey手动拼接URL 2.修复sync_library缩进错误导致的逻辑异常 3.所有步骤添加详细日志，方便排查 4.POST失败时打印返回内容",
+      "v1.6.3": "找到问题根源！Emby实例的host和api_key是私有属性_host和_apikey，之前代码跳过了_开头的属性导致一直获取失败。现在已修复：1.正确读取_host/_apikey属性 2.优先使用Emby类自带的get_data/post_data方法 3.清理host中的反引号等多余字符",
+      "v1.6.2": "添加完整Emby连接调试日志，打印service/config/instance的所有属性和方法，定位host/api_key位置",
+      "v1.6.1": "紧急修复：1.添加全局异常捕获，防止错误被吞 2.用户手动选中的库强制按动漫处理，不再做类型误判 3.添加详细调试日志（打印Emby实例属性、库ID、条目数量）4.先一次性获取所有条目再遍历，避免生成器异常导致静默失败",
+      "v1.6.0": "重大修复：1.彻底修复Emby连接问题，统一使用_emby_get/_emby_post方法，兼容所有版本Emby属性名 2.动画类型判断优化：选中库名含动漫/动画/番剧关键词时信任用户选择，不再误判真人 3.新增「最多更新前N位声优」配置项（默认10位）4.修复无法暂停/关闭插件问题，禁用插件立即中断扫描 5.头像上传也统一走Emby API辅助方法",
+      "v1.5.3": "修复误判：手动选库扫描时信任用户选择，不再做类型过滤（msc.iteminfo返回的属性名不对导致所有动画都被误判为真人）；实时入库事件仍然保留genre_ids=16的检查",
+      "v1.5.2": "新增动漫过滤：手动选库后也会再次检查类型，跳过真人内容；三层检测（genre_ids=16、Genres关键词、Tags关键词），确保只处理动画",
+      "v1.5.1": "彻底修复：完全移除对不存在的 chain.media_info 的依赖，直接从 Emby iteminfo 获取标题/原名/年份；搜索匹配分数优化，年份和平台类型权重提高",
+      "v1.5.0": "重大修复：1.Bangumi声优API调用错误！之前用/persons拿到的是制作人员，改为从/characters接口的actors字段提取真正的声优(CV)2.新增声优头像更新功能（默认开启，可在配置中关闭），参考personmeta插件实现图片下载上传3.即使名字不需要替换，也会尝试更新头像",
+      "v1.4.0": "重大修复：1.Bangumi搜索类型错误修复（所有动画都是type=2，type=3是书籍）2.参考BangumiSyncPlus使用chain.media_info获取正确媒体信息3.改进可中断性（多层循环检查停止信号）4.多策略搜索+宽松匹配提高成功率",
+      "v1.3.2": "增加详细日志、改进匹配算法、只更新 Actor/VoiceActor 类型、修复更新返回值统计",
+      "v1.3.1": "修复：移除对不存在的 chain.media_info 依赖，直接使用媒体标题/年份匹配 Bangumi",
+      "v1.3.0": "新增支持动漫电影/剧场版：同时处理 Series 和 Movie 类型，Bangumi 匹配剧场版(type=3)",
+      "v1.2.1": "简化：去掉冗余的服务器选择，只保留媒体库多选；留空则扫描所有Emby服务器",
+      "v1.2.0": "改进：自动读取 Emby 媒体库列表，支持下拉多选指定库，无需手动输入名称",
+      "v1.1.0": "新增：支持指定媒体库名称（逗号分隔），只扫描指定的库",
+      "v1.0.2": "修复：移除不存在的 settings.VERSION、补充缺失的类属性",
+      "v1.0.1": "修复导入错误、简化缓存机制、参考现有插件结构重写",
+      "v1.0.0": "初始版本：TMDb→Bangumi匹配、缓存、定时扫描、手动命令、入库实时处理"
+    },
+    "v2": true
+  },
   "EmbyPeopleLocalize": {
     "name": "Emby 演职人员中文化",
-    "description": "利用大模型把Emby里英文/罗马音/日文人名翻译为正式中文名并写回，支持自定义提示词、按库筛选、定时扫描。",
-    "labels": "Emby,翻译",
-    "version": "0.3.0",
+    "description": "利用大模型把Emby里英文/罗马音/日文人名翻译为正式中文名并写回（可选库/全库）。VPage详情页：统计卡+按库折叠面板+数据/设置双Tab切换，无需多点击即可进入设置。支持繁简直接转换省LLM、三阶段按库处理架构、定时/入库/刮削自动翻译、通知汇总。",
+    "labels": "Emby,LLM,翻译,人名本地化,声优,演职人员",
+    "version": "0.3.1",
     "icon": "embypeoplelocalize.jpg",
     "author": "LXT-A-X",
-    "level": 2,
-    "v2": true,
+    "level": 1,
     "history": {
-      "v0.3.0": "全新 Vue 自定义前端：搜索、按库分组折叠面板、图片预览、分页历史记录",
-      "v0.2.9": "LLM超时优化、代理配置调整、单条目200s超时保护",
-      "v0.2.7": "openai SDK + requests 双链路、Emby 端点404修复",
-      "v0.2.5": "集成 openai SDK、代理自动降级、新增插件图标",
-      "v0.2.0": "自定义大模型提示词、Emby服务器库选择、类型过滤",
-      "v0.1.0": "初始版本，基于 LLM Agent 进行角色中文化"
-    }
+      "v0.3.1": "修复VPage模式VTabs不显示设置Tab内容的问题；修正__init__.py中同步Emby API UserId缺失导致404的边界情况；整理history记录上限200条",
+      "v0.3.0": "全新VPage详情页：📊数据面板（4张统计卡+VExpansionPanel按库折叠面板，最多200条翻译历史）+ ⚙️设置面板（VTabs双Tab切换，一次点击进详情即可看到数据+设置，无需二次跳转）；作者改为LXT-A-X；版本号对齐",
+      "v0.2.9": "【用户以为崩了=超时太久】彻底解决超时卡住假死问题：1.所有LLM超时砍半：SDK httpx read 180→60s / SDK completion timeout (10,180)→(10,60) / requests timeout (10,180)→(10,60) 2.遇超时不做任何重试！SDK只试1次，立即转requests；requests只试2次（代理1次+裸连1次），最坏120s不成就跳过，下次cron再补，绝不卡死 3.wall-clock绝对时限：_apply_translation_to_people_inner 单条目总用时超过200s直接break，剩余批次下轮再试 4.默认 max_people_per_batch 8→5，降低单次请求复杂度，LLM响应更快 5.between-batch delay 2→min(delay,2)，避免批间再浪费无谓时间",
+      "v0.2.8": "线程永不崩溃加固 + LLM超时再调优：1.【6层异常墙】：sync_library 服务器级/库级/分页级/单条目级 × _save_cache × _add_history × _call_llm_translate × _try_llm_via_sdk × _try_llm_via_requests × _parse_llm_json × _apply_translation_to_people × _update_people_with_fallback 最外层全部try/except，任何异常隔离不挂主线程 2.【finally终极保底】：无论正常/异常，最外层finally一定save_cache + _event.set() 3.【超时调优】SDK httpx read 120→180s / completion timeout (10,180) / requests timeout (10,180) 给 DeepSeek-V4-Flash+代理留足时间；默认 max_people_per_batch 20→8 降低每批复杂度 4.【失败不卡】：_update_people_with_fallback失败也写入_processed避免下次重复卡死；sleep也包try/except防中断",
+      "v0.2.7": "404根本因定位 + 彻底修复（完全对齐 Bangumi 声优插件实现）：1.扫库时已用/Items?ParentId=xxx拿到完整item（含People/Genres/Tags等所有Fields）→ 直接把扫描时的it dict传入_update_people_with_fallback，**不再二次查/Items/{id}**（单条查带UserId必404是Emby权限模型硬伤）2.仅事件触发等无item_data场景，才用三级兜底查：/Users/{UserId}/Items/{id} → /Items/{id}（纯API key无UserId）3.sync_library调用处传item_data=it，确保扫描路径100%不会触发二次404",
+      "v0.2.6": "致命404修复 + LLM超时策略优化（完全对齐 EmbyBangumi声优本地化）：1._emby_get/_emby_post 只取 service.instance.user 作 UserId（GUID），不再误读 instance.user_id/UserId/config 等「用户名字段」——用户名当GUID传给Emby直接导致 GET /Items/{id} 404「找不到文件」2.响应body用resp.content.decode(utf-8,replace)避免乱码显示「æ±½é...」3.SDK httpx timeout read 60→120s，重试2次→1次，Timeout类异常立即break跳requests不硬等 4.requests timeout (10,60)→(10,120)，重试3次→2次（代理1次+裸连1次）",
+      "v0.2.5": "对齐 ifsherlock AI字幕生成(联动版) LLM 调用方式 + Emby 端点404修复：1.新增 openai SDK + httpx.Client 代理版主链路（同 autosubv3/openai_translate.py），指数退避重试 sleep=(2**attempt)+random.uniform(0.1,0.9) 2.保留 requests 原生 + Chrome 完整请求头作为兜底链路，前两次走 settings.PROXY 最后一次强制裸连 3.Emby _emby_get / _emby_post 统一补 service.instance.user UserId 参数（原漏传导致 GET /Items/{id} 返回 404）4.直接走整条 /Items/{id} POST 再兜底二次剥离 MediaType/ProviderIds/Path 等30+字段写回，不再走不存在的 /Items/{id}/People 专用端点 5.抽离 _get_proxy_for_llm 统一处理 dict/list/str 三种 PROXY 格式 6._build_llm_client 在 init_plugin 时懒构建并打初始化日志，LLM 配置变更时懒重建",
+      "v0.2.4": "LLM无响应彻底修复 + 插件独立图标：1.完全放弃RequestUtils封装，直接用原生requests.post（100%可控），timeout=(10,45)连接读取分离+verify=False避免证书问题+allow_redirects允许30X跳转 2.完整Chrome 127请求头（User-Agent/Accept/Accept-Language/Accept-Encoding/Origin/Referer/Cache-Control/Pragma/sec-ch-ua/Sec-Fetch-*），彻底避免siliconflow等LLM网关403/空响应 3.重试3次，前2次优先走settings.PROXY，最后1次强制裸连，所有异常分类打确定性日志（ProxyError/ConnectTimeout/ReadTimeout/ConnectionError），不再一律写“无响应” 4.屏蔽urllib3 InsecureRequestWarning避免日志污染 5.新增zhconv繁简直接转换+缓存，纯中文人名不再走LLM 6.插件详情页品牌头+彩色统计卡+翻译历史表+设置表单全部修复，VForm全部补prop属性保证配置能保存 7.插件图标换本地embypeoplelocalize.jpg，不再请求github的bangumi.jpg",
+      "v0.2.3": "前端UI重写+关键逻辑修复：重写get_page()暗色精致风详情页（品牌Hero头/4张彩色统计卡/最近翻译记录斑马纹表格/底部设置VCard），所有VForm组件补齐prop确保配置保存；finally块保存缓存防异常丢数据；LLM超时15s+2次重试；移除7个只读字段避免Emby 400；重新注册TransferComplete和MetadataScrape事件",
+      "v0.1.0": "初始版本：1.复用embybgmactorlocalize的Emby扫库/选库/People筛选逻辑（Actor/VoiceActor+Role含配音/voice，可选导演/编剧/制作人/全类型）2.支持自定义大模型提示词（{title_json}/{year_json}/{terms_json} 占位符，用户提供的影视专家JSON API风格）3.三级翻译调用：MP内置LLM/Agent Chain自动探测 → 兜底OpenAI兼容HTTP（settings.LLM_BASE_URL+LLM_API_KEY+LLM_MODEL）4.翻译缓存（name_cache）避免重复调用，已处理条目缓存（processed）5.批量翻译（max_people_per_batch默认10人一批），批间可配置delay避免限流6.支持onlyonce立即运行/cron定时/命令行/people_localize命令/TransferComplete MetadataScrape事件7.不覆盖已有中文名（可配置overwrite_chinese开关）"
+    },
+    "v2": true
   }
 }
