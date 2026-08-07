@@ -68,7 +68,7 @@
     "description": "利用大模型把Emby里英文/罗马音/日文人名翻译为正式中文名并写回（可选库/全库）。VPage详情页：统计卡+按库折叠面板+数据/设置双Tab切换，无需多点击即可进入设置。支持繁简直接转换省LLM、三阶段按库处理架构、定时/入库/刮削自动翻译、通知汇总。",
     "labels": "Emby,LLM,翻译,人名本地化,声优,演职人员",
     "version": "0.3.1",
-    "icon": "embypeoplelocalize_icon.jpg",
+    "icon": "embypeoplelocalize.jpg",
     "author": "LXT-A-X",
     "level": 1,
     "history": {
