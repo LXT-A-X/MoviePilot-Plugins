@@ -25,14 +25,10 @@ class LLMClient:
         self._init_client()
 
     def _init_client(self):
-        """初始化 openai SDK 客户端（带代理支持）"""
         try:
             import openai
             import httpx
-
-            # 解析代理
             proxies = self._parse_proxy()
-
             http_client = None
             if proxies:
                 http_client = httpx.Client(
@@ -40,7 +36,6 @@ class LLMClient:
                     timeout=self.timeout,
                     verify=False
                 )
-
             self._client = openai.OpenAI(
                 base_url=self.base_url,
                 api_key=self.api_key,
@@ -54,7 +49,6 @@ class LLMClient:
             self._use_sdk = False
 
     def _parse_proxy(self) -> Optional[dict]:
-        """解析 settings.PROXY 为 httpx/openai 通用格式"""
         try:
             raw = getattr(settings, 'PROXY', None)
             if not raw:
@@ -77,27 +71,15 @@ class LLMClient:
             pass
         return None
 
-    # ─────────────────────────────────────
-    # 核心翻译方法
-    # ─────────────────────────────────────
     def translate_terms(self, title: str, year: Any, terms: List[str]) -> Dict[str, str]:
-        """
-        翻译一批词条
-        返回 {原文: 译文} 字典
-        """
         if not terms:
             return {}
-
         prompt = self._build_prompt(title, year, terms)
-
-        # 优先 SDK
         if self._use_sdk and self._client:
             return self._call_sdk(prompt)
-        # 降级 requests
         return self._call_requests(prompt)
 
     def _build_prompt(self, title: str, year: Any, terms: List[str]) -> str:
-        """构建提示词"""
         template = self.prompt_template or self._default_prompt()
         prompt = template
         prompt = prompt.replace("{title_json}", json.dumps(title, ensure_ascii=False))
@@ -112,7 +94,6 @@ class LLMClient:
 只输出 JSON，不要 markdown。"""
 
     def _call_sdk(self, prompt: str) -> Dict[str, str]:
-        """通过 openai SDK 调用"""
         try:
             resp = self._client.chat.completions.create(
                 model=self.model,
@@ -130,7 +111,6 @@ class LLMClient:
             return {}
 
     def _call_requests(self, prompt: str) -> Dict[str, str]:
-        """通过纯 requests 调用"""
         import requests
         try:
             url = f"{self.base_url}/chat/completions"
@@ -163,24 +143,19 @@ class LLMClient:
             return {}
 
     def _parse_json_response(self, text: str) -> Dict[str, str]:
-        """从 LLM 响应中解析 JSON"""
-        # 去掉可能的 markdown 包裹
         text = text.strip()
         if text.startswith("```"):
-            # 去掉 ```json 和 ```
             lines = text.split("\n")
             if lines[0].startswith("```"):
                 lines = lines[1:]
             if lines and lines[-1].startswith("```"):
                 lines = lines[:-1]
             text = "\n".join(lines).strip()
-
         try:
             data = json.loads(text)
             if isinstance(data, dict):
                 return {str(k): str(v) for k, v in data.items() if v}
         except json.JSONDecodeError:
-            # 尝试提取第一个 JSON 对象
             import re
             match = re.search(r'\{[^{}]*\}', text)
             if match:
