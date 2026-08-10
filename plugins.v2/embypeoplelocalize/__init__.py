@@ -1,7 +1,8 @@
 """
-EmbyPeopleLocalize - Emby 演职人员中文化 v0.8.0
+EmbyPeopleLocalize - Emby 演职人员中文化 v0.8.1
 利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回
 支持多服务器分库、入库/Webhook触发、Cast 锁定防覆盖、繁简直转省 LLM
+v0.8.1: 修复搜索筛选和重译按钮、搜索关键词可持久化配置
 v0.8.0: 移除定时扫描、新增重新翻译功能、历史搜索筛选、通知始终发送
 v0.7.0: Webhook 入库自动翻译、缓存持久化到 config/plugins/
 """
@@ -82,7 +83,7 @@ class EmbyPeopleLocalize(_PluginBase):
     plugin_name = "Emby 演职人员中文化"
     plugin_desc = "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回（可选库/全库）"
     plugin_icon = "embypeoplelocalize.jpg"
-    plugin_version = "0.8.0"
+    plugin_version = "0.8.1"
     plugin_author = "LXT-A-X"
     plugin_config_prefix = "embypeoplelocalize_"
     plugin_order = 27
@@ -250,8 +251,11 @@ class EmbyPeopleLocalize(_PluginBase):
             {"path": "/back_to_page",   "endpoint": self._api_back_to_page,  "methods": ["GET"],       "auth": None, "summary": "返回数据页"},
             {"path": "/save_config",    "endpoint": self._api_save_config,   "methods": ["POST"],      "auth": None, "summary": "保存配置"},
             {"path": "/refresh_llm",    "endpoint": self._api_refresh_llm,   "methods": ["POST"],      "auth": None, "summary": "刷新LLM配置"},
-            {"path": "/retranslate", "endpoint": self._api_retranslate, "methods": ["POST"], "auth": None, "summary": "重新翻译历史条目"},
+            {"path": "/retranslate", "endpoint": self._api_retranslate, "methods": ["GET", "POST"], "auth": None, "summary": "重新翻译历史条目"},
+            {"path": "/apply_search", "endpoint": self._api_apply_search, "methods": ["GET", "POST"], "auth": None, "summary": "应用搜索筛选"},
+            {"path": "/clear_search", "endpoint": self._api_clear_search, "methods": ["GET", "POST"], "auth": None, "summary": "清除搜索筛选"},
             {"path": "/search_history", "endpoint": self._api_search_history, "methods": ["GET", "POST"], "auth": None, "summary": "搜索翻译历史"},
+            {"path": "/set_search", "endpoint": self._api_set_search, "methods": ["GET", "POST"], "auth": None, "summary": "设置搜索关键词"},
         ]
 
     # ============================================================
@@ -522,6 +526,7 @@ class EmbyPeopleLocalize(_PluginBase):
         self._llm_timeout = int(config.get("llm_timeout", 120) or 120)
         self._webhook_delay = int(config.get("webhook_delay", 60) or 60)
         self._notify_on_complete = bool(config.get("notify_on_complete", False))
+        self._history_search = str(config.get("history_search_keyword", "") or "")
 
     def _dump_config(self) -> dict:
         # 如果开启「全部翻译」，强制将所有翻译类型保存为 True
@@ -558,15 +563,145 @@ class EmbyPeopleLocalize(_PluginBase):
             "llm_timeout": self._llm_timeout,
             "webhook_delay": self._webhook_delay,
             "notify_on_complete": self._notify_on_complete,
+            "history_search_keyword": self._history_search or "",
         }
 
+
+
+    def _api_set_search(self, **kwargs):
+        """设置搜索关键词 - 支持多种参数格式"""
+        try:
+            keyword = ""
+            # update:modelValue 事件可能传递 value 参数
+            if "value" in kwargs:
+                keyword = str(kwargs["value"] or "")
+            elif "keyword" in kwargs:
+                keyword = str(kwargs["keyword"] or "")
+            elif "q" in kwargs:
+                keyword = str(kwargs["q"] or "")
+            elif kwargs.get("data"):
+                data = kwargs["data"]
+                if isinstance(data, dict):
+                    keyword = str(data.get("keyword", "") or data.get("value", "") or "")
+                elif isinstance(data, str):
+                    keyword = data
+                else:
+                    keyword = str(data or "")
+            elif kwargs.get("form"):
+                form = kwargs["form"]
+                if isinstance(form, dict):
+                    keyword = str(form.get("keyword", "") or form.get("value", "") or "")
+            
+            keyword = keyword.strip()
+            self._history_search = keyword
+            
+            if keyword:
+                kw = keyword.lower()
+                filtered = [h for h in self._history if
+                    kw in str(h.get("title", "")).lower() or
+                    kw in str(h.get("library", "")).lower() or
+                    kw in str(h.get("year", "")).lower() or
+                    kw in str(h.get("item_id", "")).lower()
+                ]
+                return {
+                    "success": True,
+                    "message": f"搜索完成: 找到 {len(filtered)} 条匹配记录",
+                    "data": {"keyword": keyword, "count": len(filtered)}
+                }
+            else:
+                return {
+                    "success": True,
+                    "message": f"显示全部 {len(self._history)} 条历史记录",
+                    "data": {"keyword": "", "count": len(self._history)}
+                }
+        except Exception as e:
+            logger.error(f"搜索历史失败: {e}")
+            return {"success": False, "message": str(e)}
+
+    def _api_apply_search(self, **kwargs):
+        """应用搜索筛选 - 从 VTextField 的 change 事件获取值或使用配置中的关键词"""
+        try:
+            keyword = ""
+            if "value" in kwargs:
+                keyword = str(kwargs["value"] or "")
+            elif "keyword" in kwargs:
+                keyword = str(kwargs["keyword"] or "")
+            elif kwargs.get("data"):
+                data = kwargs["data"]
+                if isinstance(data, dict):
+                    keyword = str(data.get("keyword", "") or data.get("value", "") or "")
+                elif isinstance(data, str):
+                    keyword = data
+                else:
+                    keyword = str(data or "")
+            
+            keyword = keyword.strip()
+            self._history_search = keyword
+            
+            # 同步到配置
+            config = self._dump_config()
+            config["history_search_keyword"] = keyword
+            self.update_config(config)
+            
+            if keyword:
+                kw = keyword.lower()
+                count = sum(1 for h in self._history if
+                    kw in str(h.get("title", "")).lower() or
+                    kw in str(h.get("library", "")).lower() or
+                    kw in str(h.get("year", "")).lower() or
+                    kw in str(h.get("item_id", "")).lower()
+                )
+                return {
+                    "success": True,
+                    "message": f"筛选完成: 找到 {count} 条匹配",
+                    "data": {"keyword": keyword, "count": count}
+                }
+            else:
+                return {
+                    "success": True,
+                    "message": f"显示全部 {len(self._history)} 条历史记录",
+                    "data": {"keyword": "", "count": len(self._history)}
+                }
+        except Exception as e:
+            logger.error(f"应用搜索筛选失败: {e}")
+            return {"success": False, "message": str(e)}
+
+    def _api_clear_search(self, **kwargs):
+        """清除搜索筛选"""
+        try:
+            self._history_search = ""
+            config = self._dump_config()
+            config["history_search_keyword"] = ""
+            self.update_config(config)
+            return {
+                "success": True,
+                "message": f"已清除筛选，显示全部 {len(self._history)} 条历史记录",
+                "data": {"keyword": "", "count": len(self._history)}
+            }
+        except Exception as e:
+            logger.error(f"清除筛选失败: {e}")
+            return {"success": False, "message": str(e)}
 
     def _api_retranslate(self, **kwargs):
         """重新翻译指定条目"""
         try:
-            data = kwargs.get("data") or kwargs.get("form") or kwargs
-            item_id = data.get("item_id") or data.get("itemId") or ""
-            if not item_id:
+            item_id = ""
+            if "item_id" in kwargs:
+                item_id = str(kwargs["item_id"])
+            elif kwargs.get("data"):
+                data = kwargs["data"]
+                if isinstance(data, dict):
+                    item_id = str(data.get("item_id", ""))
+                else:
+                    item_id = str(data)
+            elif kwargs.get("form"):
+                form = kwargs["form"]
+                if isinstance(form, dict):
+                    item_id = str(form.get("item_id", ""))
+            elif kwargs.get("itemId"):
+                item_id = str(kwargs["itemId"])
+            
+            if not item_id or item_id == "None":
                 return {"success": False, "message": "缺少 item_id 参数"}
             
             # 从历史记录中查找条目信息
@@ -627,19 +762,35 @@ class EmbyPeopleLocalize(_PluginBase):
             return {"success": False, "message": str(e)}
 
     def _api_search_history(self, **kwargs):
-        """搜索翻译历史"""
+        """搜索翻译历史 - 存储关键词并过滤"""
         try:
-            data = kwargs.get("data") or kwargs.get("form") or kwargs
-            keyword = (data.get("keyword") or data.get("search") or data.get("q") or "").strip().lower()
-            limit = int(data.get("limit", 50) or 50)
+            keyword = ""
+            if "keyword" in kwargs:
+                keyword = str(kwargs["keyword"])
+            elif "q" in kwargs:
+                keyword = str(kwargs["q"])
+            elif kwargs.get("data"):
+                data = kwargs["data"]
+                if isinstance(data, dict):
+                    keyword = str(data.get("keyword", "") or data.get("q", ""))
+                else:
+                    keyword = str(data)
+            elif kwargs.get("form"):
+                form = kwargs["form"]
+                if isinstance(form, dict):
+                    keyword = str(form.get("keyword", "") or form.get("q", ""))
             
-            history = self._history
+            keyword = keyword.strip()
+            self._history_search = keyword
+            
+            history = list(self._history)
             if keyword:
-                history = [h for h in history if 
-                    keyword in str(h.get("title", "")).lower() or
-                    keyword in str(h.get("library", "")).lower() or
-                    keyword in str(h.get("year", "")).lower() or
-                    keyword in str(h.get("item_id", "")).lower()
+                kw = keyword.lower()
+                history = [h for h in history if
+                    kw in str(h.get("title", "")).lower() or
+                    kw in str(h.get("library", "")).lower() or
+                    kw in str(h.get("year", "")).lower() or
+                    kw in str(h.get("item_id", "")).lower()
                 ]
             
             # 返回最近的 limit 条
@@ -1196,12 +1347,15 @@ class EmbyPeopleLocalize(_PluginBase):
     @eventmanager.register(EventType.WebhookMessage)
     def handle_webhook(self, event: Event):
         """监听 Emby Webhook 入库事件，延迟后自动翻译单条目"""
+        logger.info(f"[Webhook] 收到 Webhook 事件: event_type={event.event_type}, source={event.source}, raw_data={event.event_data}")
         data = event.event_data or {}
         if "emby" not in str(data.get("source", "")).lower():
+            logger.info(f"[Webhook] 来源不匹配（非 Emby），跳过: source={data.get('source')}")
             return
         nt = str(data.get("NotificationType", "")).lower()
         et = str(data.get("Type", "")).lower()
         if not any(k in nt or k in et for k in ["itemadded", "item.added", "library.new", "added"]):
+            logger.info(f"[Webhook] 事件类型不匹配，跳过: NotificationType={nt}, Type={et}")
             return
         item_id = data.get("ItemId") or data.get("item_id") or data.get("Id") or ""
         server_id = data.get("ServerId") or data.get("server_id") or ""
@@ -1209,6 +1363,14 @@ class EmbyPeopleLocalize(_PluginBase):
             logger.info("[Webhook] 收到入库事件但无 ItemId，跳过")
             return
         logger.info(f"[Webhook] 收到入库事件: ItemId={item_id}, ServerId={server_id}")
+        try:
+            self.post_message(
+                mtype=NotificationType.Manual,
+                title=self.plugin_name,
+                text=f"收到 Emby 入库事件: ItemId={item_id}，{delay}秒后开始翻译"
+            )
+        except Exception:
+            pass
         delay = getattr(self, '_webhook_delay', 60)
         threading.Thread(
             target=self._delayed_scan_item,

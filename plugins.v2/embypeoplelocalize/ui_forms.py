@@ -636,18 +636,18 @@ def build_page(plugin) -> List[dict]:
         ],
     }
 
-    # ── 历史记录列表（支持搜索筛选）──
-    search_keyword = getattr(plugin, "_history_search", "") or ""
+    # ── 历史记录列表（搜索由后端处理，关键词存储在 plugin._history_search）──
+    search_kw = getattr(plugin, "_history_search", "") or ""
     filtered_history = history
-    if search_keyword:
-        kw = search_keyword.lower()
+    if search_kw:
+        kw = search_kw.lower()
         filtered_history = [h for h in history if
             kw in str(h.get("title", "")).lower() or
             kw in str(h.get("library", "")).lower() or
             kw in str(h.get("year", "")).lower() or
             kw in str(h.get("item_id", "")).lower()
         ]
-    history_list = _build_history_list(filtered_history, search_keyword=search_keyword)
+    history_list = _build_history_list(filtered_history, plugin=plugin, search_keyword=search_kw)
 
     # ── 整体外框 ──
     page_wrapper = {
@@ -673,7 +673,7 @@ def build_page(plugin) -> List[dict]:
     ]
 
 
-def _build_history_list(history, search_keyword=""):
+def _build_history_list(history, plugin=None, search_keyword=""):
     """历史记录卡片列表"""
     if not history:
         return {
@@ -800,7 +800,7 @@ def _build_history_list(history, search_keyword=""):
                                         "prepend_icon": "mdi-translate",
                                     },
                                     "text": "重译",
-                                    "events": {"click": {"api": f"plugin/EmbyPeopleLocalize/retranslate", "method": "POST", "data": {"item_id": h.get("item_id", "")}}},
+                                    "events": {"click": {"api": f"plugin/EmbyPeopleLocalize/retranslate?item_id={h.get('item_id', '')}", "method": "GET"}},
                                 }
                             ],
                         },
@@ -827,7 +827,7 @@ def _build_history_list(history, search_keyword=""):
                     "class": "text-subtitle-1 font-weight-bold py-3 px-4 text-high-emphasis",
                     "style": {"letterSpacing": "0.02em"},
                 },
-                "text": "最近翻译历史",
+                "text": "最近翻译历史" + (f"  (筛选: {kw})" if (kw := getattr(plugin, "_history_search", "")) else ""),
             },
             {"component": "VDivider", "props": {"style": {"opacity": 0.4}}},
             {
@@ -835,20 +835,49 @@ def _build_history_list(history, search_keyword=""):
                 "props": {"class": "px-4 py-2"},
                 "content": [
                     {
-                        "component": "VTextField",
-                        "props": {
-                            "model": "_history_search",
-                            "label": "搜索历史",
-                            "placeholder": "按作品名、年份、库名搜索...",
-                            "density": "compact",
-                            "variant": "outlined",
-                            "prepend_inner_icon": "mdi-magnify",
-                            "class": "mb-0",
-                            "style": {
-                                "--v-field-border-opacity": "0.65",
-                                "--v-field-border-width": "1px",
+                        "component": "VRow",
+                        "props": {"dense": True, "align": "center"},
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 10},
+                                "content": [{
+                                    "component": "VTextField",
+                                    "props": {
+                                        "model": "history_search_keyword",
+                                        "label": "搜索历史",
+                                        "placeholder": "输入关键词后点「应用」或按 Enter",
+                                        "density": "compact",
+                                        "variant": "outlined",
+                                        "prepend_inner_icon": "mdi-magnify",
+                                        "clearable": True,
+                                        "class": "mb-0",
+                                    },
+                                    "events": {
+                                        "change": {
+                                            "api": "plugin/EmbyPeopleLocalize/apply_search",
+                                            "method": "POST"
+                                        }
+                                    }
+                                }]
                             },
-                        },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 2, "class": "text-right"},
+                                "content": [{
+                                    "component": "VBtn",
+                                    "props": {
+                                        "color": "info",
+                                        "variant": "text",
+                                        "size": "small",
+                                        "density": "compact",
+                                        "class": "text-none",
+                                    },
+                                    "text": "应用",
+                                    "events": {"click": {"api": "plugin/EmbyPeopleLocalize/apply_search", "method": "POST"}},
+                                }]
+                            },
+                        ]
                     },
                 ],
             },
@@ -1050,7 +1079,9 @@ def build_form(lib_options, plugin, invalid_libraries=None):
             _col(12, [_switch("lock_cast", "扫描时自动锁定 Cast",
                               "开启后，每次翻译写回都会自动把 Cast 加入 LockedFields，防止后续刮削覆盖中文译名")]),
         ]),
-
+        _row([
+            _col(12, [_text_field("history_search_keyword", "历史搜索关键词", "", "设置后数据页的翻译历史将自动筛选（支持作品名/年份/库名关键词）")]),
+        ]),
     ]
     card_advanced = _section("高级设置", C_WARNING, advanced_rows)
 
@@ -1087,6 +1118,7 @@ def build_form(lib_options, plugin, invalid_libraries=None):
         "run_clear_cache": False,
         "webhook_delay": 60,
         "notify_on_complete": False,
+        "history_search_keyword": "",
     }
 
     return form, default_config
