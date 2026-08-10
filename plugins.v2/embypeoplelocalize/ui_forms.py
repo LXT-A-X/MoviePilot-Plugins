@@ -875,7 +875,7 @@ def build_form(lib_options, plugin, invalid_libraries=None):
         basic_rows.append(
             _row([
                 _col(12, [_alert(
-                    f"已自动移除失效的媒体库配置：{', '.join(invalid_libraries)}。"
+                    f"已自动移除失效的媒体库配置：{', '.join(invalid_libraries)}"。"
                     "它们通常来自历史版本残留或服务器地址变更。"
                 )]),
             ])
