@@ -1,103 +1,94 @@
 """
-EmbyPeopleLocalize - Emby 演职人员中文化
-利用大模型（HTTP直连）把 Emby 中英文/罗马音/日文人名翻译为正式中文名并写回。
-用户选择媒体库则只扫描选中的，未选择则扫描全部（所有服务器所有库）。
-支持扫描电影、剧集，自带人名缓存和条目级缓存。
-三阶段按库处理架构：收集 → 翻译 → 写入。
+EmbyPeopleLocalize - Emby 演职人员中文化 v0.7.0
+利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回
+支持多服务器分库、定时/入库/刮削触发、Cast 锁定防覆盖、繁简直转省 LLM
+v0.7.0: Webhook 入库自动翻译、缓存持久化到 config/plugins/
 """
 import json
 import os
 import re
 import threading
 import time
-from datetime import datetime, timedelta
+import traceback
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
-import pytz
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.cron import CronTrigger
-
-import requests as _requests
-import random
-
+# ========== openai SDK + httpx 代理初始化 ==========
 try:
-    import openai as _openai_mod  # noqa: F401
-    import httpx as _httpx_mod  # noqa: F401
+    import openai as _openai_mod
+    import httpx as _httpx_mod
     _HAS_OPENAI_SDK = True
 except Exception:
     _HAS_OPENAI_SDK = False
     _openai_mod = None
     _httpx_mod = None
 
+# 屏蔽 InsecureRequestWarning
 try:
-    from urllib3 import disable_warnings as _urllib3_disable_warnings
-    from urllib3.exceptions import InsecureRequestWarning as _InsecureRequestWarning
-    _urllib3_disable_warnings(_InsecureRequestWarning)
+    from urllib3 import disable_warnings
+    from urllib3.exceptions import InsecureRequestWarning
+    disable_warnings(InsecureRequestWarning)
 except Exception:
     try:
-        import warnings as _warnings
-        import urllib3 as _urllib3
-        _warnings.filterwarnings("ignore", category=_urllib3.exceptions.InsecureRequestWarning)
+        import warnings, urllib3
+        warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWarning)
     except Exception:
         pass
 
 from app.core.config import settings
 from app.core.event import eventmanager, Event
-from app.chain.mediaserver import MediaServerChain
 from app.helper.mediaserver import MediaServerHelper
 from app.log import logger
 from app.plugins import _PluginBase
-from app.schemas import ServiceInfo
-from app.schemas.types import EventType, NotificationType
-from app.utils.http import RequestUtils
-from app.utils.string import StringUtils
+from app.schemas import ServiceInfo, NotificationType
+from app.schemas.types import EventType
 
+# 简繁转换
 try:
     import zhconv
     HAS_ZHCONV = True
 except ImportError:
     HAS_ZHCONV = False
 
-DEFAULT_PROMPT = """你是一位世界级的影视专家，扮演一个只返回 JSON 的 API。
-你的任务是利用提供的影视上下文，准确地将外语或拼音的演员名和角色名翻译成 **简体中文**。
-**输入格式：**
-你将收到一个包含 `context`（含 `title` 和 `year`）和 `terms`（待翻译字符串列表）的 JSON 对象。
-**你的策略：**
-1. **利用上下文：** 使用 `title` 和 `year` 来确定具体的剧集/电影。在该特定作品的背景下，找到 `terms` 的官方或最受认可的中文译名。
-2. **翻译拼音/英文/日文：** 将非中文的读音翻译成汉字。
-3. **【核心指令】目标语言永远是简体中文。**
-4. **兜底：** 如果无法翻译，使用原始字符串。
-**输出格式（强制）：**
-你 **必须** 返回一个有效的 JSON 对象，将每个原始词条映射到其中文翻译。严禁包含其他文本或 markdown 标记。
-【本次实际输入】
-context:
-{{
-  "title": {title_json},
-  "year": {year_json}
-}}
-terms: {terms_json}
-"""
+# 本地模块
+from .ui_forms import build_form, build_page
+from .emby_client import EmbyClient
+from .llm_client import LLMClient
+from .translator import PeopleTranslator
+from . import constants
 
-_EMBY_STRIP_FIELDS = frozenset([
-    "Id", "Key", "Guid", "ExternalUrls", "MediaStreams", "MediaSources",
-    "PlaylistItemId", "PlaylistIndex", "PlaylistLength", "LockedFields",
-    "ImageTags", "BackdropImageTags", "ScreenshotImageTags", "ParentId",
-    "Type", "MediaType", "People",
-    "Path", "OriginalTitle", "PremiereDate", "CriticRating",
-    "CommunityRating", "RunTimeTicks", "PlayAccess", "ProductionYear",
-])
+# ========== 默认提示词 ==========
+DEFAULT_PROMPT = """你是一位世界级的影视专家，扮演一个只返回 JSON 的 API。
+任务：将外语/拼音/日文演员名和角色名翻译成简体中文。
+
+输入格式：
+context: {"title": 作品名, "year": 年份}
+terms: 待翻译字符串列表
+
+策略：
+1. 利用 title + year 确定具体作品，找官方/最公认的中文译名
+2. 拼音/英文/日文 → 汉字
+3. 目标语言永远是简体中文
+4. 无法翻译则保留原文
+
+输出格式（强制 JSON，禁止 markdown）：
+{"原文1": "译文1", "原文2": "译文2"}
+"""
 
 
 class EmbyPeopleLocalize(_PluginBase):
     plugin_name = "Emby 演职人员中文化"
-    plugin_desc = "利用大模型把Emby里英文/罗马音/日文人名翻译为正式中文名并写回（可选库/全库）"
-    plugin_icon = "embypeoplelocalize_icon.jpg"
-    plugin_version = "0.3.1"
-    plugin_author = "LXT-A-X"
+    plugin_desc = "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回（可选库/全库）"
+    plugin_icon = "translate.png"
+    plugin_version = "0.7.0"
+    plugin_author = "local"
     plugin_config_prefix = "embypeoplelocalize_"
     plugin_order = 27
     auth_level = 1
+    v2 = True
 
+    # ────────── 配置项 ──────────
     _enabled: bool = False
     _onlyonce: bool = False
     _cron: str = "0 4 * * *"
@@ -109,1242 +100,1108 @@ class EmbyPeopleLocalize(_PluginBase):
     _translate_writer: bool = False
     _translate_producer: bool = False
     _translate_all: bool = False
-    _max_people_per_title: int = 15
+    _translate_role: bool = True
+    _max_people_per_title: int = 10
     _max_people_per_batch: int = 5
     _overwrite_chinese: bool = False
     _force_refresh: bool = False
     _delay: int = 2
+    _lock_cast: bool = False
+    _webhook_delay: int = 60
 
-    _scheduler = None
+    _run_scan: bool = False
+    _run_lock_cast: bool = False
+    _run_clear_cache: bool = False
+
+    _llm_base_url: str = ""
+    _llm_api_key: str = ""
+    _llm_model: str = ""
+    _llm_timeout: int = 120
+
     _ms_helper: Optional[MediaServerHelper] = None
-    _event = threading.Event()
-    _rt_lock = threading.Lock()
-    _rt_recent_keys: Dict[str, float] = {}
+    _emby: Optional[EmbyClient] = None
+    _llm: Optional[LLMClient] = None
+    _translator: Optional[PeopleTranslator] = None
+    _stop_requested: bool = False
     _name_cache: Dict[str, Dict[str, str]] = {}
+    _role_cache: Dict[str, Dict[str, str]] = {}
     _processed: Dict[str, str] = {}
     _history: List[Dict[str, Any]] = []
     _MAX_HISTORY = 200
-    _SAVE_INTERVAL = 50
-    _RT_WINDOW = 300
+    _SAVE_INTERVAL = 10
+    _is_running: bool = False
+    _is_paused: bool = False
+    _last_run_time: Optional[float] = None
+    _state_lock = threading.Lock()
 
-    _llm_client = None
-    _llm_model: str = ""
-    _llm_last_error: str = ""
+    _progress_total: int = 0
+    _progress_done: int = 0
+    _progress_current_title: str = ""
+    _progress_current_library: str = ""
+    _progress_servers_done: int = 0
+    _progress_servers_total: int = 0
 
-    _LLM_HEADERS = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Origin": "https://api.siliconflow.cn",
-        "Referer": "https://api.siliconflow.cn/",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
-        "sec-ch-ua": '"Chromium";v="127", "Not)A;Brand";v="99", "Google Chrome";v="127"',
-        "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": '"Windows"',
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "same-site",
-    }
+    _cache_hits: int = 0
+    _cache_misses: int = 0
+
+    _notify_on_complete: bool = False
+
+    _state_file: str = ""
 
     @property
     def private_attrs(self) -> List[str]:
-        return []
+        return [
+            "_enabled", "_onlyonce", "_cron", "_libraries", "_prompt_template",
+            "_translate_actor", "_translate_voice_actor", "_translate_director",
+            "_translate_writer", "_translate_producer", "_translate_all", "_translate_role",
+            "_max_people_per_title", "_max_people_per_batch", "_overwrite_chinese",
+            "_force_refresh", "_delay", "_lock_cast", "_webhook_delay",
+            "_run_scan", "_run_lock_cast", "_run_clear_cache",
+            "_llm_base_url", "_llm_api_key", "_llm_model", "_llm_timeout",
+            "_is_running", "_is_paused", "_last_run_time",
+            "_name_cache", "_role_cache", "_processed", "_history",
+            "_progress_total", "_progress_done", "_progress_current_title",
+            "_progress_current_library", "_progress_servers_done", "_progress_servers_total",
+            "_cache_hits", "_cache_misses", "_notify_on_complete",
+        ]
 
-    def _get_proxy_for_llm(self) -> Optional[Dict[str, str]]:
-        proxies: Optional[Dict[str, str]] = None
+    def _get_state_file(self) -> str:
+        if not self._state_file:
+            cache_dir = os.path.join("config", "plugins", "embypeoplelocalize")
+            os.makedirs(cache_dir, exist_ok=True)
+            self._state_file = os.path.join(cache_dir, "state.json")
+        return self._state_file
+
+    def _save_state(self):
         try:
-            raw_proxy = getattr(settings, 'PROXY', None)
-            if not raw_proxy:
-                return None
-            if isinstance(raw_proxy, dict):
-                http_proxy = str(raw_proxy.get("http") or raw_proxy.get("https") or "").strip()
-                https_proxy = str(raw_proxy.get("https") or raw_proxy.get("http") or "").strip()
-                if http_proxy or https_proxy:
-                    proxies = {}
-                    if http_proxy:
-                        proxies["http"] = http_proxy
-                    if https_proxy:
-                        proxies["https"] = https_proxy
-            elif isinstance(raw_proxy, (list, tuple)):
-                for item in raw_proxy:
-                    s = str(item or "").strip()
-                    if s and s.lower().startswith(("http://", "https://", "socks5://")):
-                        proxies = {"http": s, "https": s}
-                        break
-            else:
-                s = str(raw_proxy).strip()
-                if s and s.lower().startswith(("http://", "https://", "socks5://")):
-                    proxies = {"http": s, "https": s}
-        except Exception as e:
-            logger.debug(f"解析 settings.PROXY 失败，忽略: {e}")
-            return None
-        return proxies
-
-    def _build_llm_client(self):
-        base_url = str(getattr(settings, 'LLM_BASE_URL', '') or '').rstrip('/')
-        api_key = str(getattr(settings, 'LLM_API_KEY', '') or '')
-        model = str(getattr(settings, 'LLM_MODEL', '') or '')
-        if not base_url or not api_key:
-            self._llm_client = None
-            self._llm_model = model
-            return
-        if base_url.endswith("/v1"):
-            sdk_base = base_url[:-3].rstrip('/')
-            compatible = False
-        elif "/v1" in base_url:
-            sdk_base = base_url
-            compatible = True
-        else:
-            sdk_base = base_url
-            compatible = False
-        proxy_cfg = self._get_proxy_for_llm()
-        try:
-            if _HAS_OPENAI_SDK:
-                http_client = None
-                if _httpx_mod and proxy_cfg and proxy_cfg.get("https"):
-                    try:
-                        transport = _httpx_mod.HTTPTransport(retries=1)
-                        http_client = _httpx_mod.Client(
-                            proxies=proxy_cfg.get("https") or proxy_cfg.get("http"),
-                            timeout=_httpx_mod.Timeout(connect=10.0, read=60.0, write=15.0, pool=10.0),
-                            transport=transport,
-                            verify=False,
-                        )
-                    except Exception as e:
-                        logger.debug(f"构建 httpx 代理客户端失败，走默认: {e}")
-                        http_client = None
-                base_url_final = sdk_base if compatible else f"{sdk_base}/v1"
-                self._llm_client = _openai_mod.OpenAI(
-                    api_key=api_key,
-                    base_url=base_url_final,
-                    http_client=http_client,
-                    timeout=(10.0, 60.0),
-                    max_retries=0,
-                )
-                self._llm_model = model
-                self._llm_last_error = ""
-            else:
-                self._llm_client = None
-                self._llm_model = model
-        except Exception as e:
-            logger.warning(f"构建 openai SDK LLM 客户端失败，后续降级 requests: {e}")
-            self._llm_client = None
-            self._llm_model = model
-
-    @eventmanager.register(EventType.TransferComplete)
-    @eventmanager.register(EventType.MetadataScrape)
-    def _on_event(self, event: Event):
-        try:
-            if not self._enabled:
-                return
-            event_data = event.event_data or {}
-            item_info = (
-                event_data.get("iteminfo")
-                or event_data.get("meta_info")
-                or event_data.get("media_info")
-                or event_data.get("item_info")
-                or {}
-            )
-            if not isinstance(item_info, dict):
-                return
-            item_id = str(
-                item_info.get("item_id")
-                or item_info.get("id")
-                or item_info.get("Id")
-                or ""
-            )
-            if not item_id:
-                return
-            title = str(
-                item_info.get("title")
-                or item_info.get("name")
-                or item_info.get("Name")
-                or "未知作品"
-            )
-            server_name = str(
-                item_info.get("server_name")
-                or item_info.get("server")
-                or item_info.get("mediaserver")
-                or getattr(item_info.get("mediaserver") or "", "name", "")
-                or ""
-            )
-            library = str(
-                item_info.get("library")
-                or item_info.get("library_name")
-                or item_info.get("Library")
-                or ""
-            )
-            media_type = str(item_info.get("type") or item_info.get("mtype") or item_info.get("Type") or "")
-            if media_type and media_type.lower() not in ("movie", "series", "tv", "动漫电影", "番剧", ""):
-                return
-            key = f"{server_name}:{item_id}:rt"
-            if not self.__try_lock_rt_item(key, title):
-                return
-            threading.Thread(
-                target=self.__rt_worker,
-                args=(key, server_name, item_id, title, library),
-                daemon=True,
-            ).start()
-        except Exception as e:
-            logger.debug(f"事件响应失败（不影响主流程）: {e}")
-
-    def __try_lock_rt_item(self, key: str, title: str = "") -> bool:
-        now = time.time()
-        with self._rt_lock:
-            for k, ts in list(self._rt_recent_keys.items()):
-                if now - ts > self._RT_WINDOW:
-                    self._rt_recent_keys.pop(k, None)
-            if key in self._rt_recent_keys:
-                return False
-            self._rt_recent_keys[key] = now
-            return True
-
-    def __unlock_rt_item(self, key: str, completed: bool):
-        try:
-            with self._rt_lock:
-                if not completed:
-                    self._rt_recent_keys.pop(key, None)
-        except Exception:
-            pass
-
-    def __rt_worker(self, key: str, server_name: str, item_id: str, title: str, library_name: str):
-        completed = False
-        try:
-            time.sleep(min(int(self._delay or 2), 30))
-            if not self._enabled:
-                return
-            selected_libs = self._parse_selected_libraries()
-            if selected_libs:
-                hit = False
-                for srv, ids in selected_libs.items():
-                    if srv == server_name:
-                        if library_name or ids:
-                            hit = True
-                            break
-                if not hit and library_name:
-                    try:
-                        _srv, _lib_opts = self._get_server_lib_options()
-                        for lo in _lib_opts:
-                            v = str(lo.get("value") or "")
-                            t = str(lo.get("title") or "")
-                            for srv, ids in selected_libs.items():
-                                for lid in ids:
-                                    if v == f"{srv}:{lid}" and library_name in t:
-                                        hit = True
-                                        break
-                            if hit:
-                                break
-                    except Exception:
-                        pass
-                if not hit:
-                    logger.debug(f"实时跳过 {title}：库 '{library_name}' 未在选择列表中")
-                    return
-            services = self.service_infos()
-            service = None
-            if server_name and server_name in services:
-                service = services[server_name]
-            elif len(services) == 1:
-                service = next(iter(services.values()))
-            if not service:
-                logger.warning(f"实时处理 {title}: 找不到匹配的 Emby 服务器")
-                return
-            user_id = getattr(service.instance, 'user', None)
-            query_path = f"/Items/{item_id}?Fields=People,Genres,Tags,ProviderIds,OriginalTitle,PremiereDate,ProductionYear"
-            if user_id:
-                it = self._emby_get(service, f"/Users/{user_id}{query_path}")
-                if not it:
-                    it = self._emby_get(service, query_path)
-            else:
-                it = self._emby_get(service, query_path)
-            if not it or not isinstance(it, dict):
-                logger.warning(f"实时处理 {title}: 拿不到完整 item_data")
-                return
-            mtype_str = (it.get("Type") or "").lower()
-            media_type = "TV" if "series" in mtype_str or mtype_str == "tv" else "MOVIE"
-            n_trans = self._apply_translation_to_people_inner(
-                server_name, service, item_id, title,
-                str(it.get("OriginalTitle") or title),
-                str(it.get("ProductionYear") or (it.get("PremiereDate") or "")[:4]),
-                media_type, item_data=it,
-            )
-            if n_trans > 0:
-                self._add_history(f"{server_name}:{item_id}", title, server_name, library_name or "实时入库", n_trans, item_id)
-                self._save_cache()
-            completed = True
-        except Exception as e:
-            logger.error(f"实时处理 {title} 失败: {e}", exc_info=True)
-        finally:
-            self.__unlock_rt_item(key, completed)
-
-    def init_plugin(self, config: dict = None):
-        self.stop_service()
-        self._event.set()
-        if config:
-            self._enabled = bool(config.get("enabled", False))
-            self._onlyonce = bool(config.get("onlyonce", False))
-            self._cron = str(config.get("cron", "0 4 * * *"))
-            self._libraries = list(config.get("libraries", []) or [])
-            self._prompt_template = str(config.get("prompt_template") or DEFAULT_PROMPT)
-            self._translate_actor = bool(config.get("translate_actor", True))
-            self._translate_voice_actor = bool(config.get("translate_voice_actor", True))
-            self._translate_director = bool(config.get("translate_director", False))
-            self._translate_writer = bool(config.get("translate_writer", False))
-            self._translate_producer = bool(config.get("translate_producer", False))
-            self._translate_all = bool(config.get("translate_all", False))
-            self._max_people_per_title = int(config.get("max_people_per_title", 15))
-            self._max_people_per_batch = int(config.get("max_people_per_batch", 5))
-            self._overwrite_chinese = bool(config.get("overwrite_chinese", False))
-            self._force_refresh = bool(config.get("force_refresh", False))
-            self._delay = int(config.get("delay", 2))
-        if self._enabled:
-            self._ms_helper = MediaServerHelper()
-            self._build_llm_client()
-            logger.info(
-                f"{self.plugin_name}: LLM 模式={'openai SDK' if self._llm_client else 'requests 兜底'}"
-                + (f"，model={self._llm_model}" if self._llm_model else "")
-            )
-            data = self.get_data("cache") or {}
-            if self._force_refresh:
-                logger.info(f"{self.plugin_name}: 强制刷新，清空所有缓存")
-                self._name_cache = {}
-                self._processed = {}
-            else:
-                self._name_cache = data.get("name_cache", {}) or {}
-                self._processed = data.get("processed", {}) or {}
-            self._history = list(data.get("history", []) or [])[:self._MAX_HISTORY]
-            logger.info(
-                f"{self.plugin_name} v{self.plugin_version} 初始化成功 "
-                f"(缓存 {len(self._name_cache)} 条, 历史 {len(self._history)} 条)"
-            )
-        if self._onlyonce:
-            self._onlyonce = False
-            self._force_refresh = False
-            self.update_config({
-                "enabled": self._enabled,
-                "onlyonce": self._onlyonce,
-                "cron": self._cron,
-                "libraries": self._libraries,
-                "prompt_template": self._prompt_template,
-                "translate_actor": self._translate_actor,
-                "translate_voice_actor": self._translate_voice_actor,
-                "translate_director": self._translate_director,
-                "translate_writer": self._translate_writer,
-                "translate_producer": self._translate_producer,
-                "translate_all": self._translate_all,
-                "max_people_per_title": self._max_people_per_title,
-                "max_people_per_batch": self._max_people_per_batch,
-                "overwrite_chinese": self._overwrite_chinese,
-                "force_refresh": self._force_refresh,
-                "delay": self._delay,
-            })
-            if not self._scheduler:
-                self._scheduler = BackgroundScheduler(timezone=settings.TZ)
-                self._scheduler.add_job(
-                    func=self.sync_library,
-                    trigger="date",
-                    run_date=datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(seconds=3),
-                )
-                self._scheduler.start()
-            logger.info(f"{self.plugin_name}：立即运行一次")
-
-    def stop_service(self):
-        try:
-            self._event.set()
-            if self._scheduler:
-                self._scheduler.remove_all_jobs()
-                if self._scheduler.running:
-                    self._scheduler.shutdown(wait=False)
-                self._scheduler = None
-        except Exception as e:
-            logger.debug(f"停止服务时出错: {e}")
-
-    def _save_cache(self):
-        try:
-            self.save_data("cache", {
-                "name_cache": dict(self._name_cache or {}),
-                "processed": dict(self._processed or {}),
-                "history": list(self._history or [])[:self._MAX_HISTORY],
-            })
-        except Exception as e:
-            logger.warning(f"保存缓存失败（不影响继续运行）: {type(e).__name__}: {e}")
-
-    def _add_history(self, key: str, title: str, server: str, lib: str, n_trans: int, item_id: str = ""):
-        try:
-            if not key or n_trans <= 0:
-                return
-            now = datetime.now().isoformat(timespec='seconds')
-            new_item = {
-                "key": str(key or ""),
-                "title": str(title or "")[:120],
-                "server": str(server or "")[:60],
-                "lib": str(lib or "")[:60],
-                "n_trans": int(n_trans or 0),
-                "time": now,
-                "item_id": str(item_id or ""),
+            state = {
+                "version": self.plugin_version,
+                "name_cache": self._name_cache,
+                "role_cache": self._role_cache,
+                "processed": self._processed,
+                "history": self._history[-self._MAX_HISTORY:],
+                "last_run_time": self._last_run_time,
+                "cache_hits": self._cache_hits,
+                "cache_misses": self._cache_misses,
             }
-            new_hist = [h for h in (self._history or []) if str(h.get("key") or "") != str(key)]
-            new_hist.insert(0, new_item)
-            self._history = new_hist[:self._MAX_HISTORY]
+            state_file = self._get_state_file()
+            tmp_file = state_file + ".tmp"
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump(state, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_file, state_file)
         except Exception as e:
-            logger.warning(f"添加历史记录失败（不影响继续运行）: {type(e).__name__}: {e}")
+            logger.warning(f"保存状态失败: {e}")
+
+    def _load_state(self):
+        try:
+            state_file = self._get_state_file()
+            if not os.path.exists(state_file):
+                logger.info("无持久化状态文件，使用空状态")
+                return
+            with open(state_file, "r", encoding="utf-8") as f:
+                state = json.load(f)
+            self._name_cache = state.get("name_cache", {}) or {}
+            self._role_cache = state.get("role_cache", {}) or {}
+            self._processed = state.get("processed", {}) or {}
+            self._history = state.get("history", []) or []
+            self._last_run_time = state.get("last_run_time")
+            self._cache_hits = state.get("cache_hits", 0) or 0
+            self._cache_misses = state.get("cache_misses", 0) or 0
+            total_cache = sum(len(v) for v in self._name_cache.values()) + sum(len(v) for v in self._role_cache.values())
+            logger.info(f"加载持久化状态: {len(self._processed)} 条已处理, {len(self._history)} 条历史, {total_cache} 条缓存 (命中率 {self._cache_hits}/{self._cache_hits + self._cache_misses})")
+        except Exception as e:
+            logger.warning(f"加载状态失败: {e}")
+            self._name_cache = {}
+            self._role_cache = {}
+            self._processed = {}
+            self._history = []
+
+    def _auto_save(self):
+        if self._progress_done % self._SAVE_INTERVAL == 0:
+            self._save_state()
+
+    def get_api(self) -> List[dict]:
+        return [
+            {"path": "/clear_cache", "endpoint": self._api_clear_cache, "methods": ["GET"], "auth": None, "summary": "清空缓存"},
+            {"path": "/clear_and_rescan", "endpoint": self._api_clear_and_rescan, "methods": ["GET"], "auth": None, "summary": "清除缓存并重扫"},
+            {"path": "/scan", "endpoint": self._api_scan, "methods": ["GET", "POST"], "auth": None, "summary": "立即扫描"},
+            {"path": "/stop", "endpoint": self._api_stop, "methods": ["GET", "POST"], "auth": None, "summary": "停止扫描"},
+            {"path": "/status", "endpoint": self._api_status, "methods": ["GET", "POST"], "auth": None, "summary": "获取状态"},
+            {"path": "/lock_cast", "endpoint": self._api_lock_cast, "methods": ["POST"], "auth": None, "summary": "锁定已翻译条目的Cast"},
+            {"path": "/open_settings", "endpoint": self._api_open_settings, "methods": ["GET"], "auth": None, "summary": "打开设置页"},
+            {"path": "/back_to_page", "endpoint": self._api_back_to_page, "methods": ["GET"], "auth": None, "summary": "返回数据页"},
+            {"path": "/save_config", "endpoint": self._api_save_config, "methods": ["POST"], "auth": None, "summary": "保存配置"},
+            {"path": "/refresh_llm", "endpoint": self._api_refresh_llm, "methods": ["POST"], "auth": None, "summary": "刷新LLM配置"},
+        ]
+
+    def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
+        try:
+            lib_options = self._get_library_options()
+            valid_values = {opt["value"] for opt in lib_options}
+            invalid_libs = []
+            if valid_values:
+                original = list(self._libraries or [])
+                cleaned = [v for v in original if v in valid_values]
+                invalid_libs = [v for v in original if v not in valid_values]
+                if invalid_libs:
+                    logger.warning(f"清理失效的媒体库配置: {invalid_libs}")
+                    self._libraries = cleaned
+                    self.update_config(self._dump_config())
+
+            form, config = build_form(lib_options, self, invalid_libraries=invalid_libs)
+            current = self._dump_config()
+            config.update(current)
+            if not config.get("prompt_template"):
+                config["prompt_template"] = DEFAULT_PROMPT
+            return form, config
+        except Exception as e:
+            logger.error(f"构建配置表单失败: {e}\n{traceback.format_exc()}")
+            return [], {}
+
+    def get_page(self) -> List[dict]:
+        try:
+            return build_page(self)
+        except Exception as e:
+            logger.error(f"构建数据面板失败: {e}\n{traceback.format_exc()}")
+            return [{"component": "div", "props": {"class": "pa-4 text-error"},
+                     "content": [{"component": "p", "text": f"页面渲染失败: {e}"}]}]
 
     def get_state(self) -> bool:
         return self._enabled
 
-    @staticmethod
-    def get_command() -> List[Dict[str, Any]]:
-        return [{
-            "cmd": "/people_localize",
-            "desc": "Emby演职人员中文化 - 立即扫描",
-            "target": "sync_library",
-        }]
-
-    def get_api(self) -> List[Dict[str, Any]]:
-        return []
-
-    @staticmethod
-    def get_render_mode() -> Tuple[str, str]:
-        """默认 VPage 模式"""
-        return "page", ""
-
-    def get_sidebar_nav(self) -> List[Dict[str, Any]]:
-        return []
-
-    def get_page(self) -> List[dict]:
+    def _api_clear_cache(self):
         try:
-            history = list(self._history or [])
-        except Exception:
-            history = []
-        cache_count = len(self._name_cache or {})
-        history_count = len(history)
-        processed_count = len(self._processed or {})
-        total_fields = sum(int(h.get("n_trans") or 0) for h in history)
+            self.clear_cache()
+            return {"success": True, "message": "缓存已清空"}
+        except Exception as e:
+            return {"success": False, "message": str(e)}
 
-        stat_cards = {
-            "component": "VRow",
-            "props": {"dense": True, "class": "mb-4"},
-            "content": [
-                {"component": "VCol", "props": {"cols": "6", "sm": "3"}, "content": [
-                    {"component": "VCard", "props": {"color": "primary", "variant": "tonal", "flat": True}, "content": [
-                        {"component": "VCardText", "props": {"class": "text-center py-2"}, "content": [
-                            {"component": "div", "props": {"class": "text-headline font-bold text-primary"}, "content": [history_count]},
-                            {"component": "div", "props": {"class": "text-caption text-medium-emphasis mt-1"}, "content": ["处理作品"]},
-                        ]}
-                    ]}
-                ]},
-                {"component": "VCol", "props": {"cols": "6", "sm": "3"}, "content": [
-                    {"component": "VCard", "props": {"color": "success", "variant": "tonal", "flat": True}, "content": [
-                        {"component": "VCardText", "props": {"class": "text-center py-2"}, "content": [
-                            {"component": "div", "props": {"class": "text-headline font-bold text-success"}, "content": [total_fields]},
-                            {"component": "div", "props": {"class": "text-caption text-medium-emphasis mt-1"}, "content": ["翻译字段"]},
-                        ]}
-                    ]}
-                ]},
-                {"component": "VCol", "props": {"cols": "6", "sm": "3"}, "content": [
-                    {"component": "VCard", "props": {"color": "info", "variant": "tonal", "flat": True}, "content": [
-                        {"component": "VCardText", "props": {"class": "text-center py-2"}, "content": [
-                            {"component": "div", "props": {"class": "text-headline font-bold text-info"}, "content": [cache_count]},
-                            {"component": "div", "props": {"class": "text-caption text-medium-emphasis mt-1"}, "content": ["人名缓存"]},
-                        ]}
-                    ]}
-                ]},
-                {"component": "VCol", "props": {"cols": "6", "sm": "3"}, "content": [
-                    {"component": "VCard", "props": {"color": "warning", "variant": "tonal", "flat": True}, "content": [
-                        {"component": "VCardText", "props": {"class": "text-center py-2"}, "content": [
-                            {"component": "div", "props": {"class": "text-headline font-bold text-warning"}, "content": [processed_count]},
-                            {"component": "div", "props": {"class": "text-caption text-medium-emphasis mt-1"}, "content": ["已处理条目"]},
-                        ]}
-                    ]}
-                ]},
-            ],
+    def _api_clear_and_rescan(self):
+        if self._is_running:
+            return {"success": False, "message": "扫描任务正在运行中，请先停止"}
+        try:
+            self.clear_cache()
+            logger.info("缓存已清空，开始重新扫描...")
+            self._stop_requested = False
+            threading.Thread(target=self._scan_worker, kwargs={"force": True}, daemon=True).start()
+            return {"success": True, "message": "缓存已清空，扫描任务已启动"}
+        except Exception as e:
+            return {"success": False, "message": str(e)}
+
+    def _api_scan(self):
+        if self._is_running:
+            return {"success": False, "message": "扫描任务正在运行中"}
+        self._stop_requested = False
+        threading.Thread(target=self._scan_worker, kwargs={"force": True}, daemon=True).start()
+        return {"success": True, "message": "扫描任务已启动"}
+
+    def _api_stop(self):
+        if not self._is_running:
+            return {"success": False, "message": "没有正在运行的扫描任务"}
+        self._stop_requested = True
+        self._is_paused = True
+        return {"success": True, "message": "已请求停止扫描，正在安全退出..."}
+
+    def _api_status(self):
+        total_hits = self._cache_hits
+        total_misses = self._cache_misses
+        total_lookups = total_hits + total_misses
+        hit_rate = round(total_hits / total_lookups * 100, 1) if total_lookups > 0 else 0.0
+        return {
+            "success": True,
+            "data": {
+                "is_running": self._is_running,
+                "is_paused": self._is_paused,
+                "stop_requested": self._stop_requested,
+                "history_count": len(self._history),
+                "name_cache_count": sum(len(v) for v in self._name_cache.values()),
+                "role_cache_count": sum(len(v) for v in self._role_cache.values()),
+                "cache_hits": total_hits,
+                "cache_misses": total_misses,
+                "cache_hit_rate": hit_rate,
+                "processed_count": len(self._processed),
+                "emby_connected": self._emby is not None,
+                "llm_configured": self._llm is not None,
+                "lock_cast": self._lock_cast,
+                "progress": {
+                    "total": self._progress_total,
+                    "done": self._progress_done,
+                    "current_title": self._progress_current_title,
+                    "current_library": self._progress_current_library,
+                    "servers_done": self._progress_servers_done,
+                    "servers_total": self._progress_servers_total,
+                },
+            }
         }
 
-        by_lib: Dict[str, List[Dict[str, Any]]] = {}
-        for h in history:
-            lib = str(h.get("lib") or "未知")
-            by_lib.setdefault(lib, []).append(h)
-        sorted_libs = sorted(by_lib.keys(), key=lambda k: -len(by_lib[k]))
+    def _api_lock_cast(self):
+        try:
+            services = self._get_all_emby_services()
+            if not services or not self._emby:
+                return {"success": False, "message": "Emby 未连接"}
+            processed = self._processed or {}
+            if not processed:
+                return {"success": True, "message": "没有已处理的条目", "data": {"locked": 0, "skipped": 0, "failed": 0}}
+            locked = skipped = failed = 0
+            for key in list(processed.keys()):
+                parts = key.split(":", 1)
+                if len(parts) != 2:
+                    skipped += 1
+                    continue
+                skey, item_id = parts
+                svc = next((s for s in services if self._get_server_identifier(s) == skey), None)
+                if not svc:
+                    skipped += 1
+                    continue
+                try:
+                    client = EmbyClient(self._get_service_url(svc), self._get_service_api_key(svc), svc,
+                                    user_id=self._get_service_user_id(svc))
+                    ok = client.lock_cast_for_item(svc, item_id)
+                    if ok:
+                        locked += 1
+                        with self._state_lock:
+                            for h in self._history:
+                                if h.get("time") == processed.get(key):
+                                    h["cast_locked"] = True
+                    else:
+                        skipped += 1
+                except Exception:
+                    failed += 1
+            msg = f"锁定完成: 成功 {locked}, 跳过 {skipped}, 失败 {failed}"
+            logger.info(msg)
+            self._save_state()
+            return {"success": True, "message": msg, "data": {"locked": locked, "skipped": skipped, "failed": failed}}
+        except Exception as e:
+            return {"success": False, "message": str(e)}
 
-        panels_children = []
-        for lib in sorted_libs:
-            items = by_lib[lib]
-            summary = f"{lib}  共 {len(items)} 个作品"
-            rows = []
-            for it in items[:80]:
-                title = str(it.get("title") or "")
-                n_trans = int(it.get("n_trans") or 0)
-                t = str(it.get("time") or "")[:19]
-                rows.append({
-                    "component": "VRow",
-                    "props": {"dense": True, "class": "py-1 border-b border-opacity-25 border-outline-variant"},
-                    "content": [
-                        {"component": "VCol", "props": {"cols": "8"}, "content": [
-                            {"component": "div", "props": {"class": "text-body-2 text-nowrap text-truncate"}, "content": [title]},
-                        ]},
-                        {"component": "VCol", "props": {"cols": "2"}, "content": [
-                            {"component": "VChip",
-                             "props": {"color": "success" if n_trans > 0 else "grey", "size": "x-small", "variant": "tonal"},
-                             "content": [f"{n_trans}"]},
-                        ]},
-                        {"component": "VCol", "props": {"cols": "2"}, "content": [
-                            {"component": "div", "props": {"class": "text-caption text-medium-emphasis text-right"}, "content": [t]},
-                        ]},
-                    ],
-                })
-            if len(items) > 80:
-                rows.append({
-                    "component": "div",
-                    "props": {"class": "text-caption text-medium-emphasis text-center py-2"},
-                    "content": [f"…仅显示最近 80 条，共 {len(items)} 条"],
-                })
-            panels_children.append({
-                "component": "VExpansionPanel",
-                "content": [
-                    {"component": "VExpansionPanelTitle", "content": [summary]},
-                    {"component": "VExpansionPanelText", "props": {"class": "px-0"}, "content": rows or [
-                        {"component": "div", "props": {"class": "text-body-2 text-medium-emphasis text-center py-4"}, "content": ["暂无记录"]}
-                    ]},
-                ]
-            })
+    def _api_open_settings(self):
+        return {"redirect": "/plugin/EmbyPeopleLocalize/config"}
 
-        if not panels_children:
-            panels_children = [{
-                "component": "VCard",
-                "props": {"variant": "tonal", "flat": True},
-                "content": [{
-                    "component": "VCardText",
-                    "props": {"class": "text-center text-medium-emphasis py-8"},
-                    "content": ["暂无翻译记录。启用插件后，选择媒体库并点击「立即运行一次」即可开始扫描。"],
-                }]
-            }]
+    def _api_back_to_page(self):
+        return {"redirect": "/plugin/EmbyPeopleLocalize"}
 
-        data_tab_items = [
-            stat_cards,
-            {
-                "component": "VExpansionPanels",
-                "props": {"variant": "accordion", "flat": True, "class": "mt-2"},
-                "content": panels_children,
-            },
-        ]
+    def _api_save_config(self, **kwargs):
+        try:
+            data = kwargs.get("data") or kwargs.get("form") or kwargs
+            if isinstance(data, str):
+                try:
+                    data = json.loads(data)
+                except Exception:
+                    data = {}
+            if isinstance(data, dict) and data:
+                self._load_config(data)
+                self.update_config(self._dump_config())
+                logger.info("配置已保存")
+                return {"success": True, "message": "配置已保存"}
+            return {"success": False, "message": "未收到配置数据"}
+        except Exception as e:
+            logger.error(f"保存配置失败: {e}")
+            return {"success": False, "message": str(e)}
 
-        return [
-            {
-                "component": "VCard",
-                "props": {"flat": True},
-                "content": [
-                    {
-                        "component": "VTabs",
-                        "props": {"color": "primary"},
-                        "content": [
-                            {"component": "VTab", "props": {"value": "data"}, "content": ["📊 数据面板"]},
-                            {"component": "VTab", "props": {"value": "config"}, "content": ["⚙️ 插件设置"]},
-                            {"component": "VWindow", "content": [
-                                {"component": "VWindowItem", "props": {"value": "data"}, "content": [
-                                    {"component": "VCardText", "content": data_tab_items},
-                                ]},
-                                {"component": "VWindowItem", "props": {"value": "config"}, "content": [
-                                    {"component": "VCardText", "content": [
-                                        {"component": "div", "props": {"class": "text-caption text-medium-emphasis mb-4"},
-                                         "content": ["修改配置后点击底部「保存」生效。需要立即扫描时，勾选「立即运行一次」再保存。"]},
-                                    ]},
-                                ]},
-                            ]},
-                        ],
-                    },
-                ],
-            },
-        ]
+    def _api_refresh_llm(self, **kwargs):
+        try:
+            old_model, new_model = self._refresh_llm()
+            return {
+                "success": True,
+                "message": f"LLM 已刷新: {old_model} → {new_model}",
+                "data": {"old_model": old_model, "new_model": new_model},
+            }
+        except Exception as e:
+            logger.error(f"刷新 LLM 失败: {e}")
+            return {"success": False, "message": str(e)}
+
+    def init_plugin(self, config: dict = None):
+        self._load_state()
+        self._stop_requested = True
+        if self._is_running:
+            logger.info("请求旧扫描安全退出，等待最多 10 秒...")
+            for _ in range(20):
+                if not self._is_running:
+                    logger.info("旧扫描已退出")
+                    break
+                time.sleep(0.5)
+            else:
+                logger.warning("旧扫描仍在运行，配置已更新，但扫描可能需要更长时间退出")
+
+        if config:
+            self._load_config(config)
+        if self._enabled:
+            self._startup()
+
+        if self._run_clear_cache:
+            logger.info("检测到「清除缓存并重扫」开关，开始执行...")
+            self._run_clear_cache = False
+            self.update_config(self._dump_config())
+            self.clear_cache()
+            self._scan_worker(force=True)
+
+        if self._run_scan:
+            logger.info("检测到「立即扫描」开关，开始执行...")
+            self._run_scan = False
+            self.update_config(self._dump_config())
+            self._scan_worker(force=True)
+
+        if self._run_lock_cast:
+            logger.info("检测到「批量补锁定」开关，开始执行...")
+            self._run_lock_cast = False
+            self.update_config(self._dump_config())
+            threading.Thread(target=self._api_lock_cast, daemon=True).start()
+
+        if self._onlyonce:
+            self._onlyonce = False
+            self._force_refresh = False
+            self.update_config(self._dump_config())
+            self._scan_worker(force=True)
+
+    def _load_config(self, config: dict):
+        self._enabled = bool(config.get("enabled", False))
+        self._onlyonce = bool(config.get("onlyonce", False))
+        self._cron = str(config.get("cron", "0 4 * * *"))
+        self._libraries = list(config.get("libraries", []))
+        self._prompt_template = str(config.get("prompt_template") or DEFAULT_PROMPT)
+        self._translate_all = bool(config.get("translate_all", False))
+        self._translate_role = bool(config.get("translate_role", True))
+        self._translate_actor = bool(config.get("translate_actor", True))
+        self._translate_director = bool(config.get("translate_director", False))
+        self._translate_writer = bool(config.get("translate_writer", False))
+        self._translate_producer = bool(config.get("translate_producer", False))
+        
+        if self._translate_all:
+            self._translate_role = True
+            self._translate_actor = True
+            self._translate_director = True
+            self._translate_writer = True
+            self._translate_producer = True
+        
+        self._max_people_per_title = int(config.get("max_people_per_title", 10))
+        self._max_people_per_batch = int(config.get("max_people_per_batch", 5))
+        self._overwrite_chinese = bool(config.get("overwrite_chinese", False))
+        self._force_refresh = bool(config.get("force_refresh", False))
+        self._delay = int(config.get("delay", 2))
+        self._lock_cast = bool(config.get("lock_cast", False))
+        self._run_scan = bool(config.get("run_scan", False))
+        self._run_lock_cast = bool(config.get("run_lock_cast", False))
+        self._run_clear_cache = bool(config.get("run_clear_cache", False))
+        self._llm_base_url = str(config.get("llm_base_url") or "")
+        self._llm_api_key = str(config.get("llm_api_key") or "")
+        self._llm_model = str(config.get("llm_model") or "")
+        self._llm_timeout = int(config.get("llm_timeout", 120) or 120)
+        self._webhook_delay = int(config.get("webhook_delay", 60) or 60)
+        self._notify_on_complete = bool(config.get("notify_on_complete", False))
+
+    def _dump_config(self) -> dict:
+        if self._translate_all:
+            self._translate_role = True
+            self._translate_actor = True
+            self._translate_director = True
+            self._translate_writer = True
+            self._translate_producer = True
+        
+        return {
+            "enabled": self._enabled,
+            "onlyonce": self._onlyonce,
+            "cron": self._cron,
+            "libraries": self._libraries,
+            "prompt_template": self._prompt_template or DEFAULT_PROMPT,
+            "translate_actor": self._translate_actor,
+            "translate_director": self._translate_director,
+            "translate_writer": self._translate_writer,
+            "translate_producer": self._translate_producer,
+            "translate_all": self._translate_all,
+            "translate_role": self._translate_role,
+            "max_people_per_title": self._max_people_per_title,
+            "max_people_per_batch": self._max_people_per_batch,
+            "overwrite_chinese": self._overwrite_chinese,
+            "force_refresh": self._force_refresh,
+            "delay": self._delay,
+            "lock_cast": self._lock_cast,
+            "run_scan": self._run_scan,
+            "run_lock_cast": self._run_lock_cast,
+            "run_clear_cache": self._run_clear_cache,
+            "llm_base_url": self._llm_base_url,
+            "llm_api_key": self._llm_api_key,
+            "llm_model": self._llm_model,
+            "llm_timeout": self._llm_timeout,
+            "webhook_delay": self._webhook_delay,
+            "notify_on_complete": self._notify_on_complete,
+        }
+
+    def _startup(self):
+        try:
+            self._ms_helper = MediaServerHelper()
+            services = self._get_all_emby_services()
+            if not services:
+                logger.warning("未检测到可用的 Emby 服务器")
+                return
+            svc = services[0]
+            self._emby = EmbyClient(self._get_service_url(svc), self._get_service_api_key(svc), svc,
+                                    user_id=self._get_service_user_id(svc))
+            self._init_llm()
+            self._translator = PeopleTranslator(
+                llm_client=self._llm,
+                emby_client=self._emby,
+                name_cache=self._name_cache,
+                state_lock=self._state_lock,
+                plugin=self,
+            )
+            logger.info(f"EmbyPeopleLocalize v{self.plugin_version} 启动完成")
+        except Exception as e:
+            logger.error(f"插件启动失败: {e}\n{traceback.format_exc()}")
+
+    def _init_llm(self):
+        try:
+            base_url = self._llm_base_url or getattr(settings, 'LLM_BASE_URL', '')
+            api_key = self._llm_api_key or getattr(settings, 'LLM_API_KEY', '')
+            model = self._llm_model or getattr(settings, 'LLM_MODEL', '')
+            timeout = self._llm_timeout or 120
+            self._llm = LLMClient(
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+                prompt_template=self._prompt_template or DEFAULT_PROMPT,
+                timeout=timeout,
+            )
+            logger.info(f"LLM 客户端初始化成功: {self._llm.model}")
+        except Exception as e:
+            logger.error(f"LLM 初始化失败: {e}")
+            self._llm = None
+
+    def _refresh_llm(self):
+        if self._llm is not None:
+            old_model = getattr(self._llm, 'model', '')
+        else:
+            old_model = '未初始化'
+        self._init_llm()
+        if self._translator:
+            self._translator._llm = self._llm
+        new_model = getattr(self._llm, 'model', '') if self._llm else '未配置'
+        logger.info(f"LLM 刷新完成: {old_model} → {new_model}")
+        return old_model, new_model
+
+    def _scheduled_scan(self):
+        self._scan_worker(force=False)
 
     def get_service(self) -> List[Dict[str, Any]]:
-        if self._enabled and self._cron:
+        if not self._enabled or not self._cron:
+            return []
+        try:
+            from apscheduler.triggers.cron import CronTrigger
             return [{
                 "id": "EmbyPeopleLocalize",
-                "name": f"{self.plugin_name} 定时扫描",
-                "trigger": CronTrigger.from_crontab(self._cron, timezone=settings.TZ),
-                "func": self.sync_library,
-                "kwargs": {},
+                "name": "Emby演职人员中文化定时扫描",
+                "trigger": CronTrigger.from_crontab(self._cron),
+                "func": self._scheduled_scan,
             }]
-        return []
-
-    def _get_server_lib_options(self) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-        library_options: List[Dict[str, Any]] = []
-        services: Dict[str, Any] = {}
-        try:
-            helper = MediaServerHelper()
-            msc = MediaServerChain()
-            all_services = helper.get_services(type_filter="emby") or {}
-            services = {k: v for k, v in all_services.items() if not getattr(v.instance, "is_inactive", lambda: False)()}
-            for server_name in services.keys():
-                try:
-                    for lib in msc.librarys(server_name):
-                        lib_value = f"{server_name}:{lib.id}"
-                        lib_title = f"{server_name} - {lib.name}"
-                        library_options.append({"title": lib_title, "value": lib_value})
-                except Exception as e:
-                    logger.warning(f"获取服务器 {server_name} 媒体库失败: {e}")
         except Exception as e:
-            logger.warning(f"获取媒体库列表失败: {e}")
-        return services, library_options
-
-    def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        _servers, lib_opts = self._get_server_lib_options()
-        return [
-            {
-                "component": "VForm",
-                "content": [
-                    {"component": "VRow", "content": [
-                        {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                            {"component": "VSwitch", "props": {"prop": "enabled", "model": "enabled", "label": "启用插件"}}
-                        ]},
-                        {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                            {"component": "VSwitch", "props": {"prop": "onlyonce", "model": "onlyonce", "label": "立即运行一次"}}
-                        ]},
-                        {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                            {"component": "VSwitch", "props": {"prop": "force_refresh", "model": "force_refresh", "label": "强制刷新（清空缓存）"}}
-                        ]},
-                    ]},
-                    {"component": "VRow", "content": [
-                        {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                            {"component": "VTextField", "props": {"prop": "cron", "model": "cron", "label": "定时扫描 cron 表达式", "placeholder": "0 4 * * *"}}
-                        ]},
-                        {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                            {"component": "VTextField", "props": {"prop": "delay", "model": "delay", "label": "批间/入库延迟（秒）", "type": "number"}}
-                        ]},
-                    ]},
-                    {"component": "VRow", "content": [
-                        {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                            {"component": "VTextField", "props": {"prop": "max_people_per_title", "model": "max_people_per_title", "label": "单作品最多处理前N人", "type": "number"}}
-                        ]},
-                        {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                            {"component": "VTextField", "props": {"prop": "max_people_per_batch", "model": "max_people_per_batch", "label": "单次 LLM 批大小", "type": "number", "hint": "数越小LLM响应越快"}}
-                        ]},
-                        {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                            {"component": "VSwitch", "props": {"prop": "overwrite_chinese", "model": "overwrite_chinese", "label": "覆盖已有的中文名"}}
-                        ]},
-                    ]},
-                    {"component": "VRow", "content": [
-                        {"component": "VCol", "props": {"cols": 12}, "content": [
-                            {"component": "VSelect", "props": {"prop": "libraries", "model": "libraries", "multiple": True, "chips": True, "clearable": True, "label": "选择媒体库（多选，留空=全服务器扫描）", "items": lib_opts}}
-                        ]},
-                    ]},
-                    {"component": "VRow", "content": [
-                        {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                            {"component": "VSwitch", "props": {"prop": "translate_actor", "model": "translate_actor", "label": "翻译 Actor（演员）"}}
-                        ]},
-                        {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                            {"component": "VSwitch", "props": {"prop": "translate_voice_actor", "model": "translate_voice_actor", "label": "翻译 VoiceActor（声优）"}}
-                        ]},
-                        {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                            {"component": "VSwitch", "props": {"prop": "translate_director", "model": "translate_director", "label": "翻译导演"}}
-                        ]},
-                        {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                            {"component": "VSwitch", "props": {"prop": "translate_writer", "model": "translate_writer", "label": "翻译编剧"}}
-                        ]},
-                        {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                            {"component": "VSwitch", "props": {"prop": "translate_producer", "model": "translate_producer", "label": "翻译制作人"}}
-                        ]},
-                        {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                            {"component": "VSwitch", "props": {"prop": "translate_all", "model": "translate_all", "label": "翻译全部类型（忽略以上开关）"}}
-                        ]},
-                    ]},
-                    {"component": "VRow", "content": [
-                        {"component": "VCol", "props": {"cols": 12}, "content": [
-                            {"component": "VTextarea", "props": {"prop": "prompt_template", "model": "prompt_template", "label": "自定义大模型提示词（含 {title_json} {year_json} {terms_json} 占位符）", "rows": 10, "auto-grow": True}}
-                        ]},
-                    ]},
-                ],
-            },
-        ], {
-            "enabled": False,
-            "onlyonce": False,
-            "force_refresh": False,
-            "cron": "0 4 * * *",
-            "delay": 2,
-            "max_people_per_title": 15,
-            "max_people_per_batch": 5,
-            "overwrite_chinese": False,
-            "libraries": [],
-            "translate_actor": True,
-            "translate_voice_actor": True,
-            "translate_director": False,
-            "translate_writer": False,
-            "translate_producer": False,
-            "translate_all": False,
-            "prompt_template": DEFAULT_PROMPT,
-        }
+            logger.error(f"注册定时任务失败: {e}")
+            return []
 
     @staticmethod
-    def _get_emby_info(service: ServiceInfo) -> Tuple[Optional[str], Optional[str]]:
+    def _get_service_url(service: ServiceInfo) -> str:
         inst = service.instance
-        host = getattr(inst, '_host', None)
-        api_key = getattr(inst, '_apikey', None)
-        if host and isinstance(host, str):
-            host = host.strip('`').rstrip('/').strip()
-        return host, api_key
+        if not inst:
+            return ''
+        host = getattr(inst, '_host', None) or getattr(service, 'url', '') or ''
+        if isinstance(host, str):
+            host = host.strip('`').rstrip('/')
+        return host
 
-    def _emby_get(self, service: ServiceInfo, path: str, **kwargs) -> Optional[dict]:
-        host, api_key = self._get_emby_info(service)
-        if not host or not api_key:
-            logger.error(f"无法获取 Emby 连接信息")
+    @staticmethod
+    def _get_service_api_key(service: ServiceInfo) -> str:
+        inst = service.instance
+        if not inst:
+            return ''
+        api_key = getattr(inst, '_apikey', None) or getattr(service, 'api_key', '') or getattr(service, 'apikey', '') or ''
+        return api_key
+
+    @staticmethod
+    def _get_service_user_id(service: ServiceInfo) -> Optional[str]:
+        inst = service.instance
+        if not inst:
             return None
-        user_id = getattr(service.instance, 'user', None)
-        sep = '&' if '?' in path else '?'
-        url = f"{host}{path}{sep}api_key={api_key}"
-        if user_id and 'UserId=' not in path and 'userid=' not in path.lower():
-            url += f"&UserId={user_id}"
+        return getattr(inst, 'user', None)
+
+    def _get_all_emby_services(self) -> List[ServiceInfo]:
         try:
-            safe_url = url.split('?')[0]
-            qs = '&'.join([p for p in url.split('?')[1].split('&') if 'api_key' not in p.lower()]) if '?' in url else ''
-            logger.debug(f"Emby GET -> {safe_url}?{qs[:160]}")
-            resp = RequestUtils().get_res(url, **kwargs)
-            if resp and resp.status_code == 200:
-                return resp.json()
-            body = ""
-            try:
-                body = (resp.content.decode("utf-8", "replace") if resp else "")[:400]
-            except Exception:
-                pass
-            logger.warning(f"Emby GET {path[:80]} 失败: status={resp.status_code if resp else '无响应'}, body={body}")
+            if self._ms_helper is None:
+                self._ms_helper = MediaServerHelper()
+            services = self._ms_helper.get_services()
+            if isinstance(services, dict):
+                services = list(services.values())
+            emby_services = [s for s in services if getattr(s, 'type', '').lower() == 'emby']
+            logger.info(f"MediaServerHelper 返回 {len(services)} 个服务，其中 Emby {len(emby_services)} 个")
+            for s in emby_services:
+                logger.info(f"  - {getattr(s, 'name', '?')}: {self._get_service_url(s)}")
+            return emby_services
         except Exception as e:
-            logger.error(f"Emby GET {path[:80]} 异常: {type(e).__name__}: {e}")
+            logger.error(f"获取 Emby 服务列表失败: {e}\n{traceback.format_exc()}")
+            return []
+
+    def _get_server_identifier(self, service: ServiceInfo) -> str:
+        name = getattr(service, 'name', '') or ''
+        url = self._get_service_url(service)
+        if url:
+            parsed = urlparse(url)
+            host = parsed.hostname or ''
+            port = parsed.port
+            if not port:
+                port = 8096 if parsed.scheme == 'http' else 8920
+        else:
+            host = ''
+            port = ''
+        base = f"{name}_{host}_{port}".strip('_')
+        return re.sub(r'[^a-zA-Z0-9_-]', '_', base) or "default"
+
+    def _get_library_options(self) -> List[Dict[str, str]]:
+        options = []
+        try:
+            services = self._get_all_emby_services()
+            logger.info(f"检测到 {len(services)} 个 Emby 服务")
+            for svc in services:
+                sname = getattr(svc, 'name', '服务器')
+                surl = self._get_service_url(svc)
+                try:
+                    client = EmbyClient(surl, self._get_service_api_key(svc), svc,
+                                        user_id=self._get_service_user_id(svc))
+                    libs = client.get_libraries()
+                    for lib in libs:
+                        options.append({
+                            "title": f"【{sname}】{lib.get('Name')} ({lib.get('Type')})",
+                            "value": f"{self._get_server_identifier(svc)}:{lib.get('Id')}"
+                        })
+                except Exception as e:
+                    logger.warning(f"获取服务器 {sname} 媒体库失败: {e}")
+        except Exception as e:
+            logger.error(f"获取媒体库列表失败: {e}\n{traceback.format_exc()}")
+        return options
+
+    def _scan_worker(self, force: bool = False):
+        if not force and self._is_running:
+            logger.info("扫描已在运行中，跳过")
+            return
+        self._is_running = True
+        self._is_paused = False
+        self._stop_requested = False
+        self._last_run_time = time.time()
+        self._progress_done = 0
+        self._progress_total = 0
+        self._progress_servers_done = 0
+        self._cache_hits = 0
+        self._cache_misses = 0
+        total_translated = 0
+        total_failed = 0
+        try:
+            logger.info("=" * 50)
+            logger.info("开始扫描 Emby 演职人员...")
+            services = self._get_all_emby_services()
+            if not services:
+                logger.warning("无可用 Emby 服务器，扫描终止")
+                self._is_running = False
+                self._save_state()
+                return
+
+            self._progress_servers_total = len(services)
+            target_libs = self._libraries or []
+            grand_total_items = 0
+
+            all_tasks = []
+            for svc in services:
+                if self._stop_requested:
+                    logger.info("扫描已请求停止（预扫描阶段）")
+                    break
+                skey = self._get_server_identifier(svc)
+                client = EmbyClient(self._get_service_url(svc), self._get_service_api_key(svc), svc,
+                                    user_id=self._get_service_user_id(svc))
+                libs = client.get_libraries()
+                for lib in libs:
+                    lib_id = str(lib.get("Id", ""))
+                    full_key = f"{skey}:{lib_id}"
+                    if target_libs and full_key not in target_libs:
+                        continue
+                    lib_name = lib.get("Name", "?")
+                    grand_total_items += 1
+                    all_tasks.append((svc, skey, client, lib_id, lib_name))
+
+            self._progress_total = grand_total_items
+            logger.info(f"共 {len(all_tasks)} 个媒体库待扫描")
+
+            for svc, skey, client, lib_id, lib_name in all_tasks:
+                if self._stop_requested:
+                    logger.info("扫描已请求停止，保存进度后退出")
+                    break
+                self._progress_current_library = f"[{getattr(svc,'name','?')}] {lib_name}"
+                logger.info(f"📂 扫描媒体库: {self._progress_current_library}")
+                translated, failed = self._scan_library(client, svc, skey, lib_id, lib_name)
+                total_translated += translated
+                total_failed += failed
+                self._progress_done += 1
+                self._auto_save()
+
+            self._progress_servers_done = self._progress_servers_total
+            logger.info(f"扫描完成: 翻译 {total_translated} 条, 失败 {total_failed} 条")
+            
+            if self._notify_on_complete and (total_translated > 0 or total_failed > 0):
+                try:
+                    hit_rate = round(self._cache_hits / max(self._cache_hits + self._cache_misses, 1) * 100, 1)
+                    self.post_message(
+                        mtype=NotificationType.Manual,
+                        title=self.plugin_name,
+                        text=f"扫描完成：翻译 {total_translated} 条，失败 {total_failed} 条，缓存命中率 {hit_rate}%"
+                    )
+                    logger.info("已发送扫描完成通知")
+                except Exception as e:
+                    logger.warning(f"发送通知失败: {e}")
+        except Exception as e:
+            logger.error(f"扫描异常: {e}\n{traceback.format_exc()}")
+        finally:
+            self._is_running = False
+            self._is_paused = False
+            self._stop_requested = False
+            self._progress_current_title = ""
+            self._progress_current_library = ""
+            self._save_state()
+            logger.info(f"扫描线程结束，状态已保存")
+
+    def _scan_library(self, client: EmbyClient, svc: ServiceInfo, skey: str, lib_id: str, lib_name: str) -> Tuple[int, int]:
+        translated = 0
+        failed = 0
+        skipped = 0
+        start = 0
+        page_size = 50
+        page_num = 0
+        while True:
+            if self._stop_requested:
+                logger.info("扫描已请求停止（分页循环中）")
+                break
+            try:
+                page_num += 1
+                data = client.fetch_items_page(svc, lib_id, limit=page_size, start_index=start)
+                items = (data or {}).get("Items", []) or []
+                if not items:
+                    logger.info(f"  第 {page_num} 页: 无更多条目，扫描结束")
+                    break
+                logger.info(f"  第 {page_num} 页: 获取 {len(items)} 个条目 (start={start})")
+                for item in items:
+                    if self._stop_requested:
+                        break
+                    try:
+                        t, f = self._process_item(client, svc, skey, item, lib_name)
+                        translated += t
+                        failed += f
+                    except Exception as e:
+                        logger.error(f"  处理条目异常: {e}\n{traceback.format_exc()}")
+                        failed += 1
+                    if self._stop_requested:
+                        break
+                    time.sleep(self._delay)
+                if len(items) < page_size:
+                    logger.info(f"  本页 {len(items)} 条已处理，无更多数据")
+                    break
+                start += page_size
+            except Exception as e:
+                logger.error(f"  分页获取失败 (start={start}): {e}\n{traceback.format_exc()}")
+                break
+        logger.info(f"  媒体库 [{lib_name}] 扫描完成: 翻译 {translated}, 失败 {failed}")
+        return translated, failed
+
+    def _process_item(self, client: EmbyClient, svc: ServiceInfo, skey: str, item: dict, lib_name: str = "") -> Tuple[int, int]:
+        item_id = str(item.get("Id", ""))
+        title = item.get("Name", "")
+        year = item.get("ProductionYear") or (item.get("PremiereDate", "")[:4] if item.get("PremiereDate") else "")
+        item_type = item.get("Type", "")
+        display_title = title
+        if item_type == "Episode":
+            series_name = item.get("SeriesName", "") or title
+            season_num = item.get("SeasonNumber", "")
+            episode_num = item.get("EpisodeNumber", "")
+            if season_num and episode_num:
+                display_title = f"{series_name} S{season_num:02d}E{episode_num:02d}"
+            elif series_name:
+                display_title = series_name
+        key = f"{skey}:{item_id}"
+
+        self._progress_current_title = display_title
+
+        if not self._force_refresh and key in self._processed:
+            logger.debug(f"  [{item_id}] {display_title} ({year}) — 已处理，跳过")
+            return 0, 0
+
+        people = item.get("People", []) or []
+        if not people:
+            logger.debug(f"  [{item_id}] {display_title} ({year}) — 无演职人员，跳过")
+            return 0, 0
+
+        to_translate = []
+        skip_reasons = []
+        cached_translations = {}
+
+        for idx, p in enumerate(people):
+            ptype = p.get("Type", "Actor")
+            name = p.get("Name", "").strip()
+            role = p.get("Role", "").strip()
+
+            name_type_ok = True
+            if not self._translate_all:
+                name_type_ok = {
+                    "Actor": self._translate_actor,
+                    "Director": self._translate_director,
+                    "Writer": self._translate_writer,
+                    "Producer": self._translate_producer,
+                    "VoiceActor": self._translate_actor,
+                }.get(ptype, False)
+
+            if name and (self._translate_all or name_type_ok):
+                if self._looks_like_chinese(name):
+                    skip_reasons.append(f"{name}(人名已是中文)")
+                else:
+                    cached = self._get_cached_value(self._name_cache, name)
+                    if cached:
+                        cached_translations[name] = cached
+                        self._cache_hits += 1
+                        skip_reasons.append(f"{name}(缓存命中)")
+                    else:
+                        self._cache_misses += 1
+                        to_translate.append((name, "Name", idx, ptype))
+            elif name and not (self._translate_all or name_type_ok):
+                skip_reasons.append(f"{name}({ptype}未启用)")
+
+            if role and (self._translate_role or self._translate_all):
+                if self._looks_like_chinese(role):
+                    skip_reasons.append(f"{role}(角色已是中文)")
+                else:
+                    cached = self._get_cached_value(self._role_cache, role)
+                    if cached:
+                        cached_translations[role] = cached
+                        self._cache_hits += 1
+                        skip_reasons.append(f"{role}(缓存命中)")
+                    else:
+                        self._cache_misses += 1
+                        to_translate.append((role, "Role", idx, ptype))
+
+        translations = dict(cached_translations)
+
+        if not to_translate:
+            hit_info = f"缓存命中 {len(cached_translations)} 条" if cached_translations else "无缓存命中"
+            logger.info(f"  [{item_id}] {display_title} ({year}) — 无需翻译 (共 {len(people)} 人，{hit_info}，跳过: {', '.join(skip_reasons[:3])}{'...' if len(skip_reasons) > 3 else ''})")
+            if cached_translations:
+                new_people = self._build_new_people(people, cached_translations)
+                lock = self._lock_cast
+                logger.info(f"    正在写入 Emby (缓存翻译 {len(cached_translations)} 条)...")
+                updated = client.update_people(svc, item_id, new_people, item_data=item, lock_cast=lock)
+                if updated > 0:
+                    self._post_translate_hook(key, display_title, year, item_id, cached_translations, lock, lib_name)
+                    return len(cached_translations), 0
+            return 0, 0
+
+        to_translate = to_translate[:self._max_people_per_title]
+        name_count = sum(1 for t in to_translate if t[1] == "Name")
+        role_count = sum(1 for t in to_translate if t[1] == "Role")
+        logger.info(f"  [{item_id}] {display_title} ({year}) [{item_type}] — 待翻译 {len(to_translate)} 条 (人名 {name_count}, 角色 {role_count})")
+
+        remaining = []
+        seen_texts = set()
+        for text, field, idx, ptype in to_translate:
+            if text in seen_texts:
+                continue
+            seen_texts.add(text)
+            if HAS_ZHCONV and any(0x4E00 <= ord(c) <= 0x9FFF for c in text):
+                try:
+                    simplified = zhconv.convert(text, 'zh-cn')
+                    if simplified != text:
+                        translations[text] = simplified
+                        logger.debug(f"    繁简转换: {text} → {simplified}")
+                        cache_store = self._name_cache if field == "Name" else self._role_cache
+                        self._set_cached_value(cache_store, text, simplified)
+                        continue
+                except Exception:
+                    pass
+            remaining.append(text)
+
+        if remaining and self._llm:
+            if self._stop_requested:
+                logger.info(f"    已请求停止，跳过 LLM 调用")
+                return 0, 0
+            try:
+                logger.info(f"    调用 LLM 翻译 {len(remaining)} 条文本...")
+                result = self._llm.translate_terms(title, year, remaining)
+                if isinstance(result, dict):
+                    translations.update(result)
+                    for orig, trans in result.items():
+                        if trans and trans != orig:
+                            for text, field, idx, ptype in to_translate:
+                                if text == orig:
+                                    cache_store = self._name_cache if field == "Name" else self._role_cache
+                                    self._set_cached_value(cache_store, orig, trans)
+                                    break
+                    logger.info(f"    LLM 返回 {len(result)} 个翻译结果")
+            except Exception as e:
+                logger.error(f"    LLM 翻译失败 [{display_title}]: {e}")
+                return 0, 1
+
+        if not translations:
+            logger.info(f"    无有效翻译结果")
+            return 0, 0
+
+        new_people = self._build_new_people(people, translations)
+
+        if self._stop_requested:
+            logger.info(f"    已请求停止，跳过 Emby 写入")
+            return 0, 0
+
+        lock = self._lock_cast
+        logger.info(f"    正在写入 Emby ({len(translations)} 条翻译)...")
+        updated = client.update_people(svc, item_id, new_people, item_data=item, lock_cast=lock)
+
+        if updated > 0:
+            self._post_translate_hook(key, display_title, year, item_id, translations, lock, lib_name)
+            return len(translations), 0
+        else:
+            logger.warning(f"  ⚠️ [{item_id}] {display_title} ({year}) — 写回失败")
+            return 0, 0
+
+    def _build_new_people(self, people, translations):
+        new_people = []
+        for p in people:
+            np = dict(p)
+            cur_name = np.get("Name", "")
+            if cur_name in translations:
+                np["Name"] = translations[cur_name]
+            cur_role = np.get("Role", "")
+            if cur_role and cur_role in translations:
+                np["Role"] = translations[cur_role]
+            new_people.append(np)
+        return new_people
+
+    def _get_cached_value(self, cache_store, key):
+        with self._state_lock:
+            for lang_cache in cache_store.values():
+                if key in lang_cache:
+                    return lang_cache[key]
         return None
 
-    def _emby_post(self, service: ServiceInfo, path: str, **kwargs) -> bool:
-        host, api_key = self._get_emby_info(service)
-        if not host or not api_key:
-            logger.error(f"无法获取 Emby 连接信息")
-            return False
-        user_id = getattr(service.instance, 'user', None)
-        sep = '&' if '?' in path else '?'
-        url = f"{host}{path}{sep}api_key={api_key}"
-        if user_id and 'UserId=' not in path and 'userid=' not in path.lower():
-            url += f"&UserId={user_id}"
-        try:
-            headers = kwargs.pop('headers', {})
-            if 'json' in kwargs:
-                headers.setdefault("Content-Type", "application/json")
-            resp = RequestUtils(headers=headers).post_res(url, **kwargs)
-            if resp and resp.status_code in (200, 204):
+    def _set_cached_value(self, cache_store, key, value, lang="default"):
+        with self._state_lock:
+            if lang not in cache_store:
+                cache_store[lang] = {}
+            cache_store[lang][key] = value
+
+    def _post_translate_hook(self, key, display_title, year, item_id, translations, lock, lib_name=""):
+        with self._state_lock:
+            self._processed[key] = datetime.now().isoformat()
+            self._history.append({
+                "time": datetime.now().isoformat(timespec='seconds'),
+                "library": lib_name,
+                "title": display_title,
+                "year": year,
+                "item_id": item_id,
+                "n_trans": len(translations),
+                "status": "ok",
+                "cast_locked": lock,
+            })
+            if len(self._history) > self._MAX_HISTORY:
+                self._history = self._history[-self._MAX_HISTORY:]
+        logger.info(f"  ✅ [{item_id}] {display_title} ({year}) — 翻译 {len(translations)} 个, 锁定={lock}")
+        for orig, trans in list(translations.items())[:3]:
+            logger.info(f"      {orig} → {trans}")
+
+    @staticmethod
+    def _looks_like_chinese(text: str) -> bool:
+        for c in text:
+            cp = ord(c)
+            if 0x4E00 <= cp <= 0x9FFF or 0x3400 <= cp <= 0x4DBF:
                 return True
-            body = ""
-            try:
-                body = (resp.content.decode("utf-8", "replace") if resp else "")[:400]
-            except Exception:
-                pass
-            logger.warning(f"Emby POST {path[:80]} 失败: status={resp.status_code if resp else '无响应'}, body={body}")
-            return False
-        except Exception as e:
-            logger.error(f"Emby POST {path[:80]} 异常: {type(e).__name__}: {e}")
-            return False
-
-    def _parse_selected_libraries(self) -> Dict[str, List[str]]:
-        result: Dict[str, List[str]] = {}
-        for lib_value in (self._libraries or []):
-            if isinstance(lib_value, str) and ":" in lib_value:
-                server, lib_id = lib_value.split(":", 1)
-                result.setdefault(server, []).append(lib_id)
-        return result
-
-    def service_infos(self) -> Dict[str, ServiceInfo]:
-        selected_libs = self._parse_selected_libraries()
-        target_servers = list(selected_libs.keys()) if selected_libs else None
-        try:
-            services = MediaServerHelper().get_services(type_filter="emby", name_filters=target_servers) or {}
-        except Exception as e:
-            logger.warning(f"获取媒体服务列表失败: {e}")
-            services = {}
-        return {k: v for k, v in services.items() if not getattr(v.instance, "is_inactive", lambda: False)()}
-
-    def _person_type_allowed(self, p_type: str, role: str = "") -> bool:
-        if self._translate_all:
-            return True
-        p_type_l = (p_type or "").lower()
-        role_l = (role or "").lower()
-        if self._translate_actor and ("actor" in p_type_l or p_type_l == ""):
-            return True
-        if self._translate_voice_actor and ("voice" in p_type_l or "配音" in (role or "")):
-            return True
-        if self._translate_director and "director" in p_type_l:
-            return True
-        if self._translate_writer and "writer" in p_type_l:
-            return True
-        if self._translate_producer and "producer" in p_type_l:
-            return True
         return False
 
-    @staticmethod
-    def _is_all_chinese(text: str) -> bool:
-        if not text:
-            return False
-        stripped = re.sub(r"[\s·・・\(\)（）\[\]【】,，.。:：\-—/\\0-9a-zA-Z]", "", text)
-        if not stripped:
-            return False
-        return all("\u4e00" <= c <= "\u9fff" for c in stripped)
+    def clear_cache(self):
+        with self._state_lock:
+            self._name_cache.clear()
+            self._role_cache.clear()
+            self._processed.clear()
+            self._history.clear()
+            self._cache_hits = 0
+            self._cache_misses = 0
+        self._save_state()
+        logger.info("所有缓存已清空")
 
-    def _zhconv_or_skip(self, text: str) -> Optional[str]:
-        if not HAS_ZHCONV:
-            return None
-        try:
-            if self._is_all_chinese(text):
-                simplified = zhconv.convert(text, "zh-cn")
-                if simplified and simplified != text:
-                    return simplified
-        except Exception:
-            return None
-        return None
+    def stop_service(self):
+        self._stop_requested = True
+        if self._is_running:
+            logger.info("正在请求扫描任务安全退出...")
+        self._save_state()
 
-    def _try_llm_via_sdk(self, prompt: str, timeout_read: float = 60.0) -> Optional[str]:
-        if not self._llm_client:
-            return None
+    @eventmanager.register(EventType.WebhookMessage)
+    def handle_webhook(self, event: Event):
+        data = event.event_data or {}
+        if "emby" not in str(data.get("source", "")).lower():
+            return
+        nt = str(data.get("NotificationType", "")).lower()
+        et = str(data.get("Type", "")).lower()
+        if not any(k in nt or k in et for k in ["itemadded", "item.added", "library.new", "added"]):
+            return
+        item_id = data.get("ItemId") or data.get("item_id") or data.get("Id") or ""
+        server_id = data.get("ServerId") or data.get("server_id") or ""
+        if not item_id:
+            logger.info("[Webhook] 收到入库事件但无 ItemId，跳过")
+            return
+        logger.info(f"[Webhook] 收到入库事件: ItemId={item_id}, ServerId={server_id}")
+        delay = getattr(self, '_webhook_delay', 60)
+        threading.Thread(
+            target=self._delayed_scan_item,
+            kwargs={"item_id": item_id, "server_id": server_id, "delay": delay},
+            daemon=True
+        ).start()
+
+    def _delayed_scan_item(self, item_id, server_id, delay):
         try:
-            resp = self._llm_client.chat.completions.create(
-                model=self._llm_model or "deepseek-ai/DeepSeek-V4-Flash",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.0,
-                timeout=(10.0, timeout_read),
+            logger.info(f"[Webhook] 等待 {delay} 秒后扫描 ItemId={item_id}...")
+            time.sleep(delay)
+            if self._stop_requested:
+                logger.info("[Webhook] 已请求停止，取消扫描")
+                return
+            services = self._get_all_emby_services()
+            if not services:
+                logger.warning("[Webhook] 无可用 Emby 服务器")
+                return
+            svc = next(
+                (s for s in services if self._get_server_identifier(s) == server_id),
+                services[0]
             )
-            if resp and resp.choices and len(resp.choices) > 0:
-                content = resp.choices[0].message.content or ""
-                if content.strip():
-                    return content
-            logger.warning("LLM SDK 返回空内容")
-            return None
-        except _openai_mod.APITimeoutError if _openai_mod else Exception as e:
-            logger.warning(f"LLM SDK APITimeoutError: {e}（不重试，立即转requests）")
-            return None
+            url = self._get_service_url(svc)
+            api_key = self._get_service_api_key(svc)
+            user_id = self._get_service_user_id(svc)
+            client = EmbyClient(url, api_key, svc, user_id=user_id)
+            item = client.fetch_item(svc, item_id)
+            if not item:
+                logger.warning(f"[Webhook] 无法获取条目详情: {item_id}")
+                return
+            self._translate_single_item(client, svc, item_id, item)
         except Exception as e:
-            logger.warning(f"LLM SDK 失败: {type(e).__name__}: {e}（转 requests 兜底）")
-            return None
+            logger.error(f"[Webhook] 扫描异常: {e}\n{traceback.format_exc()}")
 
-    def _try_llm_via_requests(self, prompt: str) -> Optional[str]:
-        base_url = str(getattr(settings, 'LLM_BASE_URL', '') or '').rstrip('/')
-        api_key = str(getattr(settings, 'LLM_API_KEY', '') or '')
-        model = str(getattr(settings, 'LLM_MODEL', '') or self._llm_model or '')
-        if not base_url or not api_key or not model:
-            return None
-        if base_url.endswith("/v1"):
-            chat_url = f"{base_url}/chat/completions"
-        elif "/v1" in base_url:
-            chat_url = f"{base_url.rstrip('/')}/chat/completions"
-        else:
-            chat_url = f"{base_url}/v1/chat/completions"
-        body = {
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.0,
-            "stream": False,
-        }
-        proxy_cfg = self._get_proxy_for_llm()
-        attempts = [
-            ("via proxy", 60, (proxy_cfg.get("https") or proxy_cfg.get("http")) if proxy_cfg else None),
-            ("裸连", 60, None),
-        ]
-        last_err = ""
-        for label, tmo, proxy_url in attempts:
-            try:
-                proxies_for_req = None
-                if proxy_url:
-                    proxies_for_req = {"http": proxy_url, "https": proxy_url}
-                logger.debug(f"LLM HTTP ({label}) 调用: model={model}")
-                headers = dict(self._LLM_HEADERS)
-                headers["Authorization"] = f"Bearer {api_key}"
-                resp = _requests.post(
-                    chat_url,
-                    json=body,
-                    headers=headers,
-                    timeout=(10.0, tmo),
-                    verify=False,
-                    allow_redirects=True,
-                    proxies=proxies_for_req,
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    choices = data.get("choices") or []
-                    if choices:
-                        content = (choices[0].get("message") or {}).get("content") or ""
-                        if content.strip():
-                            return content
-                    last_err = f"HTTP {label} 返回空 choices"
-                    logger.warning(f"LLM HTTP ({label}): {last_err}")
+    def _translate_single_item(self, client, svc, item_id, item):
+        title = item.get("Name", "")
+        year = item.get("ProductionYear") or (item.get("PremiereDate", "")[:4] if item.get("PremiereDate") else "")
+        item_type = item.get("Type", "")
+        display_title = title
+        if item_type == "Episode":
+            series_name = item.get("SeriesName", "") or title
+            season_num = item.get("SeasonNumber", "")
+            episode_num = item.get("EpisodeNumber", "")
+            if season_num and episode_num:
+                display_title = f"{series_name} S{season_num:02d}E{episode_num:02d}"
+            elif series_name:
+                display_title = series_name
+        key = f"{self._get_server_identifier(svc)}:{item_id}"
+
+        people = item.get("People", []) or []
+        if not people:
+            logger.info(f"[Webhook] [{item_id}] {display_title} ({year}) — 无演职人员，跳过")
+            return
+
+        to_translate = []
+        skip_reasons = []
+        cached_translations = {}
+
+        for idx, p in enumerate(people):
+            ptype = p.get("Type", "Actor")
+            name = p.get("Name", "").strip()
+            role = p.get("Role", "").strip()
+
+            name_type_ok = True
+            if not self._translate_all:
+                name_type_ok = {
+                    "Actor": self._translate_actor,
+                    "Director": self._translate_director,
+                    "Writer": self._translate_writer,
+                    "Producer": self._translate_producer,
+                    "VoiceActor": self._translate_actor,
+                }.get(ptype, False)
+
+            if name and (self._translate_all or name_type_ok):
+                if self._looks_like_chinese(name):
+                    skip_reasons.append(f"{name}(人名已是中文)")
                 else:
-                    last_err = f"HTTP {label} status={resp.status_code}, body={resp.text[:300]}"
-                    logger.warning(f"LLM HTTP ({label}) 失败: {last_err}")
-            except _requests.exceptions.ReadTimeout as e:
-                last_err = f"读超时: {e}"
-                logger.warning(f"LLM HTTP ({label}) 读超时: {e}{(' (via proxy)' if proxy_url else '')}")
-            except Exception as e:
-                last_err = f"{type(e).__name__}: {e}"
-                logger.warning(f"LLM HTTP ({label}) 异常: {last_err}{(' (via proxy)' if proxy_url else '')}")
-        self._llm_last_error = last_err or "未知"
-        return None
-
-    @staticmethod
-    def _parse_llm_json(content: str) -> Dict[str, str]:
-        if not content:
-            return {}
-        try:
-            s = content.strip()
-            if s.startswith("```"):
-                s = re.sub(r"^```(?:json)?\s*", "", s)
-                s = re.sub(r"\s*```$", "", s)
-            first = s.find("{")
-            last = s.rfind("}")
-            if first >= 0 and last > first:
-                s = s[first:last + 1]
-            result = json.loads(s)
-            if isinstance(result, dict):
-                return {str(k): str(v) for k, v in result.items()}
-        except Exception as e:
-            logger.warning(f"解析 LLM JSON 失败: {type(e).__name__}: {e}; 原始内容前200字符: {content[:200]}")
-        return {}
-
-    def _call_llm_translate(self, title: str, year: str, terms: List[str]) -> Dict[str, str]:
-        if not terms:
-            return {}
-        cache_key = f"{title}|||{year}"
-        cache_for_title = self._name_cache.get(cache_key) or {}
-        uncached = [t for t in terms if t not in cache_for_title]
-        if not uncached:
-            return {t: cache_for_title[t] for t in terms if t in cache_for_title}
-        try:
-            title_json = json.dumps(title, ensure_ascii=False)
-            year_json = json.dumps(year, ensure_ascii=False)
-            terms_json = json.dumps(uncached, ensure_ascii=False)
-        except Exception:
-            title_json = f'"{title}"'
-            year_json = f'"{year}"'
-            terms_json = json.dumps(uncached, ensure_ascii=False)
-        tmpl = self._prompt_template or DEFAULT_PROMPT
-        try:
-            prompt = tmpl.replace("{title_json}", title_json).replace("{year_json}", year_json).replace("{terms_json}", terms_json)
-        except Exception:
-            prompt = DEFAULT_PROMPT.replace("{title_json}", title_json).replace("{year_json}", year_json).replace("{terms_json}", terms_json)
-
-        result: Dict[str, str] = {}
-        sdk_out = self._try_llm_via_sdk(prompt, timeout_read=60.0)
-        if sdk_out:
-            result = self._parse_llm_json(sdk_out)
-        if not result:
-            req_out = self._try_llm_via_requests(prompt)
-            if req_out:
-                result = self._parse_llm_json(req_out)
-        for orig, trans in result.items():
-            if trans:
-                cache_for_title[orig] = trans
-        final: Dict[str, str] = {}
-        for t in terms:
-            if t in cache_for_title and cache_for_title[t]:
-                final[t] = cache_for_title[t]
-            else:
-                simp = self._zhconv_or_skip(t)
-                if simp:
-                    final[t] = simp
-                    cache_for_title[t] = simp
-        self._name_cache[cache_key] = cache_for_title
-        return final
-
-    def _update_people_with_fallback(self, service: ServiceInfo, item_id: str, new_people: List[dict],
-                                     item_data: Optional[dict] = None) -> int:
-        if not new_people:
-            return 0
-        changes = 0
-        try:
-            payload_people = {"Id": item_id, "People": new_people}
-            ok1 = self._emby_post(service, f"/Items/{item_id}", json=payload_people)
-            if ok1:
-                changes = sum(1 for p in new_people if p.get("Name"))
-                logger.debug(f"Emby 更新成功（方法1，直接 POST People）: item={item_id}, people={changes}")
-                return changes
-        except Exception as e:
-            logger.debug(f"方法1 POST People 失败: {e}")
-        if item_data and isinstance(item_data, dict):
-            try:
-                payload_full: Dict[str, Any] = {}
-                for k, v in item_data.items():
-                    if k in _EMBY_STRIP_FIELDS and k != "People":
-                        continue
-                    payload_full[k] = v
-                payload_full["Id"] = item_id
-                payload_full["People"] = new_people
-                ok2 = self._emby_post(service, f"/Items/{item_id}", json=payload_full)
-                if ok2:
-                    changes = sum(1 for p in new_people if p.get("Name"))
-                    logger.debug(f"Emby 更新成功（方法2，整条POST剔除只读字段）: item={item_id}, people={changes}")
-                    return changes
-            except Exception as e:
-                logger.debug(f"方法2 整条 POST 失败: {e}")
-        logger.warning(f"Emby 更新失败（两种方法均失败）: item={item_id}")
-        return 0
-
-    def _apply_translation_to_people_inner(self, server_name: str, service: ServiceInfo, item_id: str,
-                                           title: str, original_title: str, year_str: str,
-                                           media_type: str,
-                                           item_data: Optional[dict] = None) -> int:
-        t_start = time.time()
-        WALL_TIME_LIMIT = 240.0
-        try:
-            people_raw = []
-            if item_data and isinstance(item_data, dict):
-                people_raw = item_data.get("People") or []
-            if not people_raw:
-                logger.debug(f"{title}: 没有 People 字段，跳过")
-                return 0
-            max_n = max(1, int(self._max_people_per_title or 15))
-            candidates: List[dict] = []
-            for p in people_raw:
-                if len(candidates) >= max_n:
-                    break
-                p_type = str(p.get("Type") or "")
-                p_role = str(p.get("Role") or "")
-                if not self._person_type_allowed(p_type, p_role):
-                    continue
-                raw_name = str(p.get("Name") or "").strip()
-                if not raw_name:
-                    continue
-                if not self._overwrite_chinese and self._is_all_chinese(raw_name):
-                    continue
-                candidates.append(dict(p))
-            if not candidates:
-                return 0
-            pending_candidates: List[dict] = []
-            for c in candidates:
-                raw = str(c.get("Name") or "").strip()
-                simp = self._zhconv_or_skip(raw)
-                if simp and raw != simp:
-                    c["Name"] = simp
-                    cache_key = f"{title}|||{year_str}"
-                    d = self._name_cache.setdefault(cache_key, {})
-                    d[raw] = simp
-                    self._name_cache[cache_key] = d
-                pending_candidates.append(c)
-            batch_size = max(1, int(self._max_people_per_batch or 5))
-            all_names: List[str] = []
-            for c in pending_candidates:
-                raw = str(c.get("Name") or "")
-                if raw and raw not in all_names:
-                    all_names.append(raw)
-            applied: Dict[str, str] = {}
-            for i in range(0, len(all_names), batch_size):
-                if time.time() - t_start > WALL_TIME_LIMIT:
-                    logger.warning(f"【{title}】单条目 wall-clock 超时 {WALL_TIME_LIMIT}s，剩余批次跳过，下次 cron 再补")
-                    break
-                batch = all_names[i:i + batch_size]
-                try:
-                    batch_map = self._call_llm_translate(title, year_str, batch)
-                    for k, v in batch_map.items():
-                        if v and k != v:
-                            applied[k] = v
-                except Exception as e:
-                    logger.warning(f"【{title}】第{i // batch_size + 1}批LLM异常: {type(e).__name__}: {e}")
-                finally:
-                    try:
-                        time.sleep(min(int(self._delay or 2), 2))
-                    except Exception:
-                        pass
-            new_people = [dict(p) for p in people_raw]
-            n_changes = 0
-            for idx, p in enumerate(new_people):
-                raw = str(p.get("Name") or "").strip()
-                if not raw:
-                    continue
-                if raw in applied:
-                    new_name = applied[raw].strip()
-                    if new_name and new_name != raw:
-                        new_people[idx]["Name"] = new_name
-                        n_changes += 1
-                raw_role = str(p.get("Role") or "").strip()
-                if raw_role and not self._is_all_chinese(raw_role):
-                    role_trans = applied.get(raw_role)
-                    if role_trans and role_trans != raw_role:
-                        new_people[idx]["Role"] = role_trans
-                        n_changes += 1
+                    cached = self._get_cached_value(self._name_cache, name)
+                    if cached:
+                        cached_translations[name] = cached
+                        self._cache_hits += 1
+                        skip_reasons.append(f"{name}(缓存命中)")
                     else:
-                        simp_role = self._zhconv_or_skip(raw_role)
-                        if simp_role and simp_role != raw_role:
-                            new_people[idx]["Role"] = simp_role
-                            n_changes += 1
-            if n_changes <= 0:
-                self._processed[f"{server_name}:{item_id}"] = datetime.now().isoformat(timespec='seconds')
-                return 0
-            updated = self._update_people_with_fallback(service, item_id, new_people, item_data)
-            if updated > 0:
-                self._processed[f"{server_name}:{item_id}"] = datetime.now().isoformat(timespec='seconds')
-                return updated
-            return 0
-        except Exception as e:
-            logger.error(f"【{title}】翻译+写回 异常: {type(e).__name__}: {e}", exc_info=True)
-            return 0
+                        self._cache_misses += 1
+                        to_translate.append((name, "Name", idx, ptype))
 
-    def sync_library(self):
-        if not self._enabled:
+            if role and (self._translate_role or self._translate_all):
+                if self._looks_like_chinese(role):
+                    skip_reasons.append(f"{role}(角色已是中文)")
+                else:
+                    cached = self._get_cached_value(self._role_cache, role)
+                    if cached:
+                        cached_translations[role] = cached
+                        self._cache_hits += 1
+                        skip_reasons.append(f"{role}(缓存命中)")
+                    else:
+                        self._cache_misses += 1
+                        to_translate.append((role, "Role", idx, ptype))
+
+        translations = dict(cached_translations)
+
+        if not to_translate:
+            if cached_translations:
+                new_people = self._build_new_people(people, cached_translations)
+                lock = self._lock_cast
+                logger.info(f"[Webhook] [{item_id}] {display_title} ({year}) — 缓存命中 {len(cached_translations)} 条，写入 Emby...")
+                updated = client.update_people(svc, item_id, new_people, item_data=item, lock_cast=lock)
+                if updated > 0:
+                    self._post_translate_hook(key, display_title, year, item_id, cached_translations, lock, "")
+                    self._save_state()
             return
-        self._event.clear()
-        service_infos = self.service_infos()
-        if not service_infos:
-            logger.warning("没有可用的 Emby 服务器（请先选择服务器或媒体库）")
-            self._event.set()
-            return
-        selected_libs = self._parse_selected_libraries()
-        total_titles = success = skipped = failed = 0
-        total_fields_all = 0
-        try:
-            for server, service in service_infos.items():
+
+        to_translate = to_translate[:self._max_people_per_title]
+
+        remaining = []
+        seen_texts = set()
+        for text, field, idx, ptype in to_translate:
+            if text in seen_texts:
+                continue
+            seen_texts.add(text)
+            if HAS_ZHCONV and any(0x4E00 <= ord(c) <= 0x9FFF for c in text):
                 try:
-                    if self._event.is_set() or not self._enabled:
-                        logger.info("收到停止信号，中断扫描")
-                        break
-                    logger.info(f"开始扫描服务器 {server}...")
-                    target_lib_ids = set(selected_libs.get(server, []))
-                    host, api_key = self._get_emby_info(service)
-                    if not host or not api_key:
-                        logger.error(f"{server}: 无法获取 Emby 连接信息，跳过此服务器")
+                    simplified = zhconv.convert(text, 'zh-cn')
+                    if simplified != text:
+                        translations[text] = simplified
+                        cache_store = self._name_cache if field == "Name" else self._role_cache
+                        self._set_cached_value(cache_store, text, simplified)
                         continue
-                    user_id = getattr(service.instance, 'user', None)
-                    vf_data = self._emby_get(service, "/Library/VirtualFolders")
-                    if not vf_data or not isinstance(vf_data, list):
-                        try:
-                            vf2 = self._emby_get(service, f"/Users/{user_id}/Views" if user_id else "/Library/SelectableMediaFolders")
-                            if isinstance(vf2, dict):
-                                vf_data = vf2.get("Items") or []
-                            elif isinstance(vf2, list):
-                                vf_data = vf2
-                        except Exception:
-                            pass
-                    if not vf_data or not isinstance(vf_data, list):
-                        logger.error(f"{server}: 拿不到媒体库列表，跳过此服务器")
-                        continue
-                    libraries = []
-                    for vf in vf_data:
-                        lib_id = str(vf.get("Id") or vf.get("ItemId") or vf.get("Guid") or "")
-                        lib_name = str(vf.get("Name") or vf.get("DisplayName") or "")
-                        if lib_id:
-                            libraries.append({"id": lib_id, "name": lib_name})
-                    logger.info(f"服务器 {server} 共有 {len(libraries)} 个媒体库")
-                    for library in libraries:
-                        try:
-                            if self._event.is_set() or not self._enabled:
-                                break
-                            lid = library["id"]
-                            lname = library["name"]
-                            is_selected = bool(target_lib_ids) and lid in target_lib_ids
-                            if target_lib_ids and not is_selected:
-                                logger.info(f"跳过媒体库: {lname}（未选择）")
-                                continue
-                            logger.info(f"扫描媒体库: {lname} (id={lid})")
-                            fields = "People,Genres,Tags,ProviderIds,OriginalTitle,PremiereDate,ProductionYear"
-                            page_size = 200
-                            start_index = 0
-                            page_counter = 0
-                            while True:
-                                if self._event.is_set() or not self._enabled:
+                except Exception:
+                    pass
+            remaining.append(text)
+
+        if remaining and self._llm:
+            try:
+                logger.info(f"[Webhook] [{item_id}] {display_title} ({year}) — LLM 翻译 {len(remaining)} 条...")
+                result = self._llm.translate_terms(title, year, remaining)
+                if isinstance(result, dict):
+                    translations.update(result)
+                    for orig, trans in result.items():
+                        if trans and trans != orig:
+                            for text, field, idx, ptype in to_translate:
+                                if text == orig:
+                                    cache_store = self._name_cache if field == "Name" else self._role_cache
+                                    self._set_cached_value(cache_store, orig, trans)
                                     break
-                                page_counter += 1
-                                items_url = (
-                                    f"/Items?ParentId={lid}&Recursive=true"
-                                    f"&Fields={fields}&IncludeItemTypes=Movie,Series"
-                                    f"&StartIndex={start_index}&Limit={page_size}"
-                                )
-                                try:
-                                    items_data = self._emby_get(service, items_url)
-                                except Exception as e:
-                                    logger.error(f"分页获取 {lname} 失败 page={page_counter}: {e}")
-                                    break
-                                if not items_data or not isinstance(items_data, dict):
-                                    logger.warning(f"获取 {lname} 条目失败，停止此库分页")
-                                    break
-                                items = items_data.get("Items") or []
-                                total_record_count = int(items_data.get("TotalRecordCount") or len(items))
-                                if not items:
-                                    break
-                                logger.info(f"  [{lname}] page={page_counter} 条目数={len(items)}，总={total_record_count}")
-                                per_page_processed = per_page_success = per_page_fail = per_page_skip = 0
-                                per_page_fields = 0
-                                for it in items:
-                                    if self._event.is_set() or not self._enabled:
-                                        break
-                                    if not it or not isinstance(it, dict):
-                                        continue
-                                    item_id = str(it.get("Id") or "")
-                                    if not item_id:
-                                        continue
-                                    item_type = str(it.get("Type") or "")
-                                    is_series = "Series" in item_type
-                                    is_movie = "Movie" in item_type
-                                    if not is_series and not is_movie:
-                                        continue
-                                    total_titles += 1
-                                    per_page_processed += 1
-                                    item_key = f"{server}:{item_id}"
-                                    if not self._force_refresh and item_key in self._processed:
-                                        skipped += 1
-                                        per_page_skip += 1
-                                        continue
-                                    t_title = str(it.get("Name") or "未知")
-                                    t_orig = str(it.get("OriginalTitle") or t_title)
-                                    prod_year = it.get("ProductionYear")
-                                    premier = str(it.get("PremiereDate") or "")
-                                    t_year = str(prod_year if prod_year else (premier[:4] if premier else ""))
-                                    mtype = "TV" if is_series else "MOVIE"
-                                    try:
-                                        logger.info(f"处理: {t_title} ({'番剧' if is_series else '动漫电影'})")
-                                        n_trans = self._apply_translation_to_people_inner(
-                                            server, service, item_id, t_title, t_orig, t_year, mtype, item_data=it,
-                                        )
-                                        if n_trans > 0:
-                                            logger.info(f"{t_title} ({'番剧' if is_series else '动漫电影'}): Emby 更新成功，翻译 {n_trans} 个字段")
-                                            self._add_history(item_key, t_title, server, lname, n_trans, item_id)
-                                            total_fields_all += n_trans
-                                            per_page_fields += n_trans
-                                            success += 1
-                                            per_page_success += 1
-                                        else:
-                                            skipped += 1
-                                            per_page_skip += 1
-                                    except Exception as e:
-                                        failed += 1
-                                        per_page_fail += 1
-                                        logger.error(f"处理 {t_title or '未知'} 失败: {type(e).__name__}: {e}", exc_info=True)
-                                    finally:
-                                        if per_page_processed % self._SAVE_INTERVAL == 0:
-                                            self._save_cache()
-                                        try:
-                                            time.sleep(min(int(self._delay or 2), 2))
-                                        except Exception:
-                                            pass
-                                logger.info(
-                                    f"  [{lname}] 页{page_counter}统计：处理{per_page_processed}，"
-                                    f"成功翻译{per_page_success}({per_page_fields}字段)，跳过{per_page_skip}，失败{per_page_fail}"
-                                )
-                                self._save_cache()
-                                start_index += len(items)
-                                if start_index >= total_record_count or len(items) < page_size:
-                                    break
-                        except Exception as e:
-                            logger.error(f"处理库 {library.get('name')} 时发生异常: {type(e).__name__}: {e}", exc_info=True)
-                        finally:
-                            self._save_cache()
-                except Exception as e:
-                    logger.error(f"处理服务器 {server} 异常: {type(e).__name__}: {e}", exc_info=True)
-        except Exception as e:
-            logger.error(f"扫描全局异常: {type(e).__name__}: {e}", exc_info=True)
-        finally:
-            self._save_cache()
-            self._event.set()
-        summary = (
-            f"扫描完成\n总计: {total_titles}\n成功(翻译作品): {success}\n"
-            f"翻译字段: {total_fields_all}\n跳过: {skipped}\n失败: {failed}"
-        )
-        logger.info(
-            f"扫描完成 - 总计: {total_titles}, 成功: {success}, 翻译字段数: {total_fields_all}, "
-            f"跳过: {skipped}, 失败: {failed}"
-        )
-        try:
-            self.post_message(
-                mtype=NotificationType.Plugin,
-                title="Emby 演职人员中文化",
-                text=summary,
-            )
-        except Exception:
-            pass
+            except Exception as e:
+                logger.error(f"[Webhook] LLM 翻译失败 [{display_title}]: {e}")
+                return
+
+        if not translations:
+            logger.info(f"[Webhook] [{item_id}] {display_title} ({year}) — 无有效翻译结果")
+            return
+
+        new_people = self._build_new_people(people, translations)
+        lock = self._lock_cast
+        logger.info(f"[Webhook] [{item_id}] {display_title} ({year}) — 写入 Emby ({len(translations)} 条翻译)...")
+        updated = client.update_people(svc, item_id, new_people, item_data=item, lock_cast=lock)
+        if updated > 0:
+            self._post_translate_hook(key, display_title, year, item_id, translations, lock, "")
+            self._save_state()
+            logger.info(f"[Webhook] 翻译完成: {display_title} ({year}) — 翻译 {len(translations)} 条")
