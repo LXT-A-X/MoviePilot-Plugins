@@ -636,8 +636,18 @@ def build_page(plugin) -> List[dict]:
         ],
     }
 
-    # ── 历史记录列表 ──
-    history_list = _build_history_list(history)
+    # ── 历史记录列表（支持搜索筛选）──
+    search_keyword = getattr(plugin, "_history_search", "") or ""
+    filtered_history = history
+    if search_keyword:
+        kw = search_keyword.lower()
+        filtered_history = [h for h in history if
+            kw in str(h.get("title", "")).lower() or
+            kw in str(h.get("library", "")).lower() or
+            kw in str(h.get("year", "")).lower() or
+            kw in str(h.get("item_id", "")).lower()
+        ]
+    history_list = _build_history_list(filtered_history, search_keyword=search_keyword)
 
     # ── 整体外框 ──
     page_wrapper = {
@@ -663,7 +673,7 @@ def build_page(plugin) -> List[dict]:
     ]
 
 
-def _build_history_list(history):
+def _build_history_list(history, search_keyword=""):
     """历史记录卡片列表"""
     if not history:
         return {
@@ -761,7 +771,7 @@ def _build_history_list(history):
                         },
                         {
                             "component": "VCol",
-                            "props": {"cols": 4, "sm": 3, "class": "py-1 d-flex justify-end align-center"},
+                            "props": {"cols": 3, "sm": 2, "class": "py-1 d-flex justify-end align-center"},
                             "content": [
                                 {
                                     "component": "VIcon",
@@ -773,6 +783,25 @@ def _build_history_list(history):
                                     "props": {"class": "text-caption", "style": {"color": lock_color}},
                                     "text": lock_text,
                                 },
+                            ],
+                        },
+                        {
+                            "component": "VCol",
+                            "props": {"cols": 2, "sm": 2, "class": "py-1 d-flex justify-end align-center"},
+                            "content": [
+                                {
+                                    "component": "VBtn",
+                                    "props": {
+                                        "color": "info",
+                                        "size": "small",
+                                        "variant": "text",
+                                        "density": "compact",
+                                        "class": "text-none",
+                                        "prepend_icon": "mdi-translate",
+                                    },
+                                    "text": "重译",
+                                    "events": {"click": {"api": f"plugin/EmbyPeopleLocalize/retranslate", "method": "POST", "data": {"item_id": h.get("item_id", "")}}},
+                                }
                             ],
                         },
                     ],
@@ -801,6 +830,28 @@ def _build_history_list(history):
                 "text": "最近翻译历史",
             },
             {"component": "VDivider", "props": {"style": {"opacity": 0.4}}},
+            {
+                "component": "VCardText",
+                "props": {"class": "px-4 py-2"},
+                "content": [
+                    {
+                        "component": "VTextField",
+                        "props": {
+                            "model": "_history_search",
+                            "label": "搜索历史",
+                            "placeholder": "按作品名、年份、库名搜索...",
+                            "density": "compact",
+                            "variant": "outlined",
+                            "prepend_inner_icon": "mdi-magnify",
+                            "class": "mb-0",
+                            "style": {
+                                "--v-field-border-opacity": "0.65",
+                                "--v-field-border-width": "1px",
+                            },
+                        },
+                    },
+                ],
+            },
             {
                 "component": "VCardText",
                 "props": {
@@ -841,7 +892,7 @@ def build_form(lib_options, plugin, invalid_libraries=None):
 
     basic_rows = [
         _row([
-            _col(12, [_switch("enabled", "启用插件", "开启后定时 / 实时翻译演职人员")], sm=6),
+            _col(12, [_switch("enabled", "启用插件", "开启后入库时自动翻译演职人员")], sm=6),
             _col(12, [_switch("run_scan", "立即扫描（保存后执行）", "打开开关后点下方保存按钮，插件自动开始扫描")], sm=6),
         ]),
         _row([
@@ -859,7 +910,6 @@ def build_form(lib_options, plugin, invalid_libraries=None):
                            "选择要扫描的媒体库，支持跨服务器；留空则扫描所有服务器所有库")]),
         ]),
         _row([
-            _col(12, [_text_field("cron", "定时扫描 Cron", "0 4 * * *", "例：0 4 * * * 每天凌晨 4 点")], sm=6),
             _col(12, [_text_field("delay", "批间延迟（秒）", "2", "每次请求间隔，避免触发限流", "number")], sm=6),
         ]),
     ]
@@ -1000,10 +1050,7 @@ def build_form(lib_options, plugin, invalid_libraries=None):
             _col(12, [_switch("lock_cast", "扫描时自动锁定 Cast",
                               "开启后，每次翻译写回都会自动把 Cast 加入 LockedFields，防止后续刮削覆盖中文译名")]),
         ]),
-        _row([
-            _col(12, [_text_field("webhook_delay", "入库延迟(秒)", "60",
-                                  "Emby 通过 Webhook 入库后等待 N 秒再扫描（等待刮源完成）", "number")]),
-        ]),
+
     ]
     card_advanced = _section("高级设置", C_WARNING, advanced_rows)
 
@@ -1018,7 +1065,6 @@ def build_form(lib_options, plugin, invalid_libraries=None):
     # 默认配置（用于初始化表单）
     default_config = {
         "enabled": False,
-        "cron": "0 4 * * *",
         "delay": 2,
         "translate_actor": True,
         "translate_director": False,

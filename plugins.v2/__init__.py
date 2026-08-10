@@ -1,7 +1,8 @@
 """
-EmbyPeopleLocalize - Emby 演职人员中文化 v0.7.0
+EmbyPeopleLocalize - Emby 演职人员中文化 v0.8.0
 利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回
-支持多服务器分库、定时/入库/刮削触发、Cast 锁定防覆盖、繁简直转省 LLM
+支持多服务器分库、入库/Webhook触发、Cast 锁定防覆盖、繁简直转省 LLM
+v0.8.0: 移除定时扫描、新增重新翻译功能、历史搜索筛选、通知始终发送
 v0.7.0: Webhook 入库自动翻译、缓存持久化到 config/plugins/
 """
 import json
@@ -81,7 +82,7 @@ class EmbyPeopleLocalize(_PluginBase):
     plugin_name = "Emby 演职人员中文化"
     plugin_desc = "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回（可选库/全库）"
     plugin_icon = "embypeoplelocalize.jpg"
-    plugin_version = "0.7.0"
+    plugin_version = "0.8.0"
     plugin_author = "LXT-A-X"
     plugin_config_prefix = "embypeoplelocalize_"
     plugin_order = 27
@@ -91,7 +92,6 @@ class EmbyPeopleLocalize(_PluginBase):
     # ────────── 配置项 ──────────
     _enabled: bool = False
     _onlyonce: bool = False
-    _cron: str = "0 4 * * *"
     _libraries: List[str] = []
     _prompt_template: str = ""
     _translate_actor: bool = True
@@ -159,7 +159,7 @@ class EmbyPeopleLocalize(_PluginBase):
     @property
     def private_attrs(self) -> List[str]:
         return [
-            "_enabled", "_onlyonce", "_cron", "_libraries", "_prompt_template",
+            "_enabled", "_onlyonce", "_libraries", "_prompt_template",
             "_translate_actor", "_translate_voice_actor", "_translate_director",
             "_translate_writer", "_translate_producer", "_translate_all", "_translate_role",
             "_max_people_per_title", "_max_people_per_batch", "_overwrite_chinese",
@@ -250,6 +250,8 @@ class EmbyPeopleLocalize(_PluginBase):
             {"path": "/back_to_page",   "endpoint": self._api_back_to_page,  "methods": ["GET"],       "auth": None, "summary": "返回数据页"},
             {"path": "/save_config",    "endpoint": self._api_save_config,   "methods": ["POST"],      "auth": None, "summary": "保存配置"},
             {"path": "/refresh_llm",    "endpoint": self._api_refresh_llm,   "methods": ["POST"],      "auth": None, "summary": "刷新LLM配置"},
+            {"path": "/retranslate", "endpoint": self._api_retranslate, "methods": ["POST"], "auth": None, "summary": "重新翻译历史条目"},
+            {"path": "/search_history", "endpoint": self._api_search_history, "methods": ["GET", "POST"], "auth": None, "summary": "搜索翻译历史"},
         ]
 
     # ============================================================
@@ -447,18 +449,10 @@ class EmbyPeopleLocalize(_PluginBase):
         """初始化插件 — 不清除状态，只重载配置和连接"""
         # 先加载持久化状态（历史、缓存不丢失）
         self._load_state()
-        # 请求旧扫描停止（不清除状态）
-        self._stop_requested = True
+        # 保存配置时不中断正在运行的扫描，避免缓存丢失
+        # 如果扫描正在运行，让它继续执行，配置更新在下次扫描时生效
         if self._is_running:
-            logger.info("请求旧扫描安全退出，等待最多 10 秒...")
-            for _ in range(20):
-                if not self._is_running:
-                    logger.info("旧扫描已退出")
-                    break
-                time.sleep(0.5)
-            else:
-                logger.warning("旧扫描仍在运行，配置已更新，但扫描可能需要更长时间退出")
-        # 不再重置 _stop_requested，由扫描线程的 finally 块清除
+            logger.info("扫描正在运行，配置将在下次扫描时生效")
 
         if config:
             self._load_config(config)
@@ -496,7 +490,6 @@ class EmbyPeopleLocalize(_PluginBase):
     def _load_config(self, config: dict):
         self._enabled = bool(config.get("enabled", False))
         self._onlyonce = bool(config.get("onlyonce", False))
-        self._cron = str(config.get("cron", "0 4 * * *"))
         self._libraries = list(config.get("libraries", []))
         self._prompt_template = str(config.get("prompt_template") or DEFAULT_PROMPT)
         self._translate_all = bool(config.get("translate_all", False))
@@ -542,7 +535,6 @@ class EmbyPeopleLocalize(_PluginBase):
         return {
             "enabled": self._enabled,
             "onlyonce": self._onlyonce,
-            "cron": self._cron,
             "libraries": self._libraries,
             "prompt_template": self._prompt_template or DEFAULT_PROMPT,
             "translate_actor": self._translate_actor,
@@ -567,6 +559,101 @@ class EmbyPeopleLocalize(_PluginBase):
             "webhook_delay": self._webhook_delay,
             "notify_on_complete": self._notify_on_complete,
         }
+
+
+    def _api_retranslate(self, **kwargs):
+        """重新翻译指定条目"""
+        try:
+            data = kwargs.get("data") or kwargs.get("form") or kwargs
+            item_id = data.get("item_id") or data.get("itemId") or ""
+            if not item_id:
+                return {"success": False, "message": "缺少 item_id 参数"}
+            
+            # 从历史记录中查找条目信息
+            history_item = None
+            for h in reversed(self._history):
+                if str(h.get("item_id", "")) == str(item_id):
+                    history_item = h
+                    break
+            
+            if not history_item:
+                return {"success": False, "message": "未在历史记录中找到该条目"}
+            
+            # 获取条目详情并重新翻译
+            services = self._get_all_emby_services()
+            if not services:
+                return {"success": False, "message": "无可用 Emby 服务器"}
+            
+            # 从 key 中解析服务器标识
+            item_key = None
+            for key in self._processed:
+                if key.endswith(f":{item_id}"):
+                    item_key = key
+                    break
+            
+            if item_key:
+                skey = item_key.split(":")[0]
+                svc = next((s for s in services if self._get_server_identifier(s) == skey), services[0])
+            else:
+                svc = services[0]
+            
+            url = self._get_service_url(svc)
+            api_key = self._get_service_api_key(svc)
+            user_id = self._get_service_user_id(svc)
+            client = EmbyClient(url, api_key, svc, user_id=user_id)
+            
+            # 获取条目详情
+            item = client.fetch_item(svc, item_id)
+            if not item:
+                return {"success": False, "message": f"无法获取条目详情: {item_id}"}
+            
+            # 移除该条目的缓存，强制重新翻译
+            key = f"{self._get_server_identifier(svc)}:{item_id}"
+            with self._state_lock:
+                if key in self._processed:
+                    del self._processed[key]
+            
+            # 重新翻译
+            self._force_refresh = True
+            translated, failed = self._process_item(client, svc, self._get_server_identifier(svc), item, history_item.get("library", ""))
+            
+            return {
+                "success": True, 
+                "message": f"重新翻译完成: 翻译 {translated} 条, 失败 {failed} 条",
+                "data": {"translated": translated, "failed": failed}
+            }
+        except Exception as e:
+            logger.error(f"重新翻译失败: {e}")
+            return {"success": False, "message": str(e)}
+
+    def _api_search_history(self, **kwargs):
+        """搜索翻译历史"""
+        try:
+            data = kwargs.get("data") or kwargs.get("form") or kwargs
+            keyword = (data.get("keyword") or data.get("search") or data.get("q") or "").strip().lower()
+            limit = int(data.get("limit", 50) or 50)
+            
+            history = self._history
+            if keyword:
+                history = [h for h in history if 
+                    keyword in str(h.get("title", "")).lower() or
+                    keyword in str(h.get("library", "")).lower() or
+                    keyword in str(h.get("year", "")).lower() or
+                    keyword in str(h.get("item_id", "")).lower()
+                ]
+            
+            # 返回最近的 limit 条
+            history = history[-limit:]
+            
+            return {
+                "success": True,
+                "data": {
+                    "total": len(history),
+                    "history": history
+                }
+            }
+        except Exception as e:
+            return {"success": False, "message": str(e)}
 
     def _startup(self):
         try:
@@ -621,24 +708,7 @@ class EmbyPeopleLocalize(_PluginBase):
         logger.info(f"LLM 刷新完成: {old_model} → {new_model}")
         return old_model, new_model
 
-    def _scheduled_scan(self):
-        """定时扫描入口"""
-        self._scan_worker(force=False)
 
-    def get_service(self) -> List[Dict[str, Any]]:
-        if not self._enabled or not self._cron:
-            return []
-        try:
-            from apscheduler.triggers.cron import CronTrigger
-            return [{
-                "id": "EmbyPeopleLocalize",
-                "name": "Emby演职人员中文化定时扫描",
-                "trigger": CronTrigger.from_crontab(self._cron),
-                "func": self._scheduled_scan,
-            }]
-        except Exception as e:
-            logger.error(f"注册定时任务失败: {e}")
-            return []
 
     # ============================================================
     # 媒体服务器 / 媒体库
@@ -794,7 +864,7 @@ class EmbyPeopleLocalize(_PluginBase):
             logger.info(f"扫描完成: 翻译 {total_translated} 条, 失败 {total_failed} 条")
             
             # 发送扫描完成通知
-            if self._notify_on_complete and (total_translated > 0 or total_failed > 0):
+            if self._notify_on_complete:
                 try:
                     hit_rate = round(self._cache_hits / max(self._cache_hits + self._cache_misses, 1) * 100, 1)
                     self.post_message(
