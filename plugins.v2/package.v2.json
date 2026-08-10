@@ -4,7 +4,7 @@
     "description": "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回（可选库/全库），支持 Webhook 入库自动翻译、角色名独立缓存、缓存命中率统计、LLM 配置动态刷新。",
     "labels": "Emby,LLM,翻译,人名本地化,声优,演职人员",
     "version": "0.7.0",
-    "icon": "embypeoplelocalize.jpg",
+    "icon": "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/embypeoplelocalize.jpg",
     "author": "LXT-A-X",
     "level": 1,
     "history": {
