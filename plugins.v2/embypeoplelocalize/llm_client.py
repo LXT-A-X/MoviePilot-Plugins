@@ -1,17 +1,18 @@
 """
 llm_client.py - 大模型客户端
-优先使用 openai SDK，失败时降级为纯 requests
+v0.9.0 重构版 - 简化代码，统一日志，增强错误处理
 """
 import json
-import time
+import re
 import traceback
 from typing import Any, Dict, List, Optional
 
 from app.core.config import settings
+from app.log import logger
 
 
 class LLMClient:
-    """大模型客户端（兼容 openai SDK 和纯 requests 双模式）"""
+    """大模型客户端"""
 
     def __init__(self, base_url: str, api_key: str, model: str,
                  prompt_template: str = "", timeout: int = 60):
@@ -25,21 +26,17 @@ class LLMClient:
         self._init_client()
 
     def _init_client(self):
-        """初始化 openai SDK 客户端（带代理支持）"""
+        """初始化客户端（优先 SDK，失败降级为 requests）"""
         try:
             import openai
             import httpx
 
-            # 解析代理
             proxies = self._parse_proxy()
-
-            http_client = None
-            if proxies:
-                http_client = httpx.Client(
-                    proxies=proxies,
-                    timeout=self.timeout,
-                    verify=False
-                )
+            http_client = httpx.Client(
+                proxies=proxies,
+                timeout=self.timeout,
+                verify=False
+            ) if proxies else None
 
             self._client = openai.OpenAI(
                 base_url=self.base_url,
@@ -47,14 +44,14 @@ class LLMClient:
                 http_client=http_client,
             )
             self._use_sdk = True
-            print(f"[LLMClient] SDK 模式初始化成功: {self.model}")
+            logger.info(f"[LLMClient] SDK 模式初始化成功: {self.model}")
         except Exception as e:
-            print(f"[LLMClient] SDK 初始化失败，降级为 requests: {e}")
+            logger.warning(f"[LLMClient] SDK 初始化失败，降级为 requests: {e}")
             self._client = None
             self._use_sdk = False
 
     def _parse_proxy(self) -> Optional[dict]:
-        """解析 settings.PROXY 为 httpx/openai 通用格式"""
+        """解析代理配置"""
         try:
             raw = getattr(settings, 'PROXY', None)
             if not raw:
@@ -77,39 +74,42 @@ class LLMClient:
             pass
         return None
 
-    # ─────────────────────────────────────
-    # 核心翻译方法
-    # ─────────────────────────────────────
     def translate_terms(self, title: str, year: Any, terms: List[str]) -> Dict[str, str]:
-        """
-        翻译一批词条
-        返回 {原文: 译文} 字典
-        """
+        """翻译一批词条，返回 {原文: 译文}"""
         if not terms:
             return {}
 
         prompt = self._build_prompt(title, year, terms)
 
-        # 优先 SDK
-        if self._use_sdk and self._client:
-            return self._call_sdk(prompt)
-        # 降级 requests
-        return self._call_requests(prompt)
+        try:
+            if self._use_sdk and self._client:
+                result = self._call_sdk(prompt)
+            else:
+                result = self._call_requests(prompt)
+
+            if result:
+                logger.info(f"[LLMClient] 翻译成功: {len(result)} 个词条")
+            else:
+                logger.warning(f"[LLMClient] 翻译返回空结果")
+            return result
+        except Exception as e:
+            logger.error(f"[LLMClient] 翻译失败: {e}\n{traceback.format_exc()}")
+            return {}
 
     def _build_prompt(self, title: str, year: Any, terms: List[str]) -> str:
         """构建提示词"""
-        template = self.prompt_template or self._default_prompt()
+        template = self.prompt_template or self._get_default_prompt()
         prompt = template
         prompt = prompt.replace("{title_json}", json.dumps(title, ensure_ascii=False))
         prompt = prompt.replace("{year_json}", json.dumps(year, ensure_ascii=False))
         prompt = prompt.replace("{terms_json}", json.dumps(terms, ensure_ascii=False))
         return prompt
 
-    def _default_prompt(self) -> str:
+    def _get_default_prompt(self) -> str:
         return """你是影视翻译专家。将以下词条翻译成简体中文。
-输入: {terms_json}
-输出: JSON 对象，键为原文，值为译文。无法翻译保留原文。
-只输出 JSON，不要 markdown。"""
+context: {"title": {title_json}, "year": {year_json}}
+terms: {terms_json}
+输出: JSON 对象，键为原文，值为译文。无法翻译保留原文。只输出 JSON，不要 markdown。"""
 
     def _call_sdk(self, prompt: str) -> Dict[str, str]:
         """通过 openai SDK 调用"""
@@ -124,9 +124,9 @@ class LLMClient:
                 max_tokens=2048,
             )
             text = resp.choices[0].message.content.strip()
-            return self._parse_json_response(text)
+            return self._parse_response(text)
         except Exception as e:
-            print(f"[LLMClient] SDK 调用失败: {e}")
+            logger.error(f"[LLMClient] SDK 调用失败: {e}")
             return {}
 
     def _call_requests(self, prompt: str) -> Dict[str, str]:
@@ -157,17 +157,15 @@ class LLMClient:
             resp.raise_for_status()
             result = resp.json()
             text = result["choices"][0]["message"]["content"].strip()
-            return self._parse_json_response(text)
+            return self._parse_response(text)
         except Exception as e:
-            print(f"[LLMClient] requests 调用失败: {e}")
+            logger.error(f"[LLMClient] requests 调用失败: {e}")
             return {}
 
-    def _parse_json_response(self, text: str) -> Dict[str, str]:
+    def _parse_response(self, text: str) -> Dict[str, str]:
         """从 LLM 响应中解析 JSON"""
-        # 去掉可能的 markdown 包裹
         text = text.strip()
         if text.startswith("```"):
-            # 去掉 ```json 和 ```
             lines = text.split("\n")
             if lines[0].startswith("```"):
                 lines = lines[1:]
@@ -180,8 +178,6 @@ class LLMClient:
             if isinstance(data, dict):
                 return {str(k): str(v) for k, v in data.items() if v}
         except json.JSONDecodeError:
-            # 尝试提取第一个 JSON 对象
-            import re
             match = re.search(r'\{[^{}]*\}', text)
             if match:
                 try:
@@ -189,5 +185,6 @@ class LLMClient:
                     return {str(k): str(v) for k, v in data.items() if v}
                 except json.JSONDecodeError:
                     pass
-        print(f"[LLMClient] 无法解析响应: {text[:200]}")
+
+        logger.warning(f"[LLMClient] 无法解析响应: {text[:200]}")
         return {}

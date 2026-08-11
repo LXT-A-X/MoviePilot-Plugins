@@ -1,10 +1,12 @@
 """
 translator.py - 翻译引擎协调层
-负责：人名缓存管理、繁简转换、调用 LLM 客户端、批量分批
+v0.9.0 重构版 - 统一翻译逻辑，简化缓存管理
 """
 import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
+
+from app.log import logger
 
 try:
     import zhconv
@@ -16,119 +18,158 @@ except ImportError:
 class PeopleTranslator:
     """演职人员翻译引擎"""
 
-    def __init__(self, llm_client, emby_client=None,
-                 name_cache: Optional[Dict[str, Dict[str, str]]] = None,
+    def __init__(self, llm_client, name_cache: Optional[Dict[str, Dict[str, str]]] = None,
+                 role_cache: Optional[Dict[str, Dict[str, str]]] = None,
                  state_lock: Optional[threading.Lock] = None,
                  plugin=None):
         self.llm = llm_client
-        self.emby = emby_client
-        self._cache = name_cache or {}
+        self._name_cache = name_cache or {}
+        self._role_cache = role_cache or {}
         self._lock = state_lock or threading.Lock()
-        self.plugin = plugin  # 用于读取 max_people_per_batch 等配置
+        self.plugin = plugin
 
     # ─────────────────────────────────────
     # 缓存管理
     # ─────────────────────────────────────
-    def get_cached(self, name: str) -> Optional[str]:
-        """查缓存"""
+    def get_cached_name(self, name: str) -> Optional[str]:
+        """查人名缓存"""
         with self._lock:
-            for lang_cache in self._cache.values():
+            for lang_cache in self._name_cache.values():
                 if name in lang_cache:
                     return lang_cache[name]
         return None
 
-    def set_cached(self, name: str, translated: str, lang: str = "default"):
-        """写缓存"""
+    def get_cached_role(self, role: str) -> Optional[str]:
+        """查角色缓存"""
         with self._lock:
-            if lang not in self._cache:
-                self._cache[lang] = {}
-            self._cache[lang][name] = translated
+            for lang_cache in self._role_cache.values():
+                if role in lang_cache:
+                    return lang_cache[role]
+        return None
 
-    def cache_size(self) -> int:
+    def set_cached_name(self, name: str, translated: str):
+        """写人名缓存"""
         with self._lock:
-            return sum(len(v) for v in self._cache.values())
+            if "default" not in self._name_cache:
+                self._name_cache["default"] = {}
+            self._name_cache["default"][name] = translated
+
+    def set_cached_role(self, role: str, translated: str):
+        """写角色缓存"""
+        with self._lock:
+            if "default" not in self._role_cache:
+                self._role_cache["default"] = {}
+            self._role_cache["default"][role] = translated
+
+    def name_cache_size(self) -> int:
+        with self._lock:
+            return sum(len(v) for v in self._name_cache.values())
+
+    def role_cache_size(self) -> int:
+        with self._lock:
+            return sum(len(v) for v in self._role_cache.values())
+
+    # ─────────────────────────────────────
+    # 繁简转换
+    # ─────────────────────────────────────
+    @staticmethod
+    def contains_chinese(text: str) -> bool:
+        """检测是否包含中文"""
+        for c in text:
+            cp = ord(c)
+            if 0x4E00 <= cp <= 0x9FFF or 0x3400 <= cp <= 0x4DBF:
+                return True
+        return False
+
+    def try_zhconv(self, text: str) -> Optional[str]:
+        """繁简转换，成功返回简体，失败返回 None"""
+        if not HAS_ZHCONV or not self.contains_chinese(text):
+            return None
+        try:
+            simplified = zhconv.convert(text, 'zh-cn')
+            if simplified != text:
+                return simplified
+        except Exception:
+            pass
+        return None
 
     # ─────────────────────────────────────
     # 核心翻译方法
     # ─────────────────────────────────────
-    def translate_people(self, title: str, year: Any,
-                         people: List[dict]) -> Tuple[List[dict], Dict[str, str]]:
+    def translate_batch(self, title: str, year: Any,
+                        name_terms: List[str], role_terms: List[str],
+                        batch_size: int = 5) -> Tuple[Dict[str, str], Dict[str, str]]:
         """
-        翻译一批演职人员
-        返回：(新 people 列表, {原文: 译文} 映射)
+        批量翻译人名和角色名
+        返回: (人名翻译映射, 角色翻译映射)
         """
-        if not people:
-            return [], {}
+        name_translations = {}
+        role_translations = {}
 
-        # 1. 提取待翻译名字
-        names = [p.get("Name", "").strip() for p in people if p.get("Name", "").strip()]
-        if not names:
-            return people, {}
-
-        # 2. 繁简转换（省 LLM）
-        remaining = []
-        translations = {}
-        for name in names:
-            cached = self.get_cached(name)
+        # 1. 处理人名
+        name_remaining = []
+        for name in name_terms:
+            cached = self.get_cached_name(name)
             if cached:
-                translations[name] = cached
+                name_translations[name] = cached
                 continue
-            if HAS_ZHCONV and self._is_traditional(name):
-                try:
-                    simplified = zhconv.convert(name, 'zh-cn')
-                    if simplified != name:
-                        translations[name] = simplified
-                        self.set_cached(name, simplified)
-                        continue
-                except Exception:
-                    pass
-            remaining.append(name)
+            simplified = self.try_zhconv(name)
+            if simplified:
+                name_translations[name] = simplified
+                self.set_cached_name(name, simplified)
+                continue
+            name_remaining.append(name)
 
-        # 3. LLM 分批翻译
-        batch_size = 5
-        if self.plugin:
-            batch_size = getattr(self.plugin, '_max_people_per_batch', 5)
+        # 2. 处理角色名
+        role_remaining = []
+        for role in role_terms:
+            cached = self.get_cached_role(role)
+            if cached:
+                role_translations[role] = cached
+                continue
+            simplified = self.try_zhconv(role)
+            if simplified:
+                role_translations[role] = simplified
+                self.set_cached_role(role, simplified)
+                continue
+            role_remaining.append(role)
 
-        for i in range(0, len(remaining), batch_size):
-            batch = remaining[i:i + batch_size]
+        # 3. LLM 翻译剩余文本（合并去重）
+        all_remaining = list(set(name_remaining + role_remaining))
+        if not all_remaining or not self.llm:
+            return name_translations, role_translations
+
+        for i in range(0, len(all_remaining), batch_size):
+            batch = all_remaining[i:i + batch_size]
             try:
                 result = self.llm.translate_terms(title, year, batch)
                 if isinstance(result, dict):
                     for orig, trans in result.items():
                         if trans and trans != orig:
-                            translations[orig] = trans
-                            self.set_cached(orig, trans)
+                            if orig in name_remaining:
+                                name_translations[orig] = trans
+                                self.set_cached_name(orig, trans)
+                            if orig in role_remaining:
+                                role_translations[orig] = trans
+                                self.set_cached_role(orig, trans)
             except Exception as e:
-                print(f"[Translator] LLM 批次翻译失败: {e}")
-            time.sleep(0.5)  # 防止频率过高
+                logger.error(f"[Translator] LLM 批次翻译失败: {e}")
+            time.sleep(0.3)
 
-        # 4. 构建新 people 列表
+        return name_translations, role_translations
+
+    def apply_translations(self, people: List[dict],
+                           name_translations: Dict[str, str],
+                           role_translations: Dict[str, str]) -> List[dict]:
+        """将翻译结果应用到 people 列表"""
         new_people = []
         for p in people:
-            name = p.get("Name", "")
-            if name in translations:
-                np = dict(p)
-                np["Name"] = translations[name]
-                new_people.append(np)
-            else:
-                new_people.append(p)
-
-        return new_people, translations
-
-    # ─────────────────────────────────────
-    # 辅助
-    # ─────────────────────────────────────
-    def _is_traditional(self, text: str) -> bool:
-        """粗略判断是否为繁体中文"""
-        # 繁体特征字
-        trad_markers = set("這來個們時會對說後從種這們為從來個是時說會對點樣問題")
-        return any(c in trad_markers for c in text)
-
-    def stats(self) -> Dict[str, Any]:
-        """缓存统计"""
-        with self._lock:
-            return {
-                "languages": list(self._cache.keys()),
-                "total_entries": sum(len(v) for v in self._cache.values()),
-                "zhconv_available": HAS_ZHCONV,
-            }
+            np = dict(p)
+            cur_name = np.get("Name", "")
+            if cur_name in name_translations:
+                np["Name"] = name_translations[cur_name]
+            cur_role = np.get("Role", "")
+            if cur_role and cur_role in role_translations:
+                np["Role"] = role_translations[cur_role]
+            new_people.append(np)
+        return new_people
