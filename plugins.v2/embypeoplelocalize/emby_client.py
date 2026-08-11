@@ -107,13 +107,12 @@ class EmbyClient:
 
     def fetch_items_page(self, library_id: str,
                          limit: int = 50, start_index: int = 0) -> Optional[dict]:
-        """分页获取媒体库条目"""
+        """分页获取媒体库条目（仅基本信息，People 单独获取以提升性能）"""
         params = {
             "ParentId": library_id,
             "Limit": limit,
             "StartIndex": start_index,
-            "Recursive": "true",
-            "Fields": "Id,Name,ProductionYear,PremiereDate,People,Type,LockedFields",
+            "Fields": "Id,Name,ProductionYear,PremiereDate,Type",
         }
         user_id = self._get_user_id()
         if not user_id:

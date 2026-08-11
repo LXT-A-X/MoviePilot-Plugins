@@ -64,7 +64,7 @@ class EmbyPeopleLocalize(_PluginBase):
     plugin_name = "Emby 演职人员中文化"
     plugin_desc = "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回"
     plugin_icon = "embypeoplelocalize.jpg"
-    plugin_version = "1.2.2"
+    plugin_version = "1.2.3"
     plugin_author = "LXT-A-X"
     plugin_config_prefix = "embypeoplelocalize_"
     plugin_order = 27
@@ -751,6 +751,7 @@ class EmbyPeopleLocalize(_PluginBase):
     def _scan_library(self, client: EmbyClient, svc: ServiceInfo, skey: str,
                       lib_id: str, lib_name: str) -> Tuple[int, int]:
         translated = failed = 0
+        skipped = 0  # 跳过/无需翻译的条目数
         start = 0
         page_size = 50
 
@@ -767,9 +768,12 @@ class EmbyPeopleLocalize(_PluginBase):
                     if self._stop_requested:
                         break
                     try:
+                        before = translated
                         t, f = self._process_item(client, svc, skey, item, lib_name)
                         translated += t
                         failed += f
+                        if t == 0 and f == 0:
+                            skipped += 1
                     except Exception as e:
                         logger.error(f"处理条目异常: {e}")
                         failed += 1
@@ -782,7 +786,10 @@ class EmbyPeopleLocalize(_PluginBase):
                 logger.error(f"分页获取失败: {e}")
                 break
 
-        logger.info(f"媒体库 [{lib_name}] 扫描完成: 翻译 {translated}, 失败 {failed}")
+        if translated == 0 and failed == 0:
+            logger.info(f"媒体库 [{lib_name}] 扫描完成：共 {skipped} 条，均无需翻译")
+        else:
+            logger.info(f"媒体库 [{lib_name}] 扫描完成: 翻译 {translated}, 失败 {failed}, 跳过 {skipped}")
         return translated, failed
 
     def _process_item(self, client: EmbyClient, svc: ServiceInfo, skey: str,
@@ -818,8 +825,33 @@ class EmbyPeopleLocalize(_PluginBase):
             logger.debug(f"[{item_id}] {display_title} ({year}) — 已处理，跳过")
             return 0, 0
 
-        people = item.get("People", []) or []
+        # 按需获取完整条目（含 People），避免列表查询性能问题
+        people = item.get("People")
         if not people:
+            full_item = client.fetch_item(item_id)
+            if not full_item:
+                logger.warning(f"[{item_id}] {display_title} — 无法获取完整条目")
+                return 0, 0
+            # 使用完整数据
+            title = full_item.get("Name", title)
+            year = full_item.get("ProductionYear") or (full_item.get("PremiereDate", "")[:4] if full_item.get("PremiereDate") else year)
+            people = full_item.get("People", []) or []
+            # 重新设置显示信息
+            if item_type == "Episode":
+                series_name = full_item.get("SeriesName", "") or series_name
+                season_num = full_item.get("SeasonNumber", season_num)
+                episode_num = full_item.get("EpisodeNumber", episode_num)
+                if season_num is not None and episode_num is not None:
+                    display_title = f"{series_name} S{season_num:02d}E{episode_num:02d}"
+                elif series_name:
+                    display_title = series_name
+            elif item_type == "Series":
+                series_name = full_item.get("Name", series_name)
+            self._progress_current_title = display_title
+
+        if not people:
+            self._post_translate_hook(key, display_title, year, item_id, {}, self._lock_cast, lib_name, skipped=True,
+                                  series_name=series_name, season_num=season_num, episode_num=episode_num, item_type=item_type)
             return 0, 0
 
         # 收集待翻译的人名和角色名
@@ -986,10 +1018,6 @@ class EmbyPeopleLocalize(_PluginBase):
         v1.0.0: 完全重写，支持多种事件格式，增强可靠性
         """
         try:
-            # 记录收到事件
-            self._webhook_received += 1
-            self._webhook_last_time = time.time()
-            
             # 解析事件数据
             raw_data = event.event_data or {}
             if isinstance(raw_data, str):
@@ -997,43 +1025,42 @@ class EmbyPeopleLocalize(_PluginBase):
                     raw_data = json.loads(raw_data)
                 except Exception:
                     pass
-            
-            logger.info(f"[Webhook] ===== 收到事件 #{self._webhook_received} =====")
-            logger.info(f"[Webhook] event_type={event.event_type}")
-            
-            # 提取关键信息
+
+            # 早期提取 ItemId，没有 ItemId 直接跳过（减少噪音日志）
             item_id = self._extract_item_id(raw_data)
+            if not item_id:
+                return  # 无 ItemId 的事件直接跳过，不记录日志
+
+            self._webhook_received += 1
+            self._webhook_last_time = time.time()
+
             server_id = self._extract_server_id(raw_data)
             event_type_str = self._extract_event_type_str(raw_data)
             source = self._extract_source(raw_data)
-            
-            logger.info(f"[Webhook] 解析结果: item_id={item_id}, server_id={server_id}, type={event_type_str}, source={source}")
-            
+
+            logger.info(f"[Webhook] ===== 收到事件 #{self._webhook_received} =====")
+            logger.info(f"[Webhook] ItemId={item_id}, server_id={server_id}, type={event_type_str}, source={source}")
+
             # 更新状态
             self._webhook_last_event = f"{event_type_str} | ItemId={item_id}"
-            
+
             # 检查是否为 Emby 事件
             if source and "emby" not in source.lower():
                 logger.info(f"[Webhook] 来源不是 Emby，跳过: source={source}")
                 return
-            
+
             # 检查事件类型是否与媒体项相关
             if not self._is_item_event(event_type_str, raw_data):
                 logger.info(f"[Webhook] 非媒体项事件，跳过: type={event_type_str}")
                 return
-            
-            if not item_id:
-                logger.warning("[Webhook] 未能提取到 ItemId，跳过")
-                self._webhook_failed += 1
-                return
-            
+
             # 记录原始数据摘要
             self._webhook_error = ""
-            
+
             # 发送通知
             delay = self._webhook_delay
             self._notify_webhook_received(item_id, delay)
-            
+
             # 启动延迟翻译线程
             logger.info(f"[Webhook] 将在 {delay} 秒后翻译 ItemId={item_id}")
             threading.Thread(
@@ -1042,10 +1069,10 @@ class EmbyPeopleLocalize(_PluginBase):
                 daemon=True,
                 name=f"webhook-translate-{item_id}"
             ).start()
-            
+
             self._webhook_processed += 1
             logger.info(f"[Webhook] 事件处理完成: ItemId={item_id}")
-            
+
         except Exception as e:
             logger.error(f"[Webhook] 处理异常: {e}\n{traceback.format_exc()}")
             self._webhook_failed += 1
@@ -1277,12 +1304,19 @@ class EmbyPeopleLocalize(_PluginBase):
     def _notify_webhook_completed(self, item_id: str, title: str, translated: int, failed: int):
         """发送 Webhook 翻译完成通知"""
         try:
-            if self._notify_on_complete and (translated > 0 or failed > 0):
-                self.post_message(
-                    mtype=NotificationType.Manual,
-                    title=self.plugin_name,
-                    text=f"翻译完成：{title} - 翻译 {translated} 条, 失败 {failed} 条"
-                )
+            if self._notify_on_complete:
+                if translated > 0 or failed > 0:
+                    self.post_message(
+                        mtype=NotificationType.Manual,
+                        title=self.plugin_name,
+                        text=f"翻译完成：{title} - 翻译 {translated} 条, 失败 {failed} 条"
+                    )
+                else:
+                    self.post_message(
+                        mtype=NotificationType.Manual,
+                        title=self.plugin_name,
+                        text=f"{title} - 无需翻译"
+                    )
         except Exception as e:
             logger.debug(f"[Webhook] 发送完成通知失败（非致命）: {e}")
 
