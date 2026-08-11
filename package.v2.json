@@ -4,7 +4,7 @@
     "description": "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回（可选库/全库），支持 Webhook 入库自动翻译、角色名独立缓存、缓存命中率统计、LLM 配置动态刷新。",
     "labels": "Emby,LLM,翻译,人名本地化,声优,演职人员",
     "version": "1.0.0",
-    "icon": "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/embypeoplelocalize.jpg",
+    "icon": "embypeoplelocalize.jpg",
     "author": "LXT-A-X",
     "level": 1,
     "history": {
@@ -17,7 +17,6 @@
       "v0.4.0": "新增角色名缓存机制；优化 LLM 客户端封装，支持 openai SDK 和 requests 双通道；繁简直接转换省 LLM；定时/入库/刮削自动翻译触发。",
       "v0.3.1": "修复 VPage 模式 VTabs 不显示设置 Tab 内容的问题；修正 __init__.py 中同步 Emby API UserId 缺失导致 404 的边界情况。",
       "v0.3.0": "全新 VPage 详情页：数据面板（统计卡+按库折叠面板）+ 设置面板（双 Tab 切换）。"
-    },
-    "v2": true
+    }
   }
 }
