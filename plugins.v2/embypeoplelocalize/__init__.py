@@ -64,7 +64,7 @@ class EmbyPeopleLocalize(_PluginBase):
     plugin_name = "Emby 演职人员中文化"
     plugin_desc = "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回"
     plugin_icon = "embypeoplelocalize.jpg"
-    plugin_version = "1.1.0"
+    plugin_version = "1.2.0"
     plugin_author = "LXT-A-X"
     plugin_config_prefix = "embypeoplelocalize_"
     plugin_order = 27
@@ -785,14 +785,20 @@ class EmbyPeopleLocalize(_PluginBase):
         item_type = item.get("Type", "")
 
         display_title = title
+        series_name = ""
+        season_num = None
+        episode_num = None
+
         if item_type == "Episode":
             series_name = item.get("SeriesName", "") or title
-            season_num = item.get("SeasonNumber", "")
-            episode_num = item.get("EpisodeNumber", "")
-            if season_num and episode_num:
+            season_num = item.get("SeasonNumber")
+            episode_num = item.get("EpisodeNumber")
+            if season_num is not None and episode_num is not None:
                 display_title = f"{series_name} S{season_num:02d}E{episode_num:02d}"
             elif series_name:
                 display_title = series_name
+        elif item_type == "Series":
+            series_name = title
 
         key = f"{skey}:{item_id}"
         self._progress_current_title = display_title
@@ -839,7 +845,8 @@ class EmbyPeopleLocalize(_PluginBase):
 
         if not name_terms and not role_terms:
             logger.info(f"[{item_id}] {display_title} ({year}) — 无需翻译")
-            self._post_translate_hook(key, display_title, year, item_id, {}, self._lock_cast, lib_name, skipped=True)
+            self._post_translate_hook(key, display_title, year, item_id, {}, self._lock_cast, lib_name, skipped=True,
+                                  series_name=series_name, season_num=season_num, episode_num=episode_num, item_type=item_type)
             return 0, 0
 
         # 去重并限制数量
@@ -889,16 +896,18 @@ class EmbyPeopleLocalize(_PluginBase):
         updated = client.update_people(item_id, new_people, lock_cast=lock)
 
         if updated > 0:
-            self._post_translate_hook(key, display_title, year, item_id, all_translations, lock, lib_name)
+            self._post_translate_hook(key, display_title, year, item_id, all_translations, lock, lib_name,
+                                      series_name=series_name, season_num=season_num, episode_num=episode_num, item_type=item_type)
             return len(all_translations), 0
         else:
             logger.warning(f"[{item_id}] {display_title} ({year}) — 写回失败")
             return 0, 1
 
-    def _post_translate_hook(self, key, display_title, year, item_id, translations, lock, lib_name="", skipped=False):
+    def _post_translate_hook(self, key, display_title, year, item_id, translations, lock, lib_name="",
+                             skipped=False, series_name="", season_num=None, episode_num=None, item_type=""):
         with self._state_lock:
             self._processed[key] = datetime.now().isoformat()
-            self._history.append({
+            history_entry = {
                 "time": datetime.now().isoformat(timespec='seconds'),
                 "library": lib_name,
                 "title": display_title,
@@ -907,7 +916,15 @@ class EmbyPeopleLocalize(_PluginBase):
                 "n_trans": len(translations),
                 "status": "跳过" if skipped else "成功",
                 "cast_locked": lock,
-            })
+                "item_type": item_type,
+            }
+            if series_name:
+                history_entry["series_name"] = series_name
+            if season_num is not None:
+                history_entry["season_num"] = season_num
+            if episode_num is not None:
+                history_entry["episode_num"] = episode_num
+            self._history.append(history_entry)
             if len(self._history) > constants.MAX_HISTORY:
                 self._history = self._history[-constants.MAX_HISTORY:]
         if not skipped:
