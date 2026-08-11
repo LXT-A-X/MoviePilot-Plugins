@@ -64,7 +64,7 @@ class EmbyPeopleLocalize(_PluginBase):
     plugin_name = "Emby 演职人员中文化"
     plugin_desc = "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回"
     plugin_icon = "embypeoplelocalize.jpg"
-    plugin_version = "1.2.0"
+    plugin_version = "1.2.2"
     plugin_author = "LXT-A-X"
     plugin_config_prefix = "embypeoplelocalize_"
     plugin_order = 27
@@ -439,11 +439,18 @@ class EmbyPeopleLocalize(_PluginBase):
     def init_plugin(self, config: dict = None):
         self._load_state()
 
+        if config:
+            self._load_config(config)
+
+        # 检查插件是否被禁用，如果是则停止正在运行的扫描
+        if not self._enabled and self._is_running:
+            logger.info("插件已禁用，正在停止扫描...")
+            self._stop_requested = True
+            self._is_paused = True
+
         if self._is_running:
             logger.info("扫描正在运行，配置将在下次扫描时生效")
 
-        if config:
-            self._load_config(config)
         if self._enabled:
             self._startup()
 
@@ -475,6 +482,7 @@ class EmbyPeopleLocalize(_PluginBase):
     def _load_config(self, config: dict):
         self._enabled = bool(config.get(constants.CFG_ENABLED, False))
         self._onlyonce = bool(config.get(constants.CFG_ONCE, False))
+        self._force_refresh = False
         self._libraries = list(config.get(constants.CFG_LIBRARIES, []))
         self._prompt_template = str(config.get(constants.CFG_PROMPT_TEMPLATE) or constants.DEFAULT_PROMPT)
         self._translate_all = bool(config.get(constants.CFG_TRANSLATE_ALL, False))
@@ -779,6 +787,9 @@ class EmbyPeopleLocalize(_PluginBase):
 
     def _process_item(self, client: EmbyClient, svc: ServiceInfo, skey: str,
                       item: dict, lib_name: str = "") -> Tuple[int, int]:
+        if self._stop_requested:
+            return 0, 0
+
         item_id = str(item.get("Id", ""))
         title = item.get("Name", "")
         year = item.get("ProductionYear") or (item.get("PremiereDate", "")[:4] if item.get("PremiereDate") else "")

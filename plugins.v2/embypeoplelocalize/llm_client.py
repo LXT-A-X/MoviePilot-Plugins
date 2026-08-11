@@ -28,20 +28,24 @@ class LLMClient:
     def _init_client(self):
         """初始化客户端（优先 SDK，失败降级为 requests）"""
         try:
+            import os
             import openai
-            import httpx
 
-            proxies = self._parse_proxy()
-            http_client = httpx.Client(
-                proxies=proxies,
-                timeout=self.timeout,
-                verify=False
-            ) if proxies else None
+            # 设置代理环境变量（openai SDK 内部的 httpx 会自动读取）
+            proxy_url = self._parse_proxy()
+            if proxy_url:
+                if isinstance(proxy_url, dict):
+                    proxy = list(proxy_url.values())[0]
+                else:
+                    proxy = proxy_url
+                os.environ["HTTP_PROXY"] = proxy
+                os.environ["HTTPS_PROXY"] = proxy
+                logger.info(f"[LLMClient] 已设置代理环境变量: {proxy}")
 
             self._client = openai.OpenAI(
                 base_url=self.base_url,
                 api_key=self.api_key,
-                http_client=http_client,
+                timeout=self.timeout,
             )
             self._use_sdk = True
             logger.info(f"[LLMClient] SDK 模式初始化成功: {self.model}")
