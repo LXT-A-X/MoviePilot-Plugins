@@ -3,11 +3,12 @@
     "name": "Emby 演职人员中文化",
     "description": "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回（可选库/全库），支持 Webhook 入库自动翻译、角色名独立缓存、缓存命中率统计、LLM 配置动态刷新。",
     "labels": "Emby,LLM,翻译,人名本地化,声优,演职人员",
-    "version": "1.2.0",
+    "version": "1.2.1",
     "icon": "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/embypeoplelocalize.jpg",
     "author": "LXT-A-X",
     "level": 1,
     "history": {
+      "v1.2.1": "修复 _force_refresh 属性初始化缺失问题；修复关闭插件后扫描无法停止的问题",
       "v1.2.0": "优化剧集显示格式：直接存储季/集信息，显示为\"剧名 第1季 第1-20集\"格式，更清晰直观；移除搜索和重译功能",
       "v1.1.0": "移除搜索和重译功能；优化剧集显示格式（按季聚合显示，如'第一季 1-20集'）；修复 ui_forms.py 语法错误",
       "v1.0.0": "Webhook 完全重构：支持多种事件格式解析、智能事件检测、自动重试机制、服务器智能匹配；新增 Webhook 状态监控和手动测试 API；增强日志记录便于问题排查；优化错误处理和恢复机制",
