@@ -341,16 +341,7 @@ def build_page(plugin) -> List[dict]:
     ]}
 
     # 历史记录列表
-    search_kw = getattr(plugin, "_history_search_keyword", "") or ""
-    filtered_history = history
-    if search_kw:
-        kw = search_kw.lower()
-        filtered_history = [h for h in history if
-                            kw in str(h.get("title", "")).lower() or
-                            kw in str(h.get("library", "")).lower() or
-                            kw in str(h.get("year", "")).lower() or
-                            kw in str(h.get("item_id", "")).lower()]
-    history_list = _build_history_list(filtered_history, plugin=plugin)
+    history_list = _build_history_list(history)
 
     page_wrapper = {"component": "VCard", "props": {"class": "pa-4 rounded-xl", "variant": "outlined",
                     "style": {"backgroundColor": "rgba(255, 255, 255, 0.02)", "border": f"1px solid {CARD_BORDER}",
@@ -360,72 +351,158 @@ def build_page(plugin) -> List[dict]:
     return [{"component": "div", "props": {"class": "pa-4"}, "content": [page_wrapper]}]
 
 
-def _build_history_list(history, plugin=None):
+def _parse_title_info(title_str):
+    """解析标题，提取系列名、季号、集号"""
+    import re
+    series_name = title_str
+    season_num = None
+    episode_num = None
+    m = re.match(r'^(.+?)\s+S(\d{2})E(\d{2})$', title_str)
+    if m:
+        series_name = m.group(1).strip()
+        season_num = int(m.group(2))
+        episode_num = int(m.group(3))
+    return series_name, season_num, episode_num
+
+
+def _build_history_list(history):
     if not history:
         return {"component": "VCard", "props": {"class": "mt-4 rounded-lg text-center pa-6", "variant": "outlined",
                   "style": {"backgroundColor": CARD_BG, "border": f"1px solid {CARD_BORDER}", "boxShadow": CARD_SHADOW}},
                 "content": [{"component": "div", "props": {"class": "text-medium-emphasis"}, "text": "暂无翻译历史记录"}]}
 
-    search_kw = getattr(plugin, "_history_search_keyword", "") or ""
+    # 按系列和季分组聚合
+    series_data = {}
+    for h in history:
+        title = h.get("title", "未知作品") or "未知作品"
+        series_name, season_num, episode_num = _parse_title_info(title)
+
+        if season_num is not None and episode_num is not None:
+            # 剧集单集
+            key = f"{series_name}||S{season_num}"
+            if key not in series_data:
+                series_data[key] = {
+                    "type": "season",
+                    "series": series_name,
+                    "season": season_num,
+                    "episodes": {},
+                    "total_trans": 0,
+                    "success_count": 0,
+                    "fail_count": 0,
+                    "skipped_count": 0,
+                    "first_time": h.get("time", ""),
+                    "last_time": h.get("time", ""),
+                    "library": h.get("library", ""),
+                    "year": h.get("year", ""),
+                }
+            sd = series_data[key]
+            sd["episodes"][episode_num] = h
+            sd["total_trans"] += h.get("n_trans", 0)
+            status = h.get("status", "")
+            if status in ("成功", "ok"):
+                sd["success_count"] += 1
+            elif "失败" in status:
+                sd["fail_count"] += 1
+            else:
+                sd["skipped_count"] += 1
+            sd["last_time"] = h.get("time", "")
+        elif season_num is not None:
+            # 整部季
+            key = f"{series_name}||S{season_num}"
+            if key not in series_data:
+                series_data[key] = {
+                    "type": "season_full",
+                    "series": series_name,
+                    "season": season_num,
+                    "episodes": {},
+                    "total_trans": h.get("n_trans", 0),
+                    "success_count": 1 if h.get("status") in ("成功", "ok") else 0,
+                    "fail_count": 1 if "失败" in str(h.get("status", "")) else 0,
+                    "skipped_count": 0,
+                    "first_time": h.get("time", ""),
+                    "last_time": h.get("time", ""),
+                    "library": h.get("library", ""),
+                    "year": h.get("year", ""),
+                }
+        else:
+            # 电影或其他
+            key = f"movie||{title}"
+            if key not in series_data:
+                series_data[key] = {
+                    "type": "movie",
+                    "title": title,
+                    "item": h,
+                }
 
     list_items = []
-    for h in history[-50:]:
-        locked = h.get("cast_locked")
-        if locked is True:
-            lock_icon, lock_color, lock_text = "mdi-lock", C_SUCCESS, "已锁定"
-        elif locked is False:
-            lock_icon, lock_color, lock_text = "mdi-lock-open", C_WARNING, "未锁定"
+    for key, data in list(series_data.items())[:50]:
+        if data["type"] == "movie":
+            h = data["item"]
+            status = h.get("status", "")
+            status_color = C_SUCCESS if status in ("成功", "ok") else (C_ERROR if "失败" in status else "grey")
+            list_items.append({"component": "VListItem", "props": {"class": "px-0 py-2",
+                               "style": {"borderBottom": "1px solid rgba(128,128,128,0.12)"}},
+                               "content": [{"component": "VRow", "props": {"dense": True, "align": "center"}, "content": [
+                _col(12, [
+                    {"component": "div", "props": {"class": "text-body-2 font-weight-medium text-high-emphasis text-truncate"},
+                     "text": data["title"]},
+                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis text-truncate"},
+                     "text": f"{h.get('time', '')} · {h.get('library', '')} · {h.get('year', '')}"},
+                ], sm=5),
+                _col(4, [{"component": "VChip", "props": {"color": status_color, "size": "small", "variant": "tonal", "label": True},
+                           "text": status or "—"}], sm=2),
+                _col(4, [{"component": "div", "props": {"class": "text-caption text-medium-emphasis"},
+                           "text": f"翻译 {h.get('n_trans', 0)} 条"}], sm=2),
+                _col(3, [{"component": "VIcon", "props": {"color": C_PRIMARY, "size": "small"}, "text": "mdi-movie"}], sm=2),
+            ]}]})
         else:
-            lock_icon, lock_color, lock_text = "mdi-minus", "grey", "—"
+            # 剧集
+            season_num = data["season"]
+            ep_nums = sorted(data["episodes"].keys())
+            if ep_nums:
+                ep_range = f"{min(ep_nums)}-{max(ep_nums)}"
+                if min(ep_nums) == max(ep_nums):
+                    ep_text = f"第{min(ep_nums)}集"
+                else:
+                    ep_text = f"第{min(ep_nums)}-{max(ep_nums)}集"
+            else:
+                ep_text = "全季"
 
-        status = h.get("status", "")
-        status_color = C_SUCCESS if status in ("成功", "ok") else (C_ERROR if "失败" in status else "grey")
+            success_color = C_SUCCESS if data["success_count"] > 0 else "grey"
+            fail_color = C_ERROR if data["fail_count"] > 0 else "grey"
 
-        item_id = h.get("item_id", "")
-        retranslate_api = f"plugin/EmbyPeopleLocalize/retranslate?item_id={item_id}"
+            season_label = f"第{season_num}季"
+            season_display = f"{data['series']} {season_label} {ep_text}"
 
-        list_items.append({"component": "VListItem", "props": {"class": "px-0 py-2",
-                           "style": {"borderBottom": "1px solid rgba(128,128,128,0.12)"}},
-                           "content": [{"component": "VRow", "props": {"dense": True, "align": "center"}, "content": [
-            _col(12, [
-                {"component": "div", "props": {"class": "text-body-2 font-weight-medium text-high-emphasis text-truncate"},
-                 "text": h.get("title", "未知作品") or "未知作品"},
-                {"component": "div", "props": {"class": "text-caption text-medium-emphasis text-truncate"},
-                 "text": f"{h.get('time', '')} · {h.get('library', '')}"},
-            ], sm=5),
-            _col(4, [{"component": "VChip", "props": {"color": status_color, "size": "small", "variant": "tonal", "label": True},
-                       "text": status or "—"}], sm=2),
-            _col(4, [{"component": "div", "props": {"class": "text-caption text-medium-emphasis"},
-                       "text": f"翻译 {h.get('n_trans', 0)} 条"}], sm=2),
-            _col(3, [{"component": "div", "props": {"class": "d-flex align-center ga-1"}, "content": [
-                {"component": "VIcon", "props": {"color": lock_color, "size": "small"}, "text": lock_icon},
-                {"component": "span", "props": {"class": "text-caption", "style": {"color": lock_color}}, "text": lock_text},
-            ]}], sm=2),
-            _col(2, [{"component": "VBtn", "props": {"color": "info", "size": "small", "variant": "text", "density": "compact",
-                                                     "class": "text-none", "prepend_icon": "mdi-translate"},
-                       "text": "重译",
-                       "events": {"click": {"api": retranslate_api, "method": "GET"}}}], sm=1),
-        ]}]})
+            list_items.append({"component": "VListItem", "props": {"class": "px-0 py-2",
+                               "style": {"borderBottom": "1px solid rgba(128,128,128,0.12)"}},
+                               "content": [{"component": "VRow", "props": {"dense": True, "align": "center"}, "content": [
+                _col(12, [
+                    {"component": "div", "props": {"class": "text-body-2 font-weight-medium text-high-emphasis text-truncate"},
+                     "text": season_display},
+                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis text-truncate"},
+                     "text": f"{data['last_time']} · {data.get('library', '')} · {data.get('year', '')}"},
+                ], sm=6),
+                _col(3, [{"component": "VChip", "props": {"color": success_color, "size": "small", "variant": "tonal", "label": True},
+                           "text": f"成功 {data['success_count']}"}], sm=2),
+                _col(3, [{"component": "VChip", "props": {"color": fail_color, "size": "small", "variant": "tonal", "label": True},
+                           "text": f"失败 {data['fail_count']}"}], sm=2),
+                _col(3, [{"component": "div", "props": {"class": "text-caption text-medium-emphasis"},
+                           "text": f"共 {data['total_trans']} 条"}], sm=2),
+                _col(3, [{"component": "div", "props": {"class": "d-flex align-center ga-1"}, "content": [
+                    {"component": "VIcon", "props": {"color": C_INFO, "size": "small"}, "text": "mdi-television-classic"},
+                    {"component": "span", "props": {"class": "text-caption text-medium-emphasis"},
+                     "text": f"{len(ep_nums)} 集"}],
+                }], sm=2),
+            ]}]})
 
     return {"component": "VCard", "props": {"class": "mt-4 rounded-lg", "variant": "outlined",
               "style": {"backgroundColor": CARD_BG, "border": f"1px solid {CARD_BORDER}", "boxShadow": CARD_SHADOW}},
               "content": [
         {"component": "VCardTitle", "props": {"class": "text-subtitle-1 font-weight-bold py-3 px-4 text-high-emphasis"},
-         "text": "最近翻译历史" + (f"  (筛选: {search_kw})" if search_kw else "")},
+         "text": "最近翻译历史"},
         {"component": "VDivider", "props": {"style": {"opacity": 0.4}}},
-        {"component": "VCardText", "props": {"class": "px-4 py-2"}, "content": [
-            {"component": "VRow", "props": {"dense": True, "align": "center"}, "content": [
-                _col(10, [{"component": "VTextField", "props": {
-                    "model": "history_search_keyword", "label": "搜索历史",
-                    "placeholder": "输入关键词后点「应用」或按 Enter", "density": "compact",
-                    "variant": "outlined", "prepend_inner_icon": "mdi-magnify",
-                    "clearable": True, "class": "mb-0"
-                }, "events": {"change": {"api": "plugin/EmbyPeopleLocalize/set_search", "method": "POST"}}}]),
-                _col(2, [{"component": "VBtn", "props": {
-                    "color": "info", "variant": "text", "size": "small", "density": "compact", "class": "text-none"
-                }, "text": "应用", "events": {"click": {"api": "plugin/EmbyPeopleLocalize/set_search", "method": "POST"}}}]),
-        ]}]},
-        {"component": "VCardText", "props": {"class": "px-4 pt-2 pb-2", "style": {"maxHeight": "360px", "overflowY": "auto"}},
+        {"component": "VCardText", "props": {"class": "px-4 pt-2 pb-2", "style": {"maxHeight": "480px", "overflowY": "auto"}},
          "content": [{"component": "VList", "props": {"class": "pa-0 bg-transparent"}, "content": list_items}]},
     ]}
 
@@ -546,8 +623,6 @@ def build_form(lib_options, plugin, invalid_libraries=None):
         ]),
         _row([_col(12, [_switch("lock_cast", "扫描时自动锁定 Cast",
                                 "开启后，每次翻译写回都会自动把 Cast 加入 LockedFields，防止后续刮削覆盖中文译名")])]),
-        _row([_col(12, [_text_field("history_search_keyword", "历史搜索关键词", "",
-                                    "设置后数据页的翻译历史将自动筛选（支持作品名/年份/库名关键词）")])]),
     ])
 
     # Webhook 设置
@@ -577,7 +652,7 @@ def build_form(lib_options, plugin, invalid_libraries=None):
         "overwrite_chinese": False, "libraries": [], "lock_cast": False,
         "llm_base_url": "", "llm_api_key": "", "llm_model": "", "llm_timeout": 120,
         "run_scan": False, "run_lock_cast": False, "run_clear_cache": False,
-        "webhook_delay": 60, "notify_on_complete": False, "history_search_keyword": "",
+        "webhook_delay": 60, "notify_on_complete": False,
     }
 
     return form, default_config

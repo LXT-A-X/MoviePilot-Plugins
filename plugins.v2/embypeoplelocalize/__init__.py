@@ -1,7 +1,12 @@
 """
-EmbyPeopleLocalize - Emby 演职人员中文化 v1.0.0
+EmbyPeopleLocalize - Emby 演职人员中文化 v1.1.0
 利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回
 支持多服务器分库、入库/Webhook触发、Cast 锁定防覆盖、繁简直转省 LLM
+
+v1.1.0 更新:
+- 移除搜索和重译功能
+- 优化剧集显示格式（按季聚合显示，如"第一季 1-20集"）
+- 修复 ui_forms.py 语法错误
 
 v1.0.0 完全重构:
 - Webhook 处理完全重写：支持多种事件格式、智能事件检测、自动重试
@@ -59,7 +64,7 @@ class EmbyPeopleLocalize(_PluginBase):
     plugin_name = "Emby 演职人员中文化"
     plugin_desc = "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回"
     plugin_icon = "embypeoplelocalize.jpg"
-    plugin_version = "1.0.0"
+    plugin_version = "1.1.0"
     plugin_author = "LXT-A-X"
     plugin_config_prefix = "embypeoplelocalize_"
     plugin_order = 27
@@ -144,7 +149,6 @@ class EmbyPeopleLocalize(_PluginBase):
             "_translate_producer", "_translate_all", "_translate_role",
             "_max_people_per_title", "_max_people_per_batch", "_overwrite_chinese",
             "_delay", "_lock_cast", "_webhook_delay", "_notify_on_complete",
-            "_history_search_keyword",
             "_run_scan", "_run_lock_cast", "_run_clear_cache",
             "_llm_base_url", "_llm_api_key", "_llm_model", "_llm_timeout",
             "_is_running", "_is_paused", "_last_run_time",
@@ -407,91 +411,6 @@ class EmbyPeopleLocalize(_PluginBase):
             logger.error(f"刷新 LLM 失败: {e}")
             return {"success": False, "message": str(e)}
 
-    def _api_retranslate(self, **kwargs):
-        """重新翻译指定条目"""
-        try:
-            item_id = self._extract_param(kwargs, "item_id")
-            if not item_id or item_id == "None":
-                return {"success": False, "message": "缺少 item_id 参数"}
-
-            history_item = None
-            for h in reversed(self._history):
-                if str(h.get("item_id", "")) == str(item_id):
-                    history_item = h
-                    break
-            if not history_item:
-                return {"success": False, "message": "未在历史记录中找到该条目"}
-
-            services = self._get_all_emby_services()
-            if not services:
-                return {"success": False, "message": "无可用 Emby 服务器"}
-
-            item_key = None
-            for key in self._processed:
-                if key.endswith(f":{item_id}"):
-                    item_key = key
-                    break
-
-            if item_key:
-                skey = item_key.split(":")[0]
-                svc = next((s for s in services if self._get_server_identifier(s) == skey), services[0])
-            else:
-                svc = services[0]
-
-            url = self._get_service_url(svc)
-            api_key = self._get_service_api_key(svc)
-            user_id = self._get_service_user_id(svc)
-            client = EmbyClient(url, api_key, svc, user_id=user_id)
-
-            item = client.fetch_item(item_id)
-            if not item:
-                return {"success": False, "message": f"无法获取条目详情: {item_id}"}
-
-            key = f"{self._get_server_identifier(svc)}:{item_id}"
-            with self._state_lock:
-                if key in self._processed:
-                    del self._processed[key]
-
-            self._force_refresh = True
-            translated, failed = self._process_item(client, svc, self._get_server_identifier(svc), item, history_item.get("library", ""))
-
-            return {
-                "success": True,
-                "message": f"重新翻译完成: 翻译 {translated} 条, 失败 {failed} 条",
-                "data": {"translated": translated, "failed": failed}
-            }
-        except Exception as e:
-            logger.error(f"重新翻译失败: {e}")
-            return {"success": False, "message": str(e)}
-
-    def _api_set_search(self, **kwargs):
-        """设置搜索关键词"""
-        try:
-            keyword = self._extract_param(kwargs, "keyword") or self._extract_param(kwargs, "value")
-            keyword = (keyword or "").strip()
-            self._history_search_keyword = keyword
-
-            # 同步到配置
-            config = self._dump_config()
-            config["history_search_keyword"] = keyword
-            self.update_config(config)
-
-            if keyword:
-                kw = keyword.lower()
-                count = sum(1 for h in self._history if
-                           kw in str(h.get("title", "")).lower() or
-                           kw in str(h.get("library", "")).lower() or
-                           kw in str(h.get("year", "")).lower() or
-                           kw in str(h.get("item_id", "")).lower())
-                return {"success": True, "message": f"筛选完成: 找到 {count} 条匹配",
-                        "data": {"keyword": keyword, "count": count}}
-            else:
-                return {"success": True, "message": f"显示全部 {len(self._history)} 条历史",
-                        "data": {"keyword": "", "count": len(self._history)}}
-        except Exception as e:
-            logger.error(f"搜索失败: {e}")
-            return {"success": False, "message": str(e)}
-
     @staticmethod
     def _extract_param(kwargs: dict, *keys) -> str:
         """从多种参数格式中提取值"""
@@ -586,7 +505,6 @@ class EmbyPeopleLocalize(_PluginBase):
         self._llm_timeout = int(config.get(constants.CFG_LLM_TIMEOUT, constants.DEFAULT_LLM_TIMEOUT))
         self._webhook_delay = int(config.get(constants.CFG_WEBHOOK_DELAY, constants.DEFAULT_WEBHOOK_DELAY))
         self._notify_on_complete = bool(config.get(constants.CFG_NOTIFY_ON_COMPLETE, False))
-        self._history_search_keyword = str(config.get(constants.CFG_SEARCH_KEYWORD, "") or "")
 
     def _dump_config(self) -> dict:
         if self._translate_all:
@@ -621,7 +539,6 @@ class EmbyPeopleLocalize(_PluginBase):
             constants.CFG_LLM_TIMEOUT: self._llm_timeout,
             constants.CFG_WEBHOOK_DELAY: self._webhook_delay,
             constants.CFG_NOTIFY_ON_COMPLETE: self._notify_on_complete,
-            constants.CFG_SEARCH_KEYWORD: self._history_search_keyword or "",
         }
 
     # ============================================================
