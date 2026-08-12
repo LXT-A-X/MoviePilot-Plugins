@@ -96,9 +96,12 @@ class EmbyClient:
         return result
 
     def fetch_item(self, item_id: str) -> Optional[dict]:
-        """获取条目完整详情"""
+        """获取条目完整详情
+        v1.2.4: 包含 Emby 实际的季集字段 ParentIndexNumber/IndexNumber
+        """
         params = {
-            "Fields": "People,LockedFields,Id,Name,ProductionYear,PremiereDate,Type,MediaType,Path"
+            "Fields": "People,LockedFields,Id,Name,ProductionYear,PremiereDate,Type,MediaType,Path,"
+                      "SeriesName,ParentIndexNumber,IndexNumber,SeasonNumber,EpisodeNumber"
         }
         user_id = self._get_user_id()
         if not user_id:
@@ -106,13 +109,20 @@ class EmbyClient:
         return self._get(f"/Users/{user_id}/Items/{item_id}", params=params)
 
     def fetch_items_page(self, library_id: str,
-                         limit: int = 50, start_index: int = 0) -> Optional[dict]:
-        """分页获取媒体库条目（仅基本信息，People 单独获取以提升性能）"""
+                         limit: int = 50, start_index: int = 0,
+                         include_people: bool = True,
+                         recursive: bool = True) -> Optional[dict]:
+        """分页获取媒体库条目
+        v1.2.4: 增加参数控制 - 电视库启用 Recursive 拉取剧集，列表默认包含 People
+        """
+        # 字段：基本信息 + People（直接获取人名列表，避免每个 item 单独调用）
+        fields = "Id,Name,ProductionYear,PremiereDate,Type,People"
         params = {
             "ParentId": library_id,
             "Limit": limit,
             "StartIndex": start_index,
-            "Fields": "Id,Name,ProductionYear,PremiereDate,Type",
+            "Recursive": "true" if recursive else "false",
+            "Fields": fields,
         }
         user_id = self._get_user_id()
         if not user_id:
