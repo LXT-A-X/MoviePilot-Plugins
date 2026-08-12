@@ -155,7 +155,7 @@ class EmbyPeopleLocalize(_PluginBase):
             "_delay", "_lock_cast", "_webhook_delay", "_notify_on_complete",
             "_run_scan", "_run_lock_cast", "_run_clear_cache",
             "_llm_base_url", "_llm_api_key", "_llm_model", "_llm_timeout",
-            "_is_running", "_is_paused", "_last_run_time",
+            "_is_running", "_is_paused", "_last_run_time", "_last_save_time",
             "_name_cache", "_role_cache", "_processed", "_history",
             "_scan_status",  # v1.3.0: 单一数据源，替代 _progress_*
             "_cache_hits", "_cache_misses",
@@ -268,6 +268,9 @@ class EmbyPeopleLocalize(_PluginBase):
             {"path": "/clear_cache", "endpoint": self._api_clear_cache, "methods": ["GET", "POST"], "auth": None},
             {"path": "/scan", "endpoint": self._api_scan, "methods": ["GET", "POST"], "auth": None},
             {"path": "/stop", "endpoint": self._api_stop, "methods": ["GET", "POST"], "auth": None},
+            # v1.3.2: 真正的暂停/恢复 - 保留线程和位置
+            {"path": "/pause", "endpoint": self._api_pause, "methods": ["POST"], "auth": None},
+            {"path": "/resume", "endpoint": self._api_resume, "methods": ["POST"], "auth": None},
             {"path": "/status", "endpoint": self._api_status, "methods": ["GET", "POST"], "auth": None},
             {"path": "/lock_cast", "endpoint": self._api_lock_cast, "methods": ["POST"], "auth": None},
             {"path": "/save_config", "endpoint": self._api_save_config, "methods": ["POST"], "auth": None},
@@ -645,14 +648,23 @@ class EmbyPeopleLocalize(_PluginBase):
             return {"success": False, "message": str(e)}
 
     def _api_scan(self):
+        # v1.3.2: 前置检查 - LLM/Translator 未初始化时直接拒绝
+        if self._llm is None:
+            return {"success": False, "message": "⚠️ LLM 未配置或初始化失败，请先在设置页配置 LLM 后再开始扫描"}
+        if self._translator is None:
+            return {"success": False, "message": "⚠️ Translator 未初始化，请重启插件"}
+        if self._emby is None:
+            return {"success": False, "message": "⚠️ Emby 未连接，请先在设置页配置 Emby"}
         # v1.2.6: 加锁防止并发启动多个扫描线程
-        # 整个设置过程都在锁内完成，避免中间状态被其他线程观察到
         with self._scan_lock:
             if self._is_running:
                 return {"success": False, "message": "扫描任务正在运行中"}
             self._is_running = True
             self._scan_status["running"] = True  # v1.3.0: 同步状态
             self._stop_requested = False
+            # v1.3.2: 重置 stop event - 上一次停止后必须 clear 才能再次启动
+            if hasattr(self, "_stop_event") and self._stop_event is not None:
+                self._stop_event.clear()
         # v1.2.6: 增加线程包装，确保异常时状态恢复
         def _scan_wrapper():
             try:
@@ -675,15 +687,53 @@ class EmbyPeopleLocalize(_PluginBase):
                     )
                 except Exception:
                     pass
-        threading.Thread(target=_scan_wrapper, daemon=True).start()
+        # v1.3.2: 保存线程引用，stop_service 时可以 join
+        self._scan_thread = threading.Thread(target=_scan_wrapper, daemon=True)
+        self._scan_thread.start()
         return {"success": True, "message": "扫描任务已启动"}
 
     def _api_stop(self):
+        """v1.3.2: 真正停止扫描 - 区分暂停和停止
+        - 停止：保存 cursor，下次可续扫
+        - 暂停：保留线程和位置，循环 sleep 等待
+        """
         if not self._is_running:
             return {"success": False, "message": "没有正在运行的扫描任务"}
         self._stop_requested = True
+        self._is_paused = False  # 停止 ≠ 暂停
+        # 同步 _scan_status - 单一数据源
+        self._scan_status["paused"] = False
+        # 立即保存当前 cursor，下次启动可续扫
+        self._save_state()
+        return {"success": True, "message": "已请求停止扫描（将保存断点）"}
+
+    def _api_pause(self):
+        """v1.3.2: 暂停扫描 - 保留线程和位置，扫描循环用 Event.wait 等待恢复"""
+        if not self._is_running:
+            return {"success": False, "message": "没有正在运行的扫描任务"}
+        if self._is_paused:
+            return {"success": False, "message": "扫描已处于暂停状态"}
         self._is_paused = True
-        return {"success": True, "message": "已请求停止扫描"}
+        self._scan_status["paused"] = True
+        # v1.3.2: 用 Event.set() 通知扫描循环 sleep
+        if hasattr(self, "_pause_event") and self._pause_event is not None:
+            self._pause_event.set()
+        logger.info("⏸ 扫描已暂停")
+        return {"success": True, "message": "⏸ 扫描已暂停"}
+
+    def _api_resume(self):
+        """v1.3.2: 恢复扫描 - Event.clear() 后扫描循环继续"""
+        if not self._is_running:
+            return {"success": False, "message": "没有正在运行的扫描任务"}
+        if not self._is_paused:
+            return {"success": False, "message": "扫描未处于暂停状态"}
+        self._is_paused = False
+        self._scan_status["paused"] = False
+        # v1.3.2: clear 后扫描循环 Event.wait() 立刻返回
+        if hasattr(self, "_pause_event") and self._pause_event is not None:
+            self._pause_event.clear()
+        logger.info("▶ 扫描已恢复")
+        return {"success": True, "message": "▶ 扫描已恢复"}
 
     def _api_status(self):
         total_lookups = self._cache_hits + self._cache_misses
@@ -783,6 +833,9 @@ class EmbyPeopleLocalize(_PluginBase):
             return {"success": False, "message": str(e)}
 
     def _api_save_config(self, **kwargs):
+        """v1.3.2: 保存设置 - 明确返回成功/失败 + 最后保存时间
+        响应格式让前端可显示 Toast
+        """
         try:
             data = kwargs.get("data") or kwargs.get("form") or kwargs
             if isinstance(data, str):
@@ -790,15 +843,32 @@ class EmbyPeopleLocalize(_PluginBase):
                     data = json.loads(data)
                 except Exception:
                     data = {}
-            if isinstance(data, dict) and data:
-                self._load_config(data)
-                self.update_config(self._dump_config())
-                logger.info("配置已保存")
-                return {"success": True, "message": "配置已保存"}
-            return {"success": False, "message": "未收到配置数据"}
+            if not (isinstance(data, dict) and data):
+                return {
+                    "success": False,
+                    "message": "❌ 保存失败：未收到配置数据",
+                }
+            self._load_config(data)
+            self.update_config(self._dump_config())
+            # v1.3.2: 记录最后保存时间 - UI 状态卡显示
+            self._last_save_time = time.time()
+            self._save_state()
+            save_time = datetime.fromtimestamp(self._last_save_time).strftime("%Y-%m-%d %H:%M:%S")
+            logger.info(f"配置已保存 @ {save_time}")
+            return {
+                "success": True,
+                "message": f"✅ 设置保存成功 @ {save_time}",
+                "data": {
+                    "last_save_time": self._last_save_time,
+                    "save_time_str": save_time,
+                },
+            }
         except Exception as e:
-            logger.error(f"保存配置失败: {e}")
-            return {"success": False, "message": str(e)}
+            logger.error(f"保存配置失败: {e}\n{traceback.format_exc()}")
+            return {
+                "success": False,
+                "message": f"❌ 保存失败：{e}",
+            }
 
     def _api_refresh_llm(self, **kwargs):
         try:
@@ -856,6 +926,11 @@ class EmbyPeopleLocalize(_PluginBase):
         self._is_running = False
         self._is_paused = False
         self._last_run_time = None
+        self._last_save_time = None  # v1.3.2: 配置最后保存时间
+        # v1.3.2: 线程生命周期 - 用 Event 安全通知 + 保存线程引用
+        self._scan_thread = None
+        self._stop_event = threading.Event()
+        self._pause_event = threading.Event()  # 用 Event.wait() 实现真正暂停
         # 线程锁也必须实例化（否则多实例共享同一把锁）
         self._state_lock = threading.Lock()
         self._scan_lock = threading.Lock()
@@ -1109,6 +1184,11 @@ class EmbyPeopleLocalize(_PluginBase):
                                     user_id=self._get_service_user_id(svc),
                                     use_proxy=self._use_proxy)
             self._init_llm()
+            # v1.3.2: 明确打印 LLM/Translator 初始化状态 - 扫描前就能看到
+            if self._llm is None:
+                logger.warning("⚠️ LLM 客户端初始化失败，扫描时无法翻译")
+            else:
+                logger.info(f"✅ LLM 初始化成功: model={self._llm.model}")
             self._translator = PeopleTranslator(
                 llm_client=self._llm,
                 name_cache=self._name_cache,
@@ -1116,6 +1196,10 @@ class EmbyPeopleLocalize(_PluginBase):
                 state_lock=self._state_lock,
                 plugin=self,
             )
+            if self._translator is None:
+                logger.error("❌ Translator 初始化失败")
+            else:
+                logger.info("✅ Translator 初始化成功")
             logger.info(f"EmbyPeopleLocalize v{self.plugin_version} 启动完成")
         except Exception as e:
             logger.error(f"插件启动失败: {e}\n{traceback.format_exc()}")
@@ -1226,6 +1310,10 @@ class EmbyPeopleLocalize(_PluginBase):
         except Exception as e:
             logger.error(f"扫描异常: {e}\n{traceback.format_exc()}")
         finally:
+            # v1.3.2: 区分正常完成 vs 停止
+            # - 正常完成：清空 cursor
+            # - 停止：保留 cursor，可续扫
+            was_stopped = self._stop_requested
             self._is_running = False
             self._is_paused = False
             self._stop_requested = False
@@ -1234,8 +1322,9 @@ class EmbyPeopleLocalize(_PluginBase):
             self._scan_status["paused"] = False
             self._scan_status["current_title"] = ""
             self._scan_status["current_library"] = ""
-            # v1.2.7: 扫描完成清空 cursor
-            self._scan_cursor = None
+            if not was_stopped:
+                # 正常完成才清空 cursor；停止时 cursor 已在外层 break 时保存
+                self._scan_cursor = None
             self._save_state()
 
     def _scan_library(self, client: EmbyClient, svc: ServiceInfo, skey: str,
@@ -1273,6 +1362,23 @@ class EmbyPeopleLocalize(_PluginBase):
 
         page_counter = page_index
         while True:
+            # v1.3.2: 暂停等待 - 用 Event.wait 替代 sleep 轮询
+            # Event 被 set 后 wait() 立即返回
+            if self._is_paused and not self._stop_requested:
+                logger.info("⏸ 扫描已暂停，等待恢复...")
+                self._push_log("INFO", "扫描已暂停")
+                # wait 直到 resume 时 clear() 返回
+                if hasattr(self, "_pause_event") and self._pause_event is not None:
+                    self._pause_event.wait(timeout=0.5)
+                else:
+                    time.sleep(0.5)
+                # 检查是否在暂停期间被停止
+                if self._stop_requested:
+                    break
+                # 退出暂停 - 双重检查 _is_paused（resume 时已清）
+                if not self._is_paused:
+                    logger.info("▶ 扫描已恢复")
+                    self._push_log("INFO", "扫描已恢复")
             if self._stop_requested:
                 break
             try:
@@ -1289,6 +1395,18 @@ class EmbyPeopleLocalize(_PluginBase):
                 start_idx_in_page = item_index if page_counter == page_index else 0
                 for i in range(start_idx_in_page, len(items)):
                     if self._stop_requested:
+                        # v1.3.2: 停止时保存 cursor 包含当前 item 位置
+                        self._scan_cursor = {
+                            "server_id": skey,
+                            "library_id": lib_id,
+                            "library_name": lib_name,
+                            "page": page_counter,
+                            "index": i,
+                            "total": total_estimated,
+                            "time": time.time(),
+                        }
+                        self._save_state()
+                        logger.info(f"⏹ 已保存断点: [{lib_name}] 第{page_counter}页第{i}项")
                         break
                     item = items[i]
                     self._scan_status["done"] = start + i + 1
@@ -1386,6 +1504,16 @@ class EmbyPeopleLocalize(_PluginBase):
 
         key = f"{skey}:{item_id}"
         self._scan_status["current_title"] = display_title
+
+        # v1.3.2: 提前检查停止 - 让用户点停止后能更快响应
+        # 同时检查 _stop_requested 标志 + stop_event（双重保险）
+        if self._stop_requested or (
+            hasattr(self, "_stop_event") and self._stop_event is not None
+            and self._stop_event.is_set()
+        ):
+            logger.info(f"[{item_id}] {display_title} — 已请求停止，跳过")
+            self._finalize_steps(success=False)
+            return 0, 0
 
         if not self._force_refresh and key in self._processed:
             logger.debug(f"[{item_id}] {display_title} ({year}) — 已处理，跳过")
@@ -1490,6 +1618,12 @@ class EmbyPeopleLocalize(_PluginBase):
             title, year, name_terms, role_terms, batch_size
         )
 
+        # v1.3.2: LLM 调用是最慢的环节，调用后立即检查停止 - 避免用户等很久
+        if self._stop_requested:
+            logger.info(f"[{item_id}] {display_title} — LLM 翻译完成但已请求停止，跳过写回")
+            self._finalize_steps(success=False)
+            return 0, 0
+
         # v1.2.4: 修复缓存命中率统计
         # 区分"真正命中缓存"vs"繁简转换命中"vs"LLM 新翻译命中"
         # 只有真正命中（字典中存在）才计为 cache_hits
@@ -1593,8 +1727,33 @@ class EmbyPeopleLocalize(_PluginBase):
         logger.info("所有缓存已清空")
 
     def stop_service(self):
-        self._stop_requested = True
-        self._save_state()
+        """v1.3.2: 关闭插件时安全停止后台线程
+        之前只设了 _stop_requested=True，线程可能继续跑导致访问已销毁的 self._llm/self._translator
+        现在用 threading.Event 通知 + join 等待线程退出
+        """
+        logger.info("收到插件停止信号，开始安全退出...")
+        try:
+            # 1. 触发停止事件
+            self._stop_requested = True
+            if hasattr(self, "_stop_event") and self._stop_event is not None:
+                self._stop_event.set()
+            # 2. 取消暂停（如果有）
+            self._is_paused = False
+            # 3. 保存当前状态（含 cursor）
+            self._save_state()
+            # 4. 等待扫描线程退出
+            thread = getattr(self, "_scan_thread", None)
+            if thread and thread.is_alive():
+                logger.info(f"等待扫描线程退出 (timeout=10s)...")
+                thread.join(timeout=10.0)
+                if thread.is_alive():
+                    logger.warning("扫描线程 10s 内未退出，强制继续（线程可能卡在 LLM 调用）")
+                else:
+                    logger.info("扫描线程已退出")
+            self._scan_thread = None
+            logger.info("插件停止完成")
+        except Exception as e:
+            logger.error(f"停止服务异常: {e}\n{traceback.format_exc()}")
 
     # ============================================================
     # Webhook 入库自动翻译（v1.0.0 完全重构）
