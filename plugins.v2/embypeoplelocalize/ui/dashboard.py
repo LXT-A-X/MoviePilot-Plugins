@@ -5,6 +5,8 @@ v1.2.9: 拆出 - 包含 header / 状态条 / 统计 / Webhook / 缓存 / 失败�
 from datetime import datetime
 from typing import Any, Dict, List
 
+from app.log import logger
+
 from .common import (
     _row, _col, _section, _stat_card, _icon, _chip, C_PRIMARY, C_SUCCESS, C_INFO,
     C_WARNING, C_ERROR, CARD_BG, CARD_BORDER, CARD_SHADOW,
@@ -60,9 +62,11 @@ def _build_header(plugin) -> dict:
     }
 
 
-def _build_status_bar(scan_status: Dict[str, Any]) -> dict:
-    """v1.2.9: 状态卡 - 包裹 build_status_bar 的 content"""
-    content = build_status_bar(scan_status)
+def _build_status_bar(scan_status: Dict[str, Any], plugin=None) -> dict:
+    """v1.2.9: 状态卡 - 包裹 build_status_bar 的 content
+    v1.3.2: 修复 - 必须传入 plugin，否则 progress.py 访问 plugin.STEP_NAMES 会崩
+    """
+    content = build_status_bar(scan_status, plugin=plugin)
     return {"component": "VCard", "props": {"class": "mb-3 rounded-lg", "variant": "outlined",
                                            "style": {"backgroundColor": CARD_BG, "border": f"1px solid {CARD_BORDER}",
                                                      "boxShadow": CARD_SHADOW}},
@@ -498,12 +502,19 @@ def _build_history_list(plugin) -> dict:
 def build_page(plugin) -> List[dict]:
     """v1.2.9: 首页 - header / 状态 / 统计 / 失败中心 / Webhook / 缓存 / 最近活动 / 历史
     通过 _build_scan_status() 获取统一状态对象
+
+    v1.3.2: 防御 - plugin 为 None 时返回空页面（避免 'NoneType has no attribute X' 崩溃）
     """
+    if plugin is None:
+        logger.warning("build_page: plugin is None，返回空页面")
+        return [{"component": "VAlert", "props": {"type": "warning", "variant": "tonal"},
+                 "text": "插件实例不可用，请刷新页面或重新加载插件"}]
+
     scan_status = plugin._build_scan_status() if hasattr(plugin, "_build_scan_status") else {}
 
     page_content = [
         _build_header(plugin),
-        _build_status_bar(scan_status),
+        _build_status_bar(scan_status, plugin=plugin),  # v1.3.2: 传 plugin 给 progress
         _build_stat_row(plugin),
         _build_failed_card(plugin),
         _row([

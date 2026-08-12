@@ -77,12 +77,17 @@ def build_status_bar(scan_status: Dict[str, Any], plugin=None) -> list:
 
     # 4 步骤详情 - v1.3.0: 改为只要 running 就显示，step_status 已由 init_plugin 默认初始化为 4 步骤 ○
     if is_running:
+        # v1.3.2: 防御性兜底 - plugin 可能为 None（dashboard 未传参时）
+        step_pending = getattr(plugin, "STEP_PENDING", "○") if plugin else "○"
+        step_active = getattr(plugin, "STEP_ACTIVE", "●") if plugin else "●"
+        step_done = getattr(plugin, "STEP_DONE", "✓") if plugin else "✓"
+        # v1.3.2: STEP_NAMES 兜底 - 即便 plugin=None 也不崩
+        default_steps = ("获取Emby", "提取演员", "AI翻译", "写回")
+        step_names = getattr(plugin, "STEP_NAMES", default_steps) if plugin else default_steps
         step_color_map = {"✓": C_SUCCESS, "●": C_INFO, "○": "grey", "—": "grey"}
-        step_pending = getattr(plugin, "STEP_PENDING", "○")
-        step_active = getattr(plugin, "STEP_ACTIVE", "●")
         step_rows = []
         # 使用插件类声明的标准步骤名，避免字典缺失时漏显
-        for step_name in plugin.STEP_NAMES:
+        for step_name in step_names:
             sym = step_status.get(step_name, step_pending)
             color = step_color_map.get(sym, "grey")
             is_current = (step_name == current_step and sym == step_active)
@@ -111,6 +116,22 @@ def build_status_bar(scan_status: Dict[str, Any], plugin=None) -> list:
                                      "border": "1px solid rgba(0,0,0,0.08)"}},
                  "content": step_rows},
             ]
+        })
+
+        # v1.3.2: 在状态条内提供停止扫描按钮 - 第一页面就能直接停
+        stop_btn = {
+            "component": "VBtn",
+            "props": {
+                "color": "error", "variant": "tonal", "rounded": "lg",
+                "prepend_icon": "mdi-stop-circle",
+                "class": "text-none mt-2",
+                "block": True,
+            },
+            "text": "⏹ 停止扫描",
+            "events": {"click": {"api": "plugin/EmbyPeopleLocalize/stop", "method": "POST"}},
+        }
+        content.append({
+            "component": "VCardText", "props": {"class": "px-4 pt-0 pb-3"}, "content": [stop_btn]
         })
 
     return content

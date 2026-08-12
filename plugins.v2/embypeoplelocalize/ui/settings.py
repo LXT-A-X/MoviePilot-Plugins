@@ -3,6 +3,7 @@ ui/settings.py - 设置页
 v1.2.9: 拆出 - 基础设置 / LLM 连接 / 范围 / 提示词 / 高级 / Webhook
 """
 from app.core.config import settings as _mp_settings
+from app.log import logger
 
 from .common import (
     _row, _col, _section, _switch, _text_field, _select, _textarea,
@@ -17,7 +18,13 @@ def build_form(lib_options, plugin, invalid_libraries=None) -> list:
     - 主操作 (开始扫描): elevated + primary
     - 普通 (保存): outlined
     - 危险 (清空缓存): tonal + error
+
+    v1.3.2: 防御 - plugin 为 None 时返回空表单
     """
+    if plugin is None:
+        logger.warning("build_form: plugin is None，返回空表单")
+        return [{"component": "VAlert", "props": {"type": "warning", "variant": "tonal"},
+                 "text": "插件实例不可用，请刷新页面或重新加载插件"}]
     invalid_libraries = invalid_libraries or []
     llm_ready = getattr(plugin, "_llm", None) is not None
     llm_model = getattr(plugin._llm, "model", "") if llm_ready else ""
