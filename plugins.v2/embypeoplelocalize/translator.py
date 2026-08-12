@@ -23,8 +23,17 @@ class PeopleTranslator:
                  state_lock: Optional[threading.Lock] = None,
                  plugin=None):
         self.llm = llm_client
-        self._name_cache = name_cache or {}
-        self._role_cache = role_cache or {}
+        # v1.2.4: 修复缓存与插件状态脱离问题
+        # 当传入 None 时直接初始化为空字典，但当传入空字典时也直接引用
+        # 不再在 | 运算中产生新字典对象，确保 Translator 与插件共享同一份缓存引用
+        if name_cache is None:
+            self._name_cache = {}
+        else:
+            self._name_cache = name_cache
+        if role_cache is None:
+            self._role_cache = {}
+        else:
+            self._role_cache = role_cache
         self._lock = state_lock or threading.Lock()
         self.plugin = plugin
 
@@ -152,8 +161,26 @@ class PeopleTranslator:
                             if orig in role_remaining:
                                 role_translations[orig] = trans
                                 self.set_cached_role(orig, trans)
+                elif result is None:
+                    # v1.2.4: LLM 返回 None（API 错误/超时/JSON 解析失败）时显式标记
+                    logger.warning(f"[Translator] LLM 返回 None，跳过该批次 (size={len(batch)})")
+                else:
+                    logger.warning(f"[Translator] LLM 返回了非字典类型: {type(result).__name__}")
             except Exception as e:
-                logger.error(f"[Translator] LLM 批次翻译失败: {e}")
+                # v1.2.4: 分类错误，便于排查
+                err_type = type(e).__name__
+                err_msg = str(e)
+                if "timeout" in err_msg.lower() or "timed out" in err_msg.lower():
+                    tag = "[LLM_TIMEOUT]"
+                elif "apikey" in err_msg.lower() or "auth" in err_msg.lower() or "401" in err_msg or "403" in err_msg:
+                    tag = "[LLM_AUTH_ERROR]"
+                elif "json" in err_msg.lower() or "parse" in err_msg.lower():
+                    tag = "[JSON_PARSE_ERROR]"
+                elif "connection" in err_msg.lower() or "connect" in err_msg.lower():
+                    tag = "[LLM_CONNECTION_ERROR]"
+                else:
+                    tag = "[LLM_ERROR]"
+                logger.error(f"[Translator] {tag} 批次翻译失败 ({err_type}): {e}")
             time.sleep(0.3)
 
         return name_translations, role_translations
