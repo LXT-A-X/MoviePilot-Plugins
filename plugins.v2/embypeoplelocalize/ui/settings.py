@@ -6,7 +6,8 @@ from app.core.config import settings as _mp_settings
 
 from .common import (
     _row, _col, _section, _switch, _text_field, _select, _textarea,
-    _btn, _chip, _alert, C_PRIMARY, C_INFO, C_SUCCESS, C_WARNING, C_ERROR,
+    _btn, _chip, _alert, _confirm_danger_zone,
+    C_PRIMARY, C_INFO, C_SUCCESS, C_WARNING, C_ERROR,
 )
 
 
