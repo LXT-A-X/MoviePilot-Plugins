@@ -613,9 +613,9 @@ class EmbyPeopleLocalize(_PluginBase):
                     self._libraries = cleaned
                     self.update_config(self._dump_config())
 
-            form, config = build_form(lib_options, self, invalid_libraries=invalid_libs)
-            current = self._dump_config()
-            config.update(current)
+            # v1.3.1: build_form 现在只返回 form 列表；config 单独从 self._dump_config() 取
+            form = build_form(lib_options, self, invalid_libraries=invalid_libs)
+            config = self._dump_config()
             if not config.get("prompt_template"):
                 config["prompt_template"] = constants.DEFAULT_PROMPT
             return form, config
