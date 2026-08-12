@@ -53,7 +53,7 @@ from app.plugins import _PluginBase
 from app.schemas import ServiceInfo, NotificationType
 from app.schemas.types import EventType
 
-from .ui_forms import build_form, build_page
+from .ui import build_form, build_page
 from .emby_client import EmbyClient
 from .llm_client import LLMClient
 from .translator import PeopleTranslator
@@ -64,7 +64,7 @@ class EmbyPeopleLocalize(_PluginBase):
     plugin_name = "Emby 演职人员中文化"
     plugin_desc = "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回"
     plugin_icon = "embypeoplelocalize.jpg"
-    plugin_version = "1.2.3"
+    plugin_version = "1.3.0"
     plugin_author = "LXT-A-X"
     plugin_config_prefix = "embypeoplelocalize_"
     plugin_order = 27
@@ -74,7 +74,8 @@ class EmbyPeopleLocalize(_PluginBase):
     # ────────── 配置项 ──────────
     _enabled: bool = False
     _onlyonce: bool = False
-    _libraries: List[str] = []
+    # v1.3.0: 无默认值 - 避免类级可变对象在 MoviePilot 热加载时污染
+    _libraries: List[str]
     _prompt_template: str = ""
     _translate_actor: bool = True
     _translate_director: bool = False
@@ -102,43 +103,46 @@ class EmbyPeopleLocalize(_PluginBase):
     _llm_model: str = ""
     _llm_timeout: int = 120
 
-    # ────────── 运行时状态 ──────────
-    _ms_helper: Optional[MediaServerHelper] = None
-    _emby: Optional[EmbyClient] = None
-    _llm: Optional[LLMClient] = None
-    _translator: Optional[PeopleTranslator] = None
-    _stop_requested: bool = False
-    _name_cache: Dict[str, Dict[str, str]] = {}
-    _role_cache: Dict[str, Dict[str, str]] = {}
-    _processed: Dict[str, str] = {}
-    _history: List[Dict[str, Any]] = []
-    _is_running: bool = False
-    _is_paused: bool = False
-    _last_run_time: Optional[float] = None
-    _state_lock = threading.Lock()
+    # ────────── 运行时状态（仅类型注解占位，实际值在 init_plugin 中实例化）──────────
+    # v1.2.8: 所有可变类型运行时状态全部移到 init_plugin，避免 MoviePilot 热加载时
+    # 类变量在多个实例/重载之间共享导致的污染问题
+    _ms_helper: Optional[MediaServerHelper]
+    _emby: Optional[EmbyClient]
+    _llm: Optional[LLMClient]
+    _translator: Optional[PeopleTranslator]
+    _stop_requested: bool
+    _force_refresh: bool
+    _name_cache: Dict[str, Dict[str, str]]
+    _role_cache: Dict[str, Dict[str, str]]
+    _processed: Dict[str, str]
+    _history: List[Dict[str, Any]]
+    _failed: List[Dict[str, Any]]
+    _live_log: List[Dict[str, Any]]
+    _is_running: bool
+    _is_paused: bool
+    _last_run_time: Optional[float]
+    _state_lock: threading.Lock
+    _scan_lock: threading.Lock
+    _scan_cursor: Optional[Dict[str, Any]]
 
-    # 进度追踪
-    _progress_total: int = 0
-    _progress_done: int = 0
-    _progress_current_title: str = ""
-    _progress_current_library: str = ""
-    _progress_servers_done: int = 0
-    _progress_servers_total: int = 0
+    # 进度追踪（v1.3.0 统一为 _scan_status dict）
+    _scan_status: Dict[str, Any]
+    _progress_step_start_time: float  # 当前条目计时起点（_elapsed_seconds 用）
 
     # 缓存命中率统计
-    _cache_hits: int = 0
-    _cache_misses: int = 0
+    _cache_hits: int
+    _cache_misses: int
 
     # Webhook 状态追踪
-    _webhook_received: int = 0
-    _webhook_processed: int = 0
-    _webhook_failed: int = 0
-    _webhook_last_time: Optional[float] = None
-    _webhook_last_event: str = ""
-    _webhook_error: str = ""
+    _webhook_received: int
+    _webhook_processed: int
+    _webhook_failed: int
+    _webhook_last_time: Optional[float]
+    _webhook_last_event: str
+    _webhook_error: str
 
     # 状态持久化路径
-    _state_file: str = ""
+    _state_file: str
 
     # ────────── V2 私有属性 ──────────
     @property
@@ -153,8 +157,7 @@ class EmbyPeopleLocalize(_PluginBase):
             "_llm_base_url", "_llm_api_key", "_llm_model", "_llm_timeout",
             "_is_running", "_is_paused", "_last_run_time",
             "_name_cache", "_role_cache", "_processed", "_history",
-            "_progress_total", "_progress_done", "_progress_current_title",
-            "_progress_current_library", "_progress_servers_done", "_progress_servers_total",
+            "_scan_status",  # v1.3.0: 单一数据源，替代 _progress_*
             "_cache_hits", "_cache_misses",
             "_webhook_received", "_webhook_processed", "_webhook_failed",
             "_webhook_last_time", "_webhook_last_event", "_webhook_error",
@@ -181,6 +184,17 @@ class EmbyPeopleLocalize(_PluginBase):
                 "last_run_time": self._last_run_time,
                 "cache_hits": self._cache_hits,
                 "cache_misses": self._cache_misses,
+                # v1.2.6: 持久化失败队列
+                "failed": self._failed[-2000:] if hasattr(self, "_failed") else [],
+                # v1.2.7: 断点续扫 - 记录当前扫描位置
+                "scan_cursor": self._scan_cursor if hasattr(self, "_scan_cursor") else None,
+                # v1.2.8: Webhook 统计持久化（避免重启后清零）
+                "webhook_received": self._webhook_received if hasattr(self, "_webhook_received") else 0,
+                "webhook_processed": self._webhook_processed if hasattr(self, "_webhook_processed") else 0,
+                "webhook_failed": self._webhook_failed if hasattr(self, "_webhook_failed") else 0,
+                "webhook_last_time": self._webhook_last_time if hasattr(self, "_webhook_last_time") else None,
+                "webhook_last_event": self._webhook_last_event if hasattr(self, "_webhook_last_event") else "",
+                "webhook_error": self._webhook_error if hasattr(self, "_webhook_error") else "",
             }
             state_file = self._get_state_file()
             tmp_file = state_file + ".tmp"
@@ -200,11 +214,38 @@ class EmbyPeopleLocalize(_PluginBase):
                 state = json.load(f)
             self._name_cache = state.get("name_cache", {}) or {}
             self._role_cache = state.get("role_cache", {}) or {}
+            # v1.2.8: 兼容迁移 - 旧版 "default" 顶层缓存重命名为 "zh-cn"
+            # 避免之前 v1.2.7 的缓存结构失效
+            if isinstance(self._name_cache, dict) and "default" in self._name_cache:
+                default_cache = self._name_cache.pop("default")
+                if "zh-cn" not in self._name_cache and default_cache:
+                    self._name_cache["zh-cn"] = default_cache
+            if isinstance(self._role_cache, dict) and "default" in self._role_cache:
+                default_cache = self._role_cache.pop("default")
+                if "zh-cn" not in self._role_cache and default_cache:
+                    self._role_cache["zh-cn"] = default_cache
             self._processed = state.get("processed", {}) or {}
             self._history = state.get("history", []) or []
             self._last_run_time = state.get("last_run_time")
             self._cache_hits = state.get("cache_hits", 0) or 0
             self._cache_misses = state.get("cache_misses", 0) or 0
+            # v1.2.6: 加载失败队列
+            if hasattr(self, "_failed"):
+                self._failed = state.get("failed", []) or []
+            # v1.2.7: 加载断点续扫状态
+            if hasattr(self, "_scan_cursor"):
+                cursor = state.get("scan_cursor")
+                if cursor:
+                    self._scan_cursor = cursor
+                    logger.info(f"检测到未完成的扫描: {cursor}")
+            # v1.2.8: 加载 Webhook 统计（避免重启清零）
+            if hasattr(self, "_webhook_received"):
+                self._webhook_received = state.get("webhook_received", 0) or 0
+                self._webhook_processed = state.get("webhook_processed", 0) or 0
+                self._webhook_failed = state.get("webhook_failed", 0) or 0
+                self._webhook_last_time = state.get("webhook_last_time")
+                self._webhook_last_event = state.get("webhook_last_event", "") or ""
+                self._webhook_error = state.get("webhook_error", "") or ""
             total = sum(len(v) for v in self._name_cache.values()) + sum(len(v) for v in self._role_cache.values())
             logger.info(f"加载持久化状态: {len(self._processed)} 条已处理, {len(self._history)} 条历史, {total} 条缓存")
         except Exception as e:
@@ -215,7 +256,7 @@ class EmbyPeopleLocalize(_PluginBase):
             self._history = []
 
     def _auto_save(self):
-        if self._progress_done % 10 == 0:
+        if self._scan_status.get("done", 0) % 10 == 0:
             self._save_state()
 
     # ============================================================
@@ -223,18 +264,340 @@ class EmbyPeopleLocalize(_PluginBase):
     # ============================================================
     def get_api(self) -> List[dict]:
         return [
-            {"path": "/clear_cache", "endpoint": self._api_clear_cache, "methods": ["GET"], "auth": None},
+            # v1.3.0: 同时支持 GET/POST - 让 UI 弹窗确认后用 POST 触发
+            {"path": "/clear_cache", "endpoint": self._api_clear_cache, "methods": ["GET", "POST"], "auth": None},
             {"path": "/scan", "endpoint": self._api_scan, "methods": ["GET", "POST"], "auth": None},
             {"path": "/stop", "endpoint": self._api_stop, "methods": ["GET", "POST"], "auth": None},
             {"path": "/status", "endpoint": self._api_status, "methods": ["GET", "POST"], "auth": None},
             {"path": "/lock_cast", "endpoint": self._api_lock_cast, "methods": ["POST"], "auth": None},
             {"path": "/save_config", "endpoint": self._api_save_config, "methods": ["POST"], "auth": None},
             {"path": "/refresh_llm", "endpoint": self._api_refresh_llm, "methods": ["POST"], "auth": None},
-            {"path": "/retranslate", "endpoint": self._api_retranslate, "methods": ["GET", "POST"], "auth": None},
-            {"path": "/set_search", "endpoint": self._api_set_search, "methods": ["GET", "POST"], "auth": None},
             {"path": "/webhook_status", "endpoint": self._api_webhook_status, "methods": ["GET"], "auth": None},
             {"path": "/test_webhook", "endpoint": self._api_test_webhook, "methods": ["GET", "POST"], "auth": None},
+            # v1.2.6 新增
+            {"path": "/live_log", "endpoint": self._api_live_log, "methods": ["GET"], "auth": None},
+            {"path": "/failed_list", "endpoint": self._api_failed_list, "methods": ["GET"], "auth": None},
+            {"path": "/retry_failed", "endpoint": self._api_retry_failed, "methods": ["POST"], "auth": None},
+            {"path": "/clear_failed", "endpoint": self._api_clear_failed, "methods": ["POST"], "auth": None},
         ]
+
+    # v1.2.6: 实时日志 API
+    def _api_live_log(self, limit: int = 100):
+        try:
+            limit = int(limit) if limit else 100
+            with self._state_lock:
+                logs = list(self._live_log[-limit:])
+            return {"success": True, "data": logs}
+        except Exception as e:
+            return {"success": False, "message": str(e)}
+
+    # v1.2.6: 失败列表 API
+    def _api_failed_list(self):
+        try:
+            with self._state_lock:
+                failed = list(self._failed)
+            return {"success": True, "data": failed, "count": len(failed)}
+        except Exception as e:
+            return {"success": False, "message": str(e)}
+
+    # v1.2.6: 重试失败项 API
+    def _api_retry_failed(self):
+        with self._scan_lock:
+            if self._is_running:
+                return {"success": False, "message": "当前有扫描任务运行中，无法重试"}
+            self._is_running = True
+            self._scan_status["running"] = True  # v1.3.0: 同步状态
+            self._stop_requested = False
+        def _retry_wrapper():
+            try:
+                self._retry_failed_worker()
+            except Exception as e:
+                logger.error(f"重试线程未捕获异常: {e}\n{traceback.format_exc()}")
+                self._is_running = False
+                self._scan_status["running"] = False  # v1.3.0: 同步状态
+        threading.Thread(target=_retry_wrapper, daemon=True).start()
+        return {"success": True, "message": "重试任务已启动"}
+
+    def _retry_failed_worker(self):
+        """v1.2.7: 真正实现失败重试
+        - 重新构造 client
+        - 调用 _process_item 完整流程（fetch_item -> 翻译 -> 写回）
+        - 成功后从 _processed 中清除 key（避免误判为已处理）
+        """
+        with self._state_lock:
+            pending = list(self._failed)
+            self._failed.clear()
+        self._save_state()
+        logger.info(f"开始重试 {len(pending)} 个失败项")
+        self._push_log("INFO", f"开始重试 {len(pending)} 个失败项")
+
+        # 按 server 缓存 client，避免重复创建
+        client_cache: Dict[str, EmbyClient] = {}
+        service_cache: Dict[str, ServiceInfo] = {}
+
+        retried_ok = 0
+        retried_fail = 0
+
+        for entry in pending:
+            if self._stop_requested:
+                logger.info("重试任务已被请求停止")
+                break
+            item_id = entry.get("item_id", "")
+            skey = entry.get("skey", "")
+            if not item_id or not skey:
+                continue
+
+            # 重建 client（如果未缓存）
+            if skey not in client_cache:
+                services = self._get_all_emby_services()
+                svc = next((s for s in services if self._get_server_identifier(s) == skey), None)
+                if not svc:
+                    logger.warning(f"重试 [{item_id}] 找不到服务: skey={skey}")
+                    # 仍记录为失败
+                    self._record_failure(item_id, skey, entry.get("title", ""), "服务不可用")
+                    retried_fail += 1
+                    continue
+                try:
+                    client = EmbyClient(
+                        self._get_service_url(svc),
+                        self._get_service_api_key(svc),
+                        svc,
+                        user_id=self._get_service_user_id(svc),
+                        use_proxy=self._use_proxy,
+                    )
+                    client_cache[skey] = client
+                    service_cache[skey] = svc
+                except Exception as e:
+                    logger.error(f"重试 [{item_id}] 创建客户端失败: {e}")
+                    self._record_failure(item_id, skey, entry.get("title", ""), f"客户端创建失败: {e}")
+                    retried_fail += 1
+                    continue
+
+            client = client_cache[skey]
+            svc = service_cache[skey]
+
+            # 调用 _process_item 完整重试
+            # 先构造 item 字典（只需要 Id）
+            item_dict = {"Id": item_id, "Name": entry.get("title", ""), "Type": "Movie"}
+            try:
+                # 清除 _processed 中的记录，强制重新处理
+                key = f"{skey}:{item_id}"
+                with self._state_lock:
+                    self._processed.pop(key, None)
+                self._force_refresh = True
+                t, f = self._process_item(client, svc, skey, item_dict, "")
+                self._force_refresh = False
+                if t > 0:
+                    retried_ok += 1
+                    logger.info(f"重试成功 [{item_id}] {entry.get('title', '?')}")
+                    self._push_log("INFO", f"重试成功: {entry.get('title', item_id)}")
+                else:
+                    retried_fail += 1
+                    logger.warning(f"重试未成功 [{item_id}] {entry.get('title', '?')} t={t} f={f}")
+                    # 重新记录失败
+                    self._record_failure(item_id, skey, entry.get("title", ""), entry.get("reason", "重试失败"))
+            except Exception as e:
+                retried_fail += 1
+                logger.error(f"重试异常 [{item_id}]: {e}\n{traceback.format_exc()}")
+                self._record_failure(item_id, skey, entry.get("title", ""), f"重试异常: {e}")
+            time.sleep(self._delay)
+
+        self._force_refresh = False
+        logger.info(f"重试完成: 成功 {retried_ok} 条, 失败 {retried_fail} 条")
+        self._push_log("INFO", f"重试完成: 成功 {retried_ok}, 失败 {retried_fail}")
+        self._is_running = False
+        self._scan_status["running"] = False  # v1.3.0: 同步状态
+        self._save_state()
+
+    # v1.2.6: 清空失败列表 API
+    def _api_clear_failed(self):
+        try:
+            with self._state_lock:
+                self._failed.clear()
+            self._save_state()
+            return {"success": True, "message": "失败列表已清空"}
+        except Exception as e:
+            return {"success": False, "message": str(e)}
+
+    # v1.2.6: 内部辅助 - 记录实时日志
+    def _push_log(self, level: str, msg: str):
+        try:
+            with self._state_lock:
+                self._live_log.append({
+                    "time": time.time(),
+                    "level": level,
+                    "msg": msg,
+                })
+                # 只保留最近 500 条
+                if len(self._live_log) > 500:
+                    self._live_log = self._live_log[-500:]
+        except Exception:
+            pass
+
+    # v1.2.8: 内部辅助 - 设置扫描步骤状态
+    # 用于 UI 扫描详情展示，4 个标准步骤
+    STEP_NAMES = ("获取Emby", "提取演员", "AI翻译", "写回")
+    STEP_DONE = "✓"
+    STEP_ACTIVE = "●"
+    STEP_PENDING = "○"
+    STEP_SKIPPED = "—"
+
+    def _build_scan_status(self) -> Dict[str, Any]:
+        """v1.3.0: 直接返回 _scan_status dict 引用 - 单一数据源
+        不再从多个 _progress_* 属性聚合，杜绝读写不同步问题
+        UI 读取时建议 dict(self._scan_status) 浅拷贝避免外部篡改
+        """
+        with self._state_lock:
+            status = dict(self._scan_status)
+            total = status.get("total", 0) or 0
+            done = status.get("done", 0) or 0
+            status["percent"] = round(done / max(total, 1) * 100, 1) if total > 0 else 0.0
+            status["elapsed_seconds"] = self._elapsed_seconds()
+            status["last_run_time"] = self._last_run_time
+            return status
+
+    def _reset_steps(self):
+        """v1.3.0: 重置 4 步骤状态 - 写入 _scan_status
+        启动/切换条目时调用，UI 永远有稳定结构
+        """
+        try:
+            with self._state_lock:
+                self._scan_status["step_status"] = {
+                    "获取Emby": self.STEP_PENDING,
+                    "提取演员": self.STEP_PENDING,
+                    "AI翻译": self.STEP_PENDING,
+                    "写回": self.STEP_PENDING,
+                }
+                self._scan_status["current_step"] = ""
+                self._progress_step_start_time = time.time()
+        except Exception:
+            pass
+
+    def _set_step(self, name: str, status: str = None):
+        """v1.3.0: 设置当前步骤 - 写入 _scan_status
+        name: 步骤名（获取Emby/提取演员/AI翻译/写回）
+        status: 状态符号（✓/●/○/—），传 None 表示设为进行中
+        """
+        try:
+            with self._state_lock:
+                step_status = self._scan_status.setdefault("step_status", {})
+                if name not in step_status:
+                    step_status[name] = self.STEP_PENDING
+                if status is None:
+                    step_status[name] = self.STEP_ACTIVE
+                    self._scan_status["current_step"] = name
+                else:
+                    step_status[name] = status
+                    if status == self.STEP_DONE:
+                        try:
+                            idx = self.STEP_NAMES.index(name)
+                            if idx + 1 < len(self.STEP_NAMES):
+                                next_step = self.STEP_NAMES[idx + 1]
+                                if step_status.get(next_step) == self.STEP_PENDING:
+                                    step_status[next_step] = self.STEP_ACTIVE
+                                    self._scan_status["current_step"] = next_step
+                        except ValueError:
+                            pass
+        except Exception:
+            pass
+
+    def _elapsed_seconds(self) -> int:
+        """当前条目处理耗时（秒）"""
+        try:
+            return int(time.time() - getattr(self, "_progress_step_start_time", time.time()))
+        except Exception:
+            return 0
+
+    def _finalize_steps(self, success: bool = True):
+        """处理完一个条目后收尾 - 把最后一步也标为完成/失败"""
+        try:
+            with self._state_lock:
+                step_status = self._scan_status.get("step_status", {})
+                for k, v in list(step_status.items()):
+                    if v == self.STEP_ACTIVE:
+                        step_status[k] = self.STEP_DONE if success else self.STEP_SKIPPED
+                self._scan_status["current_step"] = ""
+        except Exception:
+            pass
+
+    # v1.2.7: 统一日志入口 - 同步到实时日志队列和标准 logger
+    def log(self, level: str, msg: str):
+        """统一日志入口，所有模块应该使用此方法
+        而非直接 logger.info()，确保 UI 实时日志可以完整显示
+        """
+        if level == "INFO":
+            logger.info(msg)
+        elif level == "WARNING":
+            logger.warning(msg)
+        elif level == "ERROR":
+            logger.error(msg)
+        elif level == "DEBUG":
+            logger.debug(msg)
+        else:
+            logger.info(msg)
+        self._push_log(level, msg)
+
+    # v1.2.8: 接管底层 logger - 让 EmbyClient / LLMClient / Translator 的
+    # logger.info(...) 也能进入 _live_log 队列
+    _log_bridge_installed: bool = False
+    def _install_log_bridge(self):
+        if self._log_bridge_installed:
+            return
+        try:
+            import logging
+            from app.log import logger as mp_logger
+            # MoviePilot 主 logger 名称为 "moviepilot"，插件 logger 通过
+            # 继承的子 logger 名为 "moviepilot.plugins.embypeoplelocalize" 等
+            # 我们需要拦截带有 [EmbyClient]/[LLMClient] 前缀的日志
+            class _LogBridgeHandler(logging.Handler):
+                def __init__(_h, outer):
+                    super().__init__()
+                    _h.outer = outer
+                def emit(_h, record):
+                    try:
+                        msg = _h.format(record)
+                        # 只接管底层模块的日志
+                        if any(tag in msg for tag in ("[EmbyClient]", "[LLMClient]", "[PeopleTranslator]")):
+                            level = record.levelname or "INFO"
+                            if level == "WARNING":
+                                level = "WARNING"
+                            elif level == "ERROR":
+                                level = "ERROR"
+                            elif level == "DEBUG":
+                                level = "DEBUG"
+                            else:
+                                level = "INFO"
+                            _h.outer._push_log(level, msg)
+                    except Exception:
+                        pass
+            # 找到 moviepilot 的根 logger，添加 handler
+            root_logger = logging.getLogger("moviepilot")
+            if root_logger and not any(isinstance(h, _LogBridgeHandler) for h in root_logger.handlers):
+                bridge = _LogBridgeHandler(self)
+                bridge.setLevel(logging.INFO)
+                bridge.setFormatter(logging.Formatter("%(message)s"))
+                root_logger.addHandler(bridge)
+                self._log_bridge_installed = True
+                logger.info("[EmbyPeopleLocalize] 日志桥接已安装")
+        except Exception as e:
+            logger.warning(f"安装日志桥接失败: {e}")
+
+    # v1.2.6: 内部辅助 - 记录失败
+    def _record_failure(self, item_id: str, skey: str, title: str, reason: str):
+        try:
+            with self._state_lock:
+                self._failed.append({
+                    "item_id": item_id,
+                    "skey": skey,
+                    "title": title,
+                    "reason": reason,
+                    "time": time.time(),
+                })
+                # 上限 2000
+                if len(self._failed) > 2000:
+                    self._failed = self._failed[-2000:]
+        except Exception:
+            pass
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         try:
@@ -282,10 +645,37 @@ class EmbyPeopleLocalize(_PluginBase):
             return {"success": False, "message": str(e)}
 
     def _api_scan(self):
-        if self._is_running:
-            return {"success": False, "message": "扫描任务正在运行中"}
-        self._stop_requested = False
-        threading.Thread(target=self._scan_worker, kwargs={"force": True}, daemon=True).start()
+        # v1.2.6: 加锁防止并发启动多个扫描线程
+        # 整个设置过程都在锁内完成，避免中间状态被其他线程观察到
+        with self._scan_lock:
+            if self._is_running:
+                return {"success": False, "message": "扫描任务正在运行中"}
+            self._is_running = True
+            self._scan_status["running"] = True  # v1.3.0: 同步状态
+            self._stop_requested = False
+        # v1.2.6: 增加线程包装，确保异常时状态恢复
+        def _scan_wrapper():
+            try:
+                self._scan_worker(force=True)
+            except Exception as e:
+                logger.error(f"扫描线程未捕获异常: {e}\n{traceback.format_exc()}")
+                self._is_running = False
+                self._is_paused = False
+                # v1.3.0: 同步 _scan_status - 单一数据源
+                self._scan_status["running"] = False
+                self._scan_status["paused"] = False
+                self._scan_status["current_title"] = ""
+                self._scan_status["current_library"] = ""
+                self._save_state()
+                try:
+                    self.post_message(
+                        mtype=NotificationType.Manual,
+                        title=self.plugin_name,
+                        text=f"扫描异常中断: {str(e)[:100]}"
+                    )
+                except Exception:
+                    pass
+        threading.Thread(target=_scan_wrapper, daemon=True).start()
         return {"success": True, "message": "扫描任务已启动"}
 
     def _api_stop(self):
@@ -298,17 +688,26 @@ class EmbyPeopleLocalize(_PluginBase):
     def _api_status(self):
         total_lookups = self._cache_hits + self._cache_misses
         hit_rate = round(self._cache_hits / total_lookups * 100, 1) if total_lookups > 0 else 0.0
-        
+
         # Webhook 状态
         wh_total = self._webhook_received
         wh_processed = self._webhook_processed
         wh_failed = self._webhook_failed
         wh_success_rate = round(wh_processed / max(wh_total, 1) * 100, 1) if wh_total > 0 else 0.0
-        
+
         wh_last_time = None
         if self._webhook_last_time:
             wh_last_time = datetime.fromtimestamp(self._webhook_last_time).strftime("%Y-%m-%d %H:%M:%S")
-        
+
+        # v1.2.9: 统一扫描状态对象
+        scan_status = self._build_scan_status()
+        # 失败中心
+        with self._state_lock:
+            failed_count = len(self._failed)
+        # 最近活动
+        with self._state_lock:
+            recent_activity = list(self._history[-10:][::-1])
+
         return {
             "success": True,
             "data": {
@@ -321,12 +720,11 @@ class EmbyPeopleLocalize(_PluginBase):
                 "cache_misses": self._cache_misses,
                 "cache_hit_rate": hit_rate,
                 "processed_count": len(self._processed),
-                "progress": {
-                    "total": self._progress_total,
-                    "done": self._progress_done,
-                    "current_title": self._progress_current_title,
-                    "current_library": self._progress_current_library,
-                },
+                # v1.2.9: 改为统一 scan_status 对象
+                "scan_status": scan_status,
+                # v1.2.9: 失败中心 + 最近活动
+                "failed_count": failed_count,
+                "recent_activity": recent_activity,
                 "webhook": {
                     "total_received": wh_total,
                     "processed": wh_processed,
@@ -362,12 +760,16 @@ class EmbyPeopleLocalize(_PluginBase):
                     url = self._get_service_url(svc)
                     api_key = self._get_service_api_key(svc)
                     user_id = self._get_service_user_id(svc)
-                    client = EmbyClient(url, api_key, svc, user_id=user_id)
+                    client = EmbyClient(url, api_key, svc, user_id=user_id, use_proxy=self._use_proxy)
                     if client.lock_cast_for_item(item_id):
                         locked += 1
+                        # v1.2.4: 修复锁定时间戳精度问题
+                        # 原来用 processed.get(key) 的时间戳匹配历史记录，
+                        # 但写入和锁定时生成的时间戳精度不同，永远匹配不上
+                        # 改为直接用 item_id 匹配
                         with self._state_lock:
                             for h in self._history:
-                                if h.get("time") == processed.get(key):
+                                if h.get("item_id") == item_id:
                                     h["cast_locked"] = True
                     else:
                         failed += 1
@@ -437,6 +839,71 @@ class EmbyPeopleLocalize(_PluginBase):
     # 初始化 / 配置加载
     # ============================================================
     def init_plugin(self, config: dict = None):
+        # v1.2.8: 所有可变运行时状态在实例化时初始化，彻底解决类变量污染问题
+        # 之前使用类级别默认值在 MoviePilot 热加载时会导致多个实例共享同一份状态
+        self._ms_helper = None
+        self._emby = None
+        self._llm = None
+        self._translator = None
+        self._stop_requested = False
+        self._force_refresh = False
+        self._name_cache = {}
+        self._role_cache = {}
+        self._processed = {}
+        self._history = []
+        self._failed = []
+        self._live_log = []
+        self._is_running = False
+        self._is_paused = False
+        self._last_run_time = None
+        # 线程锁也必须实例化（否则多实例共享同一把锁）
+        self._state_lock = threading.Lock()
+        self._scan_lock = threading.Lock()
+        # v1.2.7: 断点续扫状态 - 完整结构
+        # {"server_id": "...", "library_id": "...", "page": 0, "index": 0, "total": 0, "time": ts}
+        self._scan_cursor = None
+
+        # 进度追踪
+        # v1.3.0: 统一扫描状态 - 单一数据源
+        # 所有 set/get 都走 self._scan_status[key]
+        # UI 端通过 _build_scan_status() 读取（带 percent/elapsed 计算）
+        self._scan_status = {
+            "running": False,
+            "paused": False,
+            "total": 0,
+            "done": 0,
+            "current_title": "",
+            "current_library": "",
+            "current_step": "",
+            "step_status": {
+                "获取Emby": self.STEP_PENDING,
+                "提取演员": self.STEP_PENDING,
+                "AI翻译": self.STEP_PENDING,
+                "写回": self.STEP_PENDING,
+            },
+            "servers_total": 0,
+            "servers_done": 0,
+        }
+        self._progress_step_start_time = time.time()
+
+        # 缓存命中率统计
+        self._cache_hits = 0
+        self._cache_misses = 0
+
+        # v1.2.8: Webhook 状态追踪 - 实例化
+        self._webhook_received = 0
+        self._webhook_processed = 0
+        self._webhook_failed = 0
+        self._webhook_last_time = None
+        self._webhook_last_event = ""
+        self._webhook_error = ""
+
+        # 状态持久化路径
+        self._state_file = ""
+
+        # v1.2.8: 接管底层 logger - 把 EmbyClient/LLMClient/Translator 的日志也接入实时日志队列
+        self._install_log_bridge()
+
         self._load_state()
 
         if config:
@@ -511,6 +978,8 @@ class EmbyPeopleLocalize(_PluginBase):
         self._llm_api_key = str(config.get(constants.CFG_LLM_API_KEY, ""))
         self._llm_model = str(config.get(constants.CFG_LLM_MODEL, ""))
         self._llm_timeout = int(config.get(constants.CFG_LLM_TIMEOUT, constants.DEFAULT_LLM_TIMEOUT))
+        # v1.3.1: 代理可配置 - 默认 False
+        self._use_proxy = bool(config.get(constants.CFG_USE_PROXY, constants.DEFAULT_USE_PROXY))
         self._webhook_delay = int(config.get(constants.CFG_WEBHOOK_DELAY, constants.DEFAULT_WEBHOOK_DELAY))
         self._notify_on_complete = bool(config.get(constants.CFG_NOTIFY_ON_COMPLETE, False))
 
@@ -545,6 +1014,7 @@ class EmbyPeopleLocalize(_PluginBase):
             constants.CFG_LLM_API_KEY: self._llm_api_key,
             constants.CFG_LLM_MODEL: self._llm_model,
             constants.CFG_LLM_TIMEOUT: self._llm_timeout,
+            constants.CFG_USE_PROXY: self._use_proxy,
             constants.CFG_WEBHOOK_DELAY: self._webhook_delay,
             constants.CFG_NOTIFY_ON_COMPLETE: self._notify_on_complete,
         }
@@ -610,7 +1080,8 @@ class EmbyPeopleLocalize(_PluginBase):
                 surl = self._get_service_url(svc)
                 try:
                     client = EmbyClient(surl, self._get_service_api_key(svc), svc,
-                                        user_id=self._get_service_user_id(svc))
+                                        user_id=self._get_service_user_id(svc),
+                                        use_proxy=self._use_proxy)
                     libs = client.get_libraries()
                     for lib in libs:
                         options.append({
@@ -635,7 +1106,8 @@ class EmbyPeopleLocalize(_PluginBase):
                 return
             svc = services[0]
             self._emby = EmbyClient(self._get_service_url(svc), self._get_service_api_key(svc), svc,
-                                    user_id=self._get_service_user_id(svc))
+                                    user_id=self._get_service_user_id(svc),
+                                    use_proxy=self._use_proxy)
             self._init_llm()
             self._translator = PeopleTranslator(
                 llm_client=self._llm,
@@ -670,16 +1142,27 @@ class EmbyPeopleLocalize(_PluginBase):
     # 扫描引擎
     # ============================================================
     def _scan_worker(self, force: bool = False):
+        # v1.2.5: 防止 _is_running 重复启动
+        # 调用方（_api_scan / init_plugin）已加锁并设置 _is_running=True
+        # 这里只在 init_plugin 直接调用时做兜底检查
         if not force and self._is_running:
             logger.info("扫描已在运行中")
             return
-        self._is_running = True
+
+        # 如果 init_plugin 直接调用（未通过 _api_scan），需要在这里设置状态
+        with self._scan_lock:
+            if self._is_running:
+                logger.info("扫描已在运行中（_scan_lock 兜底）")
+                return
+            self._is_running = True
+            self._scan_status["running"] = True  # v1.3.0: 同步状态
+            self._stop_requested = False
+
         self._is_paused = False
-        self._stop_requested = False
         self._last_run_time = time.time()
-        self._progress_done = 0
-        self._progress_total = 0
-        self._progress_servers_done = 0
+        # v1.3.0: 同步 _scan_status - 单一数据源
+        self._scan_status["running"] = True
+        self._scan_status["paused"] = False
         self._cache_hits = 0
         self._cache_misses = 0
         total_translated = total_failed = 0
@@ -702,28 +1185,30 @@ class EmbyPeopleLocalize(_PluginBase):
                     break
                 skey = self._get_server_identifier(svc)
                 client = EmbyClient(self._get_service_url(svc), self._get_service_api_key(svc), svc,
-                                    user_id=self._get_service_user_id(svc))
+                                    user_id=self._get_service_user_id(svc),
+                                    use_proxy=self._use_proxy)
                 libs = client.get_libraries()
                 for lib in libs:
                     lib_id = str(lib.get("Id", ""))
                     full_key = f"{skey}:{lib_id}"
                     if target_libs and full_key not in target_libs:
                         continue
-                    all_tasks.append((svc, skey, client, lib_id, lib.get("Name", "?")))
+                    lib_type = (lib.get("Type", "") or "").lower()
+                    all_tasks.append((svc, skey, client, lib_id, lib.get("Name", "?"), lib_type))
 
-            self._progress_total = len(all_tasks)
+            self._scan_status["total"] = len(all_tasks)
             logger.info(f"共 {len(all_tasks)} 个媒体库待扫描")
 
-            for svc, skey, client, lib_id, lib_name in all_tasks:
+            for svc, skey, client, lib_id, lib_name, lib_type in all_tasks:
                 if self._stop_requested:
                     logger.info("扫描已请求停止")
                     break
-                self._progress_current_library = f"[{getattr(svc,'name','?')}] {lib_name}"
-                logger.info(f"📂 扫描媒体库: {self._progress_current_library}")
-                t, f = self._scan_library(client, svc, skey, lib_id, lib_name)
+                self._scan_status["current_library"] = f"[{getattr(svc,'name','?')}] {lib_name}"
+                logger.info(f"📂 扫描媒体库: {self._scan_status['current_library']}")
+                t, f = self._scan_library(client, svc, skey, lib_id, lib_name, lib_type)
                 total_translated += t
                 total_failed += f
-                self._progress_done += 1
+                self._scan_status["done"] = self._scan_status.get("done", 0) + 1
                 self._auto_save()
 
             logger.info(f"扫描完成: 翻译 {total_translated} 条, 失败 {total_failed} 条")
@@ -744,31 +1229,71 @@ class EmbyPeopleLocalize(_PluginBase):
             self._is_running = False
             self._is_paused = False
             self._stop_requested = False
-            self._progress_current_title = ""
-            self._progress_current_library = ""
+            # v1.3.0: 同步 _scan_status - 单一数据源
+            self._scan_status["running"] = False
+            self._scan_status["paused"] = False
+            self._scan_status["current_title"] = ""
+            self._scan_status["current_library"] = ""
+            # v1.2.7: 扫描完成清空 cursor
+            self._scan_cursor = None
             self._save_state()
 
     def _scan_library(self, client: EmbyClient, svc: ServiceInfo, skey: str,
-                      lib_id: str, lib_name: str) -> Tuple[int, int]:
+                      lib_id: str, lib_name: str, lib_type: str = "") -> Tuple[int, int]:
         translated = failed = 0
-        skipped = 0  # 跳过/无需翻译的条目数
-        start = 0
+        skipped = 0
         page_size = 50
+        total_estimated = 0
+        page_index = 0
+        item_index = 0
 
+        # v1.2.5: 根据媒体库类型决定是否递归
+        lib_type_lower = (lib_type or "").lower()
+        recursive = lib_type_lower in ("tvshows", "mixed", "tv")
+
+        # v1.2.8: 断点续扫 - 从 cursor 恢复 server_id/library_id/page/index/total
+        if self._scan_cursor and self._scan_cursor.get("library_id") == lib_id and \
+                self._scan_cursor.get("server_id") == skey:
+            page_index = int(self._scan_cursor.get("page", 0) or 0)
+            item_index = int(self._scan_cursor.get("index", 0) or 0)
+            total_estimated = int(self._scan_cursor.get("total", 0) or 0)
+            logger.info(f"从断点继续扫描 [{lib_name}]: 第{page_index}页 第{item_index}项")
+            self._push_log("INFO", f"断点续扫: {lib_name} 从第{page_index}页第{item_index}项继续")
+        start = page_index * page_size
+
+        # 先获取总数
+        try:
+            first_data = client.fetch_items_page(lib_id, limit=1, start_index=0, recursive=recursive)
+            total_estimated = int((first_data or {}).get("TotalRecordCount", 0) or 0)
+        except Exception:
+            pass
+
+        self._scan_status["total"] = total_estimated
+        self._scan_status["current_library"] = lib_name
+
+        page_counter = page_index
         while True:
             if self._stop_requested:
                 break
             try:
-                data = client.fetch_items_page(lib_id, limit=page_size, start_index=start)
+                data = client.fetch_items_page(lib_id, limit=page_size, start_index=start, recursive=recursive)
                 items = (data or {}).get("Items", []) or []
                 if not items:
                     break
 
-                for item in items:
+                # 更新总数
+                if not total_estimated:
+                    total_estimated = int((data or {}).get("TotalRecordCount", 0) or 0)
+                    self._scan_status["total"] = total_estimated
+
+                start_idx_in_page = item_index if page_counter == page_index else 0
+                for i in range(start_idx_in_page, len(items)):
                     if self._stop_requested:
                         break
+                    item = items[i]
+                    self._scan_status["done"] = start + i + 1
+                    self._scan_status["current_title"] = item.get("Name", "?")
                     try:
-                        before = translated
                         t, f = self._process_item(client, svc, skey, item, lib_name)
                         translated += t
                         failed += f
@@ -777,11 +1302,28 @@ class EmbyPeopleLocalize(_PluginBase):
                     except Exception as e:
                         logger.error(f"处理条目异常: {e}")
                         failed += 1
+                        item_id = str(item.get("Id", ""))
+                        title = item.get("Name", "?")
+                        self._record_failure(item_id, skey, title, f"处理异常: {e}")
                     time.sleep(self._delay)
+
+                # v1.2.8: 每页处理完后保存完整 cursor
+                start += page_size
+                page_counter += 1
+                item_index = 0
+                self._scan_cursor = {
+                    "server_id": skey,
+                    "library_id": lib_id,
+                    "library_name": lib_name,
+                    "page": page_counter,
+                    "index": item_index,
+                    "total": total_estimated,
+                    "time": time.time(),
+                }
+                self._save_state()
 
                 if len(items) < page_size:
                     break
-                start += page_size
             except Exception as e:
                 logger.error(f"分页获取失败: {e}")
                 break
@@ -797,6 +1339,10 @@ class EmbyPeopleLocalize(_PluginBase):
         if self._stop_requested:
             return 0, 0
 
+        # v1.2.8: 初始化步骤状态（用于 UI 扫描详情）
+        self._reset_steps()
+        self._set_step("获取Emby")  # 标记"获取Emby"为进行中
+
         item_id = str(item.get("Id", ""))
         title = item.get("Name", "")
         year = item.get("ProductionYear") or (item.get("PremiereDate", "")[:4] if item.get("PremiereDate") else "")
@@ -807,51 +1353,76 @@ class EmbyPeopleLocalize(_PluginBase):
         season_num = None
         episode_num = None
 
+        # v1.2.4: Emby 实际字段是 ParentIndexNumber(季)/IndexNumber(集)
+        # 兼容旧字段名 SeasonNumber/EpisodeNumber
         if item_type == "Episode":
-            series_name = item.get("SeriesName", "") or title
-            season_num = item.get("SeasonNumber")
-            episode_num = item.get("EpisodeNumber")
+            series_name = (item.get("SeriesName", "") or title)
+            # 优先 Emby 标准字段，兼容旧字段
+            season_num = item.get("ParentIndexNumber")
+            if season_num is None:
+                season_num = item.get("SeasonNumber")
+            episode_num = item.get("IndexNumber")
+            if episode_num is None:
+                episode_num = item.get("EpisodeNumber")
+            # v1.2.5: 防御性类型转换 - 确保是整数
+            if season_num is not None:
+                try:
+                    season_num = int(season_num)
+                except (TypeError, ValueError):
+                    season_num = None
+            if episode_num is not None:
+                try:
+                    episode_num = int(episode_num)
+                except (TypeError, ValueError):
+                    episode_num = None
             if season_num is not None and episode_num is not None:
-                display_title = f"{series_name} S{season_num:02d}E{episode_num:02d}"
+                display_title = f"{series_name} 第{season_num}季 第{episode_num}集"
             elif series_name:
                 display_title = series_name
         elif item_type == "Series":
             series_name = title
+            # 尝试读取剧集总数/季数
+            season_num = item.get("ChildCount") or item.get("SeasonCount")
 
         key = f"{skey}:{item_id}"
-        self._progress_current_title = display_title
+        self._scan_status["current_title"] = display_title
 
         if not self._force_refresh and key in self._processed:
             logger.debug(f"[{item_id}] {display_title} ({year}) — 已处理，跳过")
+            self._finalize_steps(success=True)
             return 0, 0
 
-        # 按需获取完整条目（含 People），避免列表查询性能问题
+        # 优先使用列表中已含的 People，若无则按需获取详情
         people = item.get("People")
         if not people:
             full_item = client.fetch_item(item_id)
             if not full_item:
                 logger.warning(f"[{item_id}] {display_title} — 无法获取完整条目")
+                self._finalize_steps(success=False)
                 return 0, 0
-            # 使用完整数据
             title = full_item.get("Name", title)
             year = full_item.get("ProductionYear") or (full_item.get("PremiereDate", "")[:4] if full_item.get("PremiereDate") else year)
             people = full_item.get("People", []) or []
-            # 重新设置显示信息
+            # 重新读取季集信息（使用 Emby 实际字段）
             if item_type == "Episode":
                 series_name = full_item.get("SeriesName", "") or series_name
-                season_num = full_item.get("SeasonNumber", season_num)
-                episode_num = full_item.get("EpisodeNumber", episode_num)
+                season_num = full_item.get("ParentIndexNumber", season_num)
+                if season_num is None:
+                    season_num = full_item.get("SeasonNumber")
+                episode_num = full_item.get("IndexNumber", episode_num)
+                if episode_num is None:
+                    episode_num = full_item.get("EpisodeNumber")
                 if season_num is not None and episode_num is not None:
-                    display_title = f"{series_name} S{season_num:02d}E{episode_num:02d}"
+                    display_title = f"{series_name} 第{season_num}季 第{episode_num}集"
                 elif series_name:
                     display_title = series_name
-            elif item_type == "Series":
-                series_name = full_item.get("Name", series_name)
-            self._progress_current_title = display_title
+            self._scan_status["current_title"] = display_title
+        # v1.2.8: "获取Emby"步骤完成，进入"提取演员"
+        self._set_step("获取Emby", self.STEP_DONE)
+        self._set_step("提取演员")
 
         if not people:
-            self._post_translate_hook(key, display_title, year, item_id, {}, self._lock_cast, lib_name, skipped=True,
-                                  series_name=series_name, season_num=season_num, episode_num=episode_num, item_type=item_type)
+            self._finalize_steps(success=True)
             return 0, 0
 
         # 收集待翻译的人名和角色名
@@ -875,13 +1446,15 @@ class EmbyPeopleLocalize(_PluginBase):
                 }.get(ptype, False)
 
             if name and (self._translate_all or name_type_ok):
-                if self._looks_like_chinese(name):
+                # v1.2.4: 当 _overwrite_chinese 开启时，重译已有中文名
+                if self._looks_like_chinese(name) and not self._overwrite_chinese:
                     skip_reasons.append(f"{name}(已是中文)")
                 else:
                     name_terms.append(name)
 
             if role and (self._translate_role or self._translate_all):
-                if self._looks_like_chinese(role):
+                # v1.2.4: 重译逻辑同样适用于角色名
+                if self._looks_like_chinese(role) and not self._overwrite_chinese:
                     skip_reasons.append(f"{role}(角色已是中文)")
                 else:
                     role_terms.append(role)
@@ -890,6 +1463,10 @@ class EmbyPeopleLocalize(_PluginBase):
             logger.info(f"[{item_id}] {display_title} ({year}) — 无需翻译")
             self._post_translate_hook(key, display_title, year, item_id, {}, self._lock_cast, lib_name, skipped=True,
                                   series_name=series_name, season_num=season_num, episode_num=episode_num, item_type=item_type)
+            # v1.2.8: 步骤收尾（提取演员后无需翻译）
+            self._set_step("提取演员", self.STEP_DONE)
+            self._set_step("AI翻译", self.STEP_SKIPPED)
+            self._set_step("写回", self.STEP_SKIPPED)
             return 0, 0
 
         # 去重并限制数量
@@ -898,9 +1475,14 @@ class EmbyPeopleLocalize(_PluginBase):
 
         logger.info(f"[{item_id}] {display_title} ({year}) — 待翻译 {len(name_terms) + len(role_terms)} 条")
 
+        # v1.2.8: "提取演员"步骤完成，进入"AI翻译"
+        self._set_step("提取演员", self.STEP_DONE)
+        self._set_step("AI翻译")
+
         # 使用 Translator 处理
         if not self._translator or not self._llm:
             logger.warning("翻译器或 LLM 未初始化")
+            self._finalize_steps(success=False)
             return 0, 1
 
         batch_size = self._max_people_per_batch
@@ -908,30 +1490,41 @@ class EmbyPeopleLocalize(_PluginBase):
             title, year, name_terms, role_terms, batch_size
         )
 
-        # 更新缓存命中率
+        # v1.2.4: 修复缓存命中率统计
+        # 区分"真正命中缓存"vs"繁简转换命中"vs"LLM 新翻译命中"
+        # 只有真正命中（字典中存在）才计为 cache_hits
         for name in name_terms:
             if name in name_translations:
-                self._cache_hits += 1
-            else:
-                self._cache_misses += 1
+                if self._translator.get_cached_name(name):
+                    self._cache_hits += 1
+                else:
+                    # 是繁简转换或 LLM 新翻译的结果
+                    self._cache_misses += 1
         for role in role_terms:
             if role in role_translations:
-                self._cache_hits += 1
-            else:
-                self._cache_misses += 1
+                if self._translator.get_cached_role(role):
+                    self._cache_hits += 1
+                else:
+                    self._cache_misses += 1
 
         all_translations = {}
         all_translations.update(name_translations)
         all_translations.update(role_translations)
 
+        # v1.2.8: "AI翻译"步骤完成，进入"写回"
+        self._set_step("AI翻译", self.STEP_DONE)
+        self._set_step("写回")
+
         if not all_translations:
             logger.info(f"[{item_id}] {display_title} ({year}) — 无有效翻译结果")
+            self._set_step("写回", self.STEP_SKIPPED)
             return 0, 0
 
         new_people = self._translator.apply_translations(people, name_translations, role_translations)
 
         if self._stop_requested:
             logger.info("已请求停止，跳过写入")
+            self._set_step("写回", self.STEP_SKIPPED)
             return 0, 0
 
         lock = self._lock_cast
@@ -941,9 +1534,11 @@ class EmbyPeopleLocalize(_PluginBase):
         if updated > 0:
             self._post_translate_hook(key, display_title, year, item_id, all_translations, lock, lib_name,
                                       series_name=series_name, season_num=season_num, episode_num=episode_num, item_type=item_type)
+            self._set_step("写回", self.STEP_DONE)
             return len(all_translations), 0
         else:
             logger.warning(f"[{item_id}] {display_title} ({year}) — 写回失败")
+            self._set_step("写回", self.STEP_SKIPPED)
             return 0, 1
 
     def _post_translate_hook(self, key, display_title, year, item_id, translations, lock, lib_name="",
@@ -1006,25 +1601,45 @@ class EmbyPeopleLocalize(_PluginBase):
     # ============================================================
     
     # Webhook 事件类型映射（Emby → MoviePilot 翻译触发）
-    _WEBHOOK_ITEM_EVENT_TYPES = [
+    # v1.3.0: 改为不可变 tuple - 避免类级可变对象污染
+    _WEBHOOK_ITEM_EVENT_TYPES = (
         "itemadded", "item.added", "library.new", "added", "newcontent",
         "itemupdated", "item.updated", "library.update",
-    ]
+    )
 
     @eventmanager.register(EventType.WebhookMessage)
     def handle_webhook(self, event: Event):
         """
         监听 Emby Webhook 入库事件
-        v1.0.0: 完全重写，支持多种事件格式，增强可靠性
+        v1.2.5: 简化 Pydantic v2 解析（MoviePilot 仅支持 v2），移除冗余字段映射
         """
         try:
-            # 解析事件数据
-            raw_data = event.event_data or {}
-            if isinstance(raw_data, str):
+            event_data_obj = event.event_data
+            if event_data_obj is None:
+                return
+
+            # v1.2.5: MoviePilot 仅使用 Pydantic v2，统一用 model_dump()
+            if hasattr(event_data_obj, 'model_dump'):
                 try:
-                    raw_data = json.loads(raw_data)
+                    raw_data = event_data_obj.model_dump() or {}
+                except Exception as e:
+                    logger.debug(f"[Webhook] model_dump() 失败: {e}")
+                    return
+            elif isinstance(event_data_obj, dict):
+                raw_data = event_data_obj
+            elif isinstance(event_data_obj, str):
+                try:
+                    raw_data = json.loads(event_data_obj)
                 except Exception:
-                    pass
+                    return
+            else:
+                return
+
+            if not isinstance(raw_data, dict) or not raw_data:
+                return
+
+            # v1.2.5: 提取辅助方法已支持多种字段名（ItemId/item_id/Id），
+            # 移除 v1.2.4 的字段重映射（属于冗余代码）
 
             # 早期提取 ItemId，没有 ItemId 直接跳过（减少噪音日志）
             item_id = self._extract_item_id(raw_data)
@@ -1226,7 +1841,7 @@ class EmbyPeopleLocalize(_PluginBase):
                 url = self._get_service_url(svc)
                 api_key = self._get_service_api_key(svc)
                 user_id = self._get_service_user_id(svc)
-                client = EmbyClient(url, api_key, svc, user_id=user_id)
+                client = EmbyClient(url, api_key, svc, user_id=user_id, use_proxy=self._use_proxy)
                 
                 # 获取条目详情
                 logger.info(f"[Webhook] 正在获取条目详情: ItemId={item_id}")
@@ -1388,7 +2003,7 @@ class EmbyPeopleLocalize(_PluginBase):
             url = self._get_service_url(svc)
             api_key = self._get_service_api_key(svc)
             user_id = self._get_service_user_id(svc)
-            client = EmbyClient(url, api_key, svc, user_id=user_id)
+            client = EmbyClient(url, api_key, svc, user_id=user_id, use_proxy=self._use_proxy)
             
             item = client.fetch_item(item_id)
             if not item:

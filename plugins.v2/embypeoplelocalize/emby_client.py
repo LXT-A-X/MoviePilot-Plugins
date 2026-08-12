@@ -13,11 +13,47 @@ from app.schemas import ServiceInfo
 from . import constants
 
 
+def clean_emby_payload(payload: Dict[str, Any],
+                       preserve: Optional[List[str]] = None) -> Dict[str, Any]:
+    """v1.3.1: 统一清理 Emby 写回 payload
+
+    Emby API 对部分字段敏感，写回前必须强制清理：
+    1. 移除 EMBY_STRIP_FIELDS 中定义的只读/敏感字段
+    2. 移除值为 None 的字段
+
+    :param payload: 原始 payload
+    :param preserve: 必须保留的字段（默认 Id/People/LockedFields）
+    :return: 清理后的 payload 副本
+    """
+    preserve = set(preserve or ["Id", "People", "LockedFields"])
+    cleaned = dict(payload)
+    # 1. 清理敏感字段
+    for field in constants.EMBY_STRIP_FIELDS:
+        if field in cleaned and field not in preserve:
+            del cleaned[field]
+    # 2. 清理 None 值
+    for k in list(cleaned.keys()):
+        if cleaned[k] is None:
+            del cleaned[k]
+    return cleaned
+
+
 class EmbyClient:
     """Emby API 客户端"""
 
     def __init__(self, base_url: str, api_key: str, service: Optional[ServiceInfo] = None,
-                 user_id: Optional[str] = None):
+                 user_id: Optional[str] = None,
+                 timeout: tuple = (10, 60),
+                 use_proxy: bool = False):
+        """v1.2.8: timeout 提升到 (10, 60)
+        - 连接超时 10s
+        - 读取超时 60s
+        大型 NAS / 2000+ 媒体库时 10s 读取往往不够，60s 更稳定
+
+        v1.3.1: use_proxy 参数 - 控制是否信任系统代理环境变量
+        - 默认 False: 内网/直连 Emby，不读 HTTP_PROXY/HTTPS_PROXY
+        - True: 公网 Emby 必须走代理的场景
+        """
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.service = service
@@ -28,8 +64,10 @@ class EmbyClient:
             "Content-Type": "application/json",
             "Accept": "application/json",
         })
-        self.session.trust_env = False
-        self.timeout = (5, 10)
+        # v1.3.1: 代理可配置 - 默认不读系统代理，避免污染
+        self.session.trust_env = use_proxy
+        # v1.2.8: 超时从 (5, 10) 提升到 (10, 60) - 解决 NAS/大型库响应慢导致的请求失败
+        self.timeout = timeout
 
     def _get(self, path: str, params: Optional[dict] = None) -> Optional[dict]:
         """GET 请求"""
@@ -82,17 +120,20 @@ class EmbyClient:
             return None
 
     def get_libraries(self) -> List[Dict[str, Any]]:
-        """获取所有媒体库"""
+        """获取所有媒体库
+        v1.2.6: 不再根据 CollectionType 过滤，
+        避免自定义类型/混合库被误过滤
+        """
         data = self._get("/Library/MediaFolders")
         items = (data or {}).get("Items", []) or []
         result = []
         for item in items:
-            if item.get("CollectionType"):
-                result.append({
-                    "Id": str(item.get("Id", "")),
-                    "Name": item.get("Name", ""),
-                    "Type": item.get("CollectionType", ""),
-                })
+            # 不再过滤 CollectionType，统一返回所有媒体库
+            result.append({
+                "Id": str(item.get("Id", "")),
+                "Name": item.get("Name", ""),
+                "Type": item.get("CollectionType", "") or "unknown",
+            })
         return result
 
     def fetch_item(self, item_id: str) -> Optional[dict]:
@@ -110,13 +151,18 @@ class EmbyClient:
 
     def fetch_items_page(self, library_id: str,
                          limit: int = 50, start_index: int = 0,
-                         include_people: bool = True,
+                         include_people: bool = False,
                          recursive: bool = True) -> Optional[dict]:
         """分页获取媒体库条目
-        v1.2.4: 增加参数控制 - 电视库启用 Recursive 拉取剧集，列表默认包含 People
+        v1.2.6: 优化性能 - 列表查询默认不包含 People 字段
+        People 字段会显著增加响应体积（一项可能几十个演员），
+        改为按需在 _process_item 中单独 fetch_item 获取
         """
-        # 字段：基本信息 + People（直接获取人名列表，避免每个 item 单独调用）
-        fields = "Id,Name,ProductionYear,PremiereDate,Type,People"
+        # v1.2.6: 字段精简 - 列表只获取基础字段
+        # People 通过 fetch_item 单独获取（更高效，因为已处理的 item 会跳过）
+        fields = "Id,Name,ProductionYear,PremiereDate,Type,SeriesName,ParentIndexNumber,IndexNumber"
+        if include_people:
+            fields += ",People"
         params = {
             "ParentId": library_id,
             "Limit": limit,
@@ -151,13 +197,8 @@ class EmbyClient:
                 logger.info(f"[EmbyClient] [{item_id}] LockedFields 追加 Cast: {locked_fields}")
             payload["LockedFields"] = locked_fields
 
-        for field in constants.EMBY_STRIP_FIELDS:
-            if field in payload and field not in ("Id", "People", "LockedFields"):
-                del payload[field]
-
-        for k in list(payload.keys()):
-            if payload[k] is None:
-                del payload[k]
+        # v1.3.1: 强制 clean payload - 不依赖调用方，Emby API 对部分字段敏感
+        payload = clean_emby_payload(payload)
 
         if self._post(f"/Items/{item_id}", payload):
             changes = sum(1 for p in new_people if p.get("Name"))
@@ -167,14 +208,26 @@ class EmbyClient:
         logger.error(f"[EmbyClient] [{item_id}] 写入失败")
         return 0
 
-    def verify_write(self, item_id: str) -> bool:
-        """验证写回是否成功（再次拉取条目确认）"""
+    def verify_write(self, item_id: str, expected_names: List[str] = None) -> bool:
+        """验证写回是否成功
+        v1.2.7: 内容验证 - 检查目标名字是否真的写入了
+        expected_names: 期望在 People 中存在的名字列表（翻译后的中文名）
+        """
         time.sleep(0.5)
         item = self.fetch_item(item_id)
         if not item:
             return False
         people = item.get("People", []) or []
-        return len(people) > 0
+        if not people:
+            return False
+        # v1.2.7: 内容验证 - 如果提供了期望名字，必须至少找到一个
+        if expected_names:
+            current_names = {p.get("Name", "").strip() for p in people if p.get("Name")}
+            for name in expected_names:
+                if name and name.strip() in current_names:
+                    return True
+            return False
+        return True  # 兼容旧调用：只要 People 非空就算成功
 
     def is_cast_locked(self, item_id: str) -> bool:
         """判断 Cast 是否已锁定"""
@@ -195,12 +248,8 @@ class EmbyClient:
         payload = dict(item)
         payload["Id"] = item_id
         payload["LockedFields"] = lf
-        for field in constants.EMBY_STRIP_FIELDS:
-            if field in payload and field not in ("Id", "LockedFields"):
-                del payload[field]
-        for k in list(payload.keys()):
-            if payload[k] is None:
-                del payload[k]
+        # v1.3.1: 统一使用 clean_emby_payload
+        payload = clean_emby_payload(payload)
         return self._post(f"/Items/{item_id}", payload)
 
     def refresh_item(self, item_id: str):

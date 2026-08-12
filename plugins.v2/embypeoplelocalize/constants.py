@@ -63,6 +63,7 @@ CFG_LLM_BASE_URL = "llm_base_url"
 CFG_LLM_API_KEY = "llm_api_key"
 CFG_LLM_MODEL = "llm_model"
 CFG_LLM_TIMEOUT = "llm_timeout"
+CFG_USE_PROXY = "use_proxy"
 
 # 运行时触发键
 CFG_RUN_SCAN = "run_scan"
@@ -73,7 +74,8 @@ CFG_ONCE = "onlyonce"
 # 默认值
 DEFAULT_DELAY = 2
 DEFAULT_WEBHOOK_DELAY = 60
-DEFAULT_MAX_PEOPLE = 10
+DEFAULT_MAX_PEOPLE = 20  # v1.3.1: 10→20，剧集演员较多
 DEFAULT_BATCH_SIZE = 5
 DEFAULT_LLM_TIMEOUT = 120
+DEFAULT_USE_PROXY = False  # v1.3.1: 默认不读系统代理
 MAX_HISTORY = 200

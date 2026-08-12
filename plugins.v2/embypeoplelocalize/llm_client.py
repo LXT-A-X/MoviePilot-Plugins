@@ -4,6 +4,7 @@ v0.9.0 重构版 - 简化代码，统一日志，增强错误处理
 """
 import json
 import re
+import time
 import traceback
 from typing import Any, Dict, List, Optional
 
@@ -15,12 +16,15 @@ class LLMClient:
     """大模型客户端"""
 
     def __init__(self, base_url: str, api_key: str, model: str,
-                 prompt_template: str = "", timeout: int = 60):
+                 prompt_template: str = "", timeout: int = 60,
+                 verify_ssl: bool = True):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
         self.prompt_template = prompt_template
         self.timeout = timeout
+        # v1.2.7: SSL 验证可配置 - 内网环境可关闭
+        self.verify_ssl = verify_ssl
         self._client = None
         self._use_sdk = False
         self._init_client()
@@ -28,25 +32,35 @@ class LLMClient:
     def _init_client(self):
         """初始化客户端（优先 SDK，失败降级为 requests）"""
         try:
-            import os
             import openai
+            import httpx
 
-            # 设置代理环境变量（openai SDK 内部的 httpx 会自动读取）
+            # v1.3.1: 不再污染全局 os.environ
+            # 改用 http_client 传代理 - 让 openai SDK 内部的 httpx 使用我们的代理配置
             proxy_url = self._parse_proxy()
+            http_client = None
             if proxy_url:
+                # 提取字符串形式的代理 URL
                 if isinstance(proxy_url, dict):
                     proxy = list(proxy_url.values())[0]
                 else:
                     proxy = proxy_url
-                os.environ["HTTP_PROXY"] = proxy
-                os.environ["HTTPS_PROXY"] = proxy
-                logger.info(f"[LLMClient] 已设置代理环境变量: {proxy}")
+                # 构建 httpx.Client 显式传 proxy，避免污染全局环境变量
+                http_client = httpx.Client(
+                    proxy=proxy,
+                    timeout=self.timeout,
+                    verify=self.verify_ssl,
+                )
+                logger.info(f"[LLMClient] 已配置 httpx 代理: {proxy}")
 
-            self._client = openai.OpenAI(
-                base_url=self.base_url,
-                api_key=self.api_key,
-                timeout=self.timeout,
-            )
+            client_kwargs = {
+                "base_url": self.base_url,
+                "api_key": self.api_key,
+                "timeout": self.timeout,
+            }
+            if http_client is not None:
+                client_kwargs["http_client"] = http_client
+            self._client = openai.OpenAI(**client_kwargs)
             self._use_sdk = True
             logger.info(f"[LLMClient] SDK 模式初始化成功: {self.model}")
         except Exception as e:
@@ -84,20 +98,26 @@ class LLMClient:
             return {}
 
         prompt = self._build_prompt(title, year, terms)
+        terms_count = len(terms)
+        # v1.2.9: 翻译耗时统计 - 用于性能监控和日志
+        start_ts = time.time()
 
         try:
             if self._use_sdk and self._client:
-                result = self._call_sdk(prompt)
+                result = self._call_sdk(prompt, terms_count)
             else:
-                result = self._call_requests(prompt)
+                result = self._call_requests(prompt, terms_count)
 
+            elapsed = round(time.time() - start_ts, 2)
             if result:
-                logger.info(f"[LLMClient] 翻译成功: {len(result)} 个词条")
+                logger.info(f"[LLMClient] 翻译成功: {len(result)} 个词条 "
+                            f"(输入{terms_count}条, 耗时{elapsed}s, max_tokens={self._calc_max_tokens(terms_count)})")
             else:
-                logger.warning(f"[LLMClient] 翻译返回空结果")
+                logger.warning(f"[LLMClient] 翻译返回空结果 (耗时{elapsed}s)")
             return result
         except Exception as e:
-            logger.error(f"[LLMClient] 翻译失败: {e}\n{traceback.format_exc()}")
+            elapsed = round(time.time() - start_ts, 2)
+            logger.error(f"[LLMClient] 翻译失败 (耗时{elapsed}s): {e}\n{traceback.format_exc()}")
             return {}
 
     def _build_prompt(self, title: str, year: Any, terms: List[str]) -> str:
@@ -115,9 +135,26 @@ context: {"title": {title_json}, "year": {year_json}}
 terms: {terms_json}
 输出: JSON 对象，键为原文，值为译文。无法翻译保留原文。只输出 JSON，不要 markdown。"""
 
-    def _call_sdk(self, prompt: str) -> Dict[str, str]:
+    def _calc_max_tokens(self, terms_count: int) -> int:
+        """v1.2.8: 根据批量大小动态计算 max_tokens
+        - 5 条以内：2048（默认）
+        - 5~10 条：3072
+        - 10~20 条：4096
+        - 20+ 条：6144
+        避免大批量翻译时返回截断导致 JSON 解析失败
+        """
+        if terms_count <= 5:
+            return 2048
+        if terms_count <= 10:
+            return 3072
+        if terms_count <= 20:
+            return 4096
+        return 6144
+
+    def _call_sdk(self, prompt: str, terms_count: int = 5) -> Dict[str, str]:
         """通过 openai SDK 调用"""
         try:
+            max_tokens = self._calc_max_tokens(terms_count)
             resp = self._client.chat.completions.create(
                 model=self.model,
                 messages=[
@@ -125,7 +162,7 @@ terms: {terms_json}
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.1,
-                max_tokens=2048,
+                max_tokens=max_tokens,
             )
             text = resp.choices[0].message.content.strip()
             return self._parse_response(text)
@@ -133,7 +170,7 @@ terms: {terms_json}
             logger.error(f"[LLMClient] SDK 调用失败: {e}")
             return {}
 
-    def _call_requests(self, prompt: str) -> Dict[str, str]:
+    def _call_requests(self, prompt: str, terms_count: int = 5) -> Dict[str, str]:
         """通过纯 requests 调用"""
         import requests
         try:
@@ -142,6 +179,7 @@ terms: {terms_json}
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
             }
+            max_tokens = self._calc_max_tokens(terms_count)
             data = {
                 "model": self.model,
                 "messages": [
@@ -149,14 +187,16 @@ terms: {terms_json}
                     {"role": "user", "content": prompt},
                 ],
                 "temperature": 0.1,
-                "max_tokens": 2048,
+                "max_tokens": max_tokens,
             }
             proxies = self._parse_proxy()
+            # v1.2.9: 修复 - 之前硬编码 verify=False 导致 SSL 配置失效
+            # 现在跟随 self.verify_ssl，与 SDK 模式保持一致
             resp = requests.post(
                 url, headers=headers, json=data,
                 timeout=self.timeout,
                 proxies=proxies,
-                verify=False,
+                verify=self.verify_ssl,
             )
             resp.raise_for_status()
             result = resp.json()

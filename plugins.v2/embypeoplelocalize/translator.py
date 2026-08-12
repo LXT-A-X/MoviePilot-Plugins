@@ -34,41 +34,73 @@ class PeopleTranslator:
             self._role_cache = {}
         else:
             self._role_cache = role_cache
-        self._lock = state_lock or threading.Lock()
+        # v1.2.9: 默认用 RLock 替代 Lock - 防止嵌套调用 (get -> set) 死锁
+        # 外部传入 Lock/RLock 都兼容，None 时统一用 RLock
+        if state_lock is None:
+            self._lock = threading.RLock()
+        else:
+            # 外部传入的锁直接用 - 调用方负责线程安全
+            self._lock = state_lock
         self.plugin = plugin
 
     # ─────────────────────────────────────
     # 缓存管理
     # ─────────────────────────────────────
-    def get_cached_name(self, name: str) -> Optional[str]:
-        """查人名缓存"""
+    # v1.2.8: 默认语言 - 简体
+    DEFAULT_LANG = "zh-cn"
+
+    def _get_lang_cache(self, cache_dict: dict, lang: str = None) -> dict:
+        """v1.2.8: 获取指定语言的缓存子字典
+        缓存结构：{"zh-cn": {...}, "zh-tw": {...}, "default": {...}}
+        - 优先返回指定语言子字典
+        - 不存在则自动创建空字典
+        - 兼容旧的 "default" 顶层结构
+        """
+        lang = lang or self.DEFAULT_LANG
+        if lang not in cache_dict:
+            cache_dict[lang] = {}
+        return cache_dict[lang]
+
+    def get_cached_name(self, name: str, lang: str = None) -> Optional[str]:
+        """查人名缓存（v1.2.8: 支持语言层级）"""
         with self._lock:
-            for lang_cache in self._name_cache.values():
+            # 优先查目标语言
+            lang = lang or self.DEFAULT_LANG
+            if lang in self._name_cache and name in self._name_cache[lang]:
+                return self._name_cache[lang][name]
+            # 兜底：兼容旧 default 缓存
+            for fallback_lang, lang_cache in self._name_cache.items():
                 if name in lang_cache:
                     return lang_cache[name]
         return None
 
-    def get_cached_role(self, role: str) -> Optional[str]:
-        """查角色缓存"""
+    def get_cached_role(self, role: str, lang: str = None) -> Optional[str]:
+        """查角色缓存（v1.2.8: 支持语言层级）"""
         with self._lock:
-            for lang_cache in self._role_cache.values():
+            lang = lang or self.DEFAULT_LANG
+            if lang in self._role_cache and role in self._role_cache[lang]:
+                return self._role_cache[lang][role]
+            # 兜底：兼容旧 default 缓存
+            for fallback_lang, lang_cache in self._role_cache.items():
                 if role in lang_cache:
                     return lang_cache[role]
         return None
 
-    def set_cached_name(self, name: str, translated: str):
-        """写人名缓存"""
+    def set_cached_name(self, name: str, translated: str, lang: str = None):
+        """写人名缓存（v1.2.8: 按语言隔离，避免简繁冲突）"""
         with self._lock:
-            if "default" not in self._name_cache:
-                self._name_cache["default"] = {}
-            self._name_cache["default"][name] = translated
+            lang = lang or self.DEFAULT_LANG
+            if lang not in self._name_cache:
+                self._name_cache[lang] = {}
+            self._name_cache[lang][name] = translated
 
-    def set_cached_role(self, role: str, translated: str):
-        """写角色缓存"""
+    def set_cached_role(self, role: str, translated: str, lang: str = None):
+        """写角色缓存（v1.2.8: 按语言隔离）"""
         with self._lock:
-            if "default" not in self._role_cache:
-                self._role_cache["default"] = {}
-            self._role_cache["default"][role] = translated
+            lang = lang or self.DEFAULT_LANG
+            if lang not in self._role_cache:
+                self._role_cache[lang] = {}
+            self._role_cache[lang][role] = translated
 
     def name_cache_size(self) -> int:
         with self._lock:
@@ -144,7 +176,9 @@ class PeopleTranslator:
             role_remaining.append(role)
 
         # 3. LLM 翻译剩余文本（合并去重）
-        all_remaining = list(set(name_remaining + role_remaining))
+        # v1.2.7: 使用 dict.fromkeys 保留输入顺序
+        # 避免 set() 打乱顺序导致 LLM 上下文理解下降
+        all_remaining = list(dict.fromkeys(name_remaining + role_remaining))
         if not all_remaining or not self.llm:
             return name_translations, role_translations
 
