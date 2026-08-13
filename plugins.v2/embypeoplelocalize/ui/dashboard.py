@@ -71,7 +71,7 @@ def _build_header(plugin) -> dict:
                      "text": "利用大模型将英文 / 罗马音 / 日文人名翻译为简体中文"},
                 ]),
                 _col("auto", [
-                    {"component": "div", "props": {"class": "d-flex ga-2", "style": {"flexWrap": "wrap"}},
+                    {"component": "div", "props": {"class": "d-flex ga-2 align-center", "style": {"flexWrap": "wrap"}},
                      "content": [
                          # v1.3.2: 启动状态徽章 - 第一个显示
                          _chip(f"插件{plugin_state}", state_color, icon=state_icon),
@@ -84,6 +84,14 @@ def _build_header(plugin) -> dict:
                          _chip("插件独立" if using_plugin_any else "MP 系统",
                                "info" if using_plugin_any else "success",
                                icon="mdi-cog-outline" if using_plugin_any else "mdi-cog"),
+                         # v1.3.3: 刷新按钮 - 解决 dashboard 统计不实时问题
+                         # 点击后调 /status 触发前端重新拉 page
+                         {"component": "VBtn",
+                          "props": {"icon": "true", "variant": "text", "size": "small",
+                                    "color": C_PRIMARY, "title": "刷新当前页"},
+                          "text": "mdi-refresh",
+                          "events": {"click": {"api": "plugin/EmbyPeopleLocalize/status",
+                                                "method": "POST"}}},
                      ]}
                 ], md="auto"),
             ], justify="space-between", align="center")]
@@ -332,7 +340,7 @@ def _build_recent_activity_card(plugin) -> dict:
 
 def _build_failed_card(plugin) -> dict:
     """v1.2.9: 新增 - 失败中心卡片
-    显示失败任务数 + 最近 3 条失败 + 重试按钮
+    v1.3.3: 失败原因不截断 - 用 maxHeight 限制容器 + 内部滚动展示完整错误
     """
     failed = list(getattr(plugin, "_failed", []) or [])
     is_running = getattr(plugin, "_is_running", False)
@@ -357,18 +365,27 @@ def _build_failed_card(plugin) -> dict:
     list_items = []
     for f in recent_failed:
         reason = f.get("reason", "") or ""
-        list_items.append({"component": "div", "props": {"class": "py-1"}, "content": [
+        title = f.get("title", "?")
+        # v1.3.3: title 允许折行 - 关键在容器要有 maxWidth
+        list_items.append({"component": "div", "props": {"class": "py-2",
+                                                          "style": {"borderBottom": "1px dashed rgba(255,255,255,0.06)"}},
+                           "content": [
             {"component": "div", "props": {"class": "d-flex align-center"}, "content": [
                 _icon("mdi-alert", color=C_ERROR, size="x-small", extra_class="mr-2"),
+                # v1.3.3: 用 white-space: normal + word-break: break-all 允许折行
                 {"component": "span",
-                 "props": {"class": "text-caption text-truncate flex-grow-1"},
-                 "text": f.get("title", "?")},
+                 "props": {"class": "text-caption text-high-emphasis",
+                            "style": {"whiteSpace": "normal", "wordBreak": "break-all", "flexGrow": 1}},
+                 "text": title},
             ]},
-            # v1.3.2: 失败原因不截断到 30 字符，最多 100 + tooltip
+            # v1.3.3: 失败原因完整展示 - 折行 + title 属性 hover 看完整
             {"component": "div", "props": {"class": "ml-5 mt-1 text-caption",
-                                           "style": {"color": C_ERROR, "opacity": 0.85}},
-             "text": f"原因：{reason[:100]}{'…' if len(reason) > 100 else ''}",
-             "title": reason} if reason else None,
+                                           "style": {"color": C_ERROR, "opacity": 0.9,
+                                                      "whiteSpace": "normal",
+                                                      "wordBreak": "break-all",
+                                                      "lineHeight": 1.4}},
+             "text": f"原因：{reason}" if reason else "",
+             "title": reason} if reason else {"component": "div"},
         ]})
 
     content_blocks = [

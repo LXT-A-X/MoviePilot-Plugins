@@ -39,7 +39,7 @@ def build_form(lib_options, plugin, invalid_libraries=None) -> list:
             _col(12, [_switch("run_scan", "立即扫描（保存后执行）", "打开开关后点下方保存按钮，插件自动开始扫描")], sm=6),
         ]),
         _row([
-            _col(12, [_switch("run_clear_cache", "清除缓存并重扫", "清空所有已处理记录和缓存，然后立即重新扫描全部条目")], sm=6),
+            _col(12, [_switch("run_clear_cache", "清空缓存", "清空所有人名/角色缓存、已处理记录和历史，不触发扫描。下次扫描时重新翻译。")], sm=6),
             _col(12, [_switch("run_lock_cast", "批量补锁定旧条目", "为已翻译但未锁定的旧条目补充 Cast 锁定")], sm=6),
         ]),
         _row([
@@ -55,17 +55,14 @@ def build_form(lib_options, plugin, invalid_libraries=None) -> list:
             _col(12, [_text_field("delay", "批间延迟（秒）", "2", "每次请求间隔，避免触发限流", "number")], sm=6),
         ]),
     ]
-    if is_scanning:
-        # v1.2.9: 停止扫描按钮 - tonal 等级
-        basic_rows.append(_row([_col(12, [_btn("⏹ 停止扫描", C_ERROR,
-                                                 "plugin/EmbyPeopleLocalize/stop",
-                                                 variant="tonal", icon="mdi-stop-circle")])]))
-    # v1.3.0: 危险操作二次确认 - 清空缓存 VDialog
-    basic_rows.append(_row([_col(12, [_confirm_danger_zone(is_scanning)])]))
     if invalid_libraries:
         basic_rows.append(_row([_col(12, [_alert(f"已自动移除失效的媒体库配置：{', '.join(invalid_libraries)}。")])]))
     if not lib_options:
         basic_rows.append(_row([_col(12, [_alert("未获取到任何媒体库，请检查 Emby 服务器是否在线、API Key 是否有效。", "error")])]))
+    # v1.3.0: 危险操作二次确认 - 清空缓存 VDialog（即使去掉停止按钮也要保留）
+    basic_rows.append(_row([_col(12, [_confirm_danger_zone(is_scanning)])]))
+    # v1.3.3: 按用户要求去掉「⏹ 停止扫描」按钮
+    # 扫描控制完全通过「立即扫描」开关实现
     card_basic = _section("基础设置", C_PRIMARY, basic_rows, icon="mdi-cog-outline")
 
     # ────────── LLM 连接 ──────────

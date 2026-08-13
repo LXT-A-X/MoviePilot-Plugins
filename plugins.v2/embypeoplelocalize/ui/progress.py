@@ -129,37 +129,6 @@ def build_status_bar(scan_status: Dict[str, Any], plugin=None) -> list:
             ]
         })
 
-        # v1.3.2: 在状态条内提供停止扫描按钮 - 第一页面就能直接停
-        stop_btn = {
-            "component": "VBtn",
-            "props": {
-                "color": "error", "variant": "tonal", "rounded": "lg",
-                "prepend_icon": "mdi-stop-circle",
-                "class": "text-none mt-2",
-                "block": True,
-            },
-            "text": "⏹ 停止扫描",
-            "events": {"click": {"api": "plugin/EmbyPeopleLocalize/stop", "method": "POST"}},
-        }
-        content.append({
-            "component": "VCardText", "props": {"class": "px-4 pt-0 pb-3"}, "content": [stop_btn]
-        })
-
-    # v1.3.2: 非运行状态显示「开始扫描」按钮 - 首页也能直接启动
-    elif not is_paused:
-        action_btn = {
-            "component": "VBtn",
-            "props": {
-                "color": "primary", "variant": "tonal", "rounded": "lg",
-                "prepend_icon": "mdi-play-circle",
-                "class": "text-none mt-2",
-                "block": True,
-            },
-            "text": "▶ 开始扫描",
-            "events": {"click": {"api": "plugin/EmbyPeopleLocalize/scan", "method": "POST"}},
-        }
-        content.append({
-            "component": "VCardText", "props": {"class": "px-4 pt-0 pb-3"}, "content": [action_btn]
-        })
-
+    # v1.3.3: 按用户要求去掉「▶ 开始扫描」「⏹ 停止扫描」按钮
+    # 扫描完全由 settings 页的「立即扫描」开关控制，更稳定可靠
     return content
