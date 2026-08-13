@@ -64,7 +64,7 @@ class EmbyPeopleLocalize(_PluginBase):
     plugin_name = "Emby 演职人员中文化"
     plugin_desc = "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回"
     plugin_icon = "embypeoplelocalize.jpg"
-    plugin_version = "1.3.4"
+    plugin_version = "1.3.5"
     plugin_author = "LXT-A-X"
     plugin_config_prefix = "embypeoplelocalize_"
     plugin_order = 27
@@ -1640,6 +1640,11 @@ class EmbyPeopleLocalize(_PluginBase):
             return 0, 1
         for name in name_terms:
             if name in name_translations:
+                # v1.3.4: 防御 - 同上，translator 失效立即停止
+                if self._translator is None:
+                    logger.warning(f"[{item_id}] {display_title} — 翻译器已失效，跳过缓存命中统计")
+                    self._finalize_steps(success=False)
+                    return 0, 1
                 if self._translator.get_cached_name(name):
                     self._cache_hits += 1
                 else:
@@ -1647,6 +1652,11 @@ class EmbyPeopleLocalize(_PluginBase):
                     self._cache_misses += 1
         for role in role_terms:
             if role in role_translations:
+                # v1.3.4: 防御 - 重试时若 self._translator 被外部置 None，立即停止
+                if self._translator is None:
+                    logger.warning(f"[{item_id}] {display_title} — 翻译器已失效，跳过缓存命中统计")
+                    self._finalize_steps(success=False)
+                    return 0, 1
                 if self._translator.get_cached_role(role):
                     self._cache_hits += 1
                 else:
@@ -1732,10 +1742,13 @@ class EmbyPeopleLocalize(_PluginBase):
             self._role_cache.clear()
             self._processed.clear()
             self._history.clear()
+            # v1.3.4: 同时清空失败任务 - 缓存清空后旧失败记录已无意义
+            # 避免用户看到一堆 stale 的"get_cached_role"等已不相关的错误
+            self._failed.clear()
             self._cache_hits = 0
             self._cache_misses = 0
         self._save_state()
-        logger.info("所有缓存已清空")
+        logger.info("所有缓存及失败任务已清空")
 
     def stop_service(self):
         """v1.3.2: 关闭插件时安全停止后台线程
