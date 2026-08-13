@@ -8,7 +8,7 @@
     "author": "LXT-A-X",
     "level": 1,
     "history": {
-      "v1.3.3": "UI 细节修复：① 修正 progress.py 中失败数写死为 0 的 bug（现在从 plugin._failed 真实读取）；② 确认头部启动状态徽章（运行中/未启动/Emby 未连接/LLM 未配置）正常显示；③ 确认 Webhook 状态文字+颜色分级（等待中 info / 正常 success / 部分失败 warning / 异常 error）；④ 状态条非运行时显示「▶ 开始扫描」按钮（首页即可启动）；⑤ 修复 package.v2.json 版本号长期未同步的 bug（之前停留在 1.2.7，导致 MP 检测不到新版本无法升级）",
+      "v1.3.3": "体验优化：① 去掉首页+设置页的「开始/停止扫描」按钮（按用户要求完全由「立即扫描」开关控制，避免点击冲突）；② 首页头部新增「刷新」按钮 - 解决统计卡延迟问题，用户可手动触发立即刷新；③ 失败任务卡支持折行 + word-break 展示完整错误原因（之前被 text-truncate 截断到 100 字符也看不到后半段）；④ LLM SDK 显式传 timeout（之前只传 client 不传 create 调用，导致某些版本实际 6 分钟才超时）；⑤ translator.translate_batch 新增 stop_check 回调 - 每批 LLM 调用前检查停止信号，不再卡在 LLM 调用中；⑥ stop_service 等待 10s → 30s + 让 LLM._client=None 强制让卡住的 LLM 调用快速失败；⑦ 修复 _translator 在扫描中途被外部重置后 NoneType 崩溃（防御 None 检查并停止扫描）；⑧ 翻译器异常降级 - 翻译器失效时该项算失败而不是崩溃整个扫描；⑨ 「清除缓存并重扫」开关改为「清空缓存」- 只清空缓存/已处理记录/历史，不再自动重扫",
       "v1.3.2": "重大修复：插件生命周期与扫描线程绑定（解决 v1.3.x 真实使用核心痛点）。① stop_service 实现线程 join(10s) 安全等待，避免访问已销毁资源；② 改用 threading.Event 实现无轮询暂停/恢复，响应即时；③ 状态条始终显示历史统计（已处理/失败），并新增「▶ 开始扫描」按钮让首页可启动；④ 头部新增插件启动状态徽章（运行中/未启动/Emby 未连接/LLM 未配置）；⑤ 失败任务原因从 30 字符提升到 100 字符 + 完整 reason 写入 title 属性 hover 查看",
       "v1.3.1": "工程化收尾：① 解决 v1.3.0 后端 NoneType 'STEP_NAMES' 崩溃（progress.py 增加防御性兜底）；② 修复 save_settings API 增加成功提示；③ 暂停按钮在扫描任务上不可用时给明确错误信息；④ dashboard 修复 plugin=None 防御",
       "v1.3.0": "扫描状态统一 + 收尾：① 统一 _scan_status 字典替代散落的 _progress_* 多变量（单一数据源）；② 清理所有类级 [] / {} 可变默认值（避免 MoviePilot 热加载时多实例共享污染）；③ 停止扫描按钮读取统一状态；④ UI 拆分（ui/ 子包：dashboard/progress/settings/logs/common）",
