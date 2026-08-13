@@ -997,11 +997,11 @@ class EmbyPeopleLocalize(_PluginBase):
             self._startup()
 
         if self._run_clear_cache:
-            logger.info("检测到「清除缓存并重扫」开关")
+            # v1.3.3: 改为「单独清空缓存」- 只清缓存+已处理记录，不再自动重扫
+            logger.info("检测到「清空缓存」开关")
             self._run_clear_cache = False
             self.update_config(self._dump_config())
             self.clear_cache()
-            self._scan_worker(force=True)
 
         if self._run_scan:
             logger.info("检测到「立即扫描」开关")
@@ -1614,8 +1614,13 @@ class EmbyPeopleLocalize(_PluginBase):
             return 0, 1
 
         batch_size = self._max_people_per_batch
+        # v1.3.3: 传 stop_check 回调 - 让 translator 在 LLM 调用之间检查停止信号
+        # 不传则 translator 用自己的 stop_event（兜底）
+        def _stop_check() -> bool:
+            return self._stop_requested
         name_translations, role_translations = self._translator.translate_batch(
-            title, year, name_terms, role_terms, batch_size
+            title, year, name_terms, role_terms, batch_size,
+            stop_check=_stop_check,
         )
 
         # v1.3.2: LLM 调用是最慢的环节，调用后立即检查停止 - 避免用户等很久
@@ -1627,6 +1632,12 @@ class EmbyPeopleLocalize(_PluginBase):
         # v1.2.4: 修复缓存命中率统计
         # 区分"真正命中缓存"vs"繁简转换命中"vs"LLM 新翻译命中"
         # 只有真正命中（字典中存在）才计为 cache_hits
+        # v1.3.3: 防御 - 扫描中若 self._translator 被外部置 None（如 reload 插件/重新 init_plugin）
+        # 立即停止扫描，避免后续访问 NoneType 抛错
+        if self._translator is None:
+            logger.warning(f"[{item_id}] {display_title} — 翻译器已失效（可能被重载），停止扫描")
+            self._finalize_steps(success=False)
+            return 0, 1
         for name in name_terms:
             if name in name_translations:
                 if self._translator.get_cached_name(name):
@@ -1728,8 +1739,9 @@ class EmbyPeopleLocalize(_PluginBase):
 
     def stop_service(self):
         """v1.3.2: 关闭插件时安全停止后台线程
-        之前只设了 _stop_requested=True，线程可能继续跑导致访问已销毁的 self._llm/self._translator
-        现在用 threading.Event 通知 + join 等待线程退出
+        v1.3.3: 加强 - 1) 等待时间 10s → 30s，给 LLM 调用留出响应时间
+                     2) 让 LLM 客户端置 None 强制让卡住的 LLM 调用快速抛错
+                     3) daemon=True 兜底，MP 进程退出时线程会被强制结束
         """
         logger.info("收到插件停止信号，开始安全退出...")
         try:
@@ -1741,13 +1753,22 @@ class EmbyPeopleLocalize(_PluginBase):
             self._is_paused = False
             # 3. 保存当前状态（含 cursor）
             self._save_state()
-            # 4. 等待扫描线程退出
+            # 4. v1.3.3: 先让 LLM 客户端失效 - 这样卡在 LLM 调用中的线程
+            # 会在下一次 SDK 重试/后续调用时快速抛错退出
+            # 注意：保留 self._llm 引用对象但把底层 _client 置 None
+            try:
+                if self._llm is not None and hasattr(self._llm, "_client"):
+                    self._llm._client = None
+                    logger.info("已让 LLM 客户端失效，停止中的 LLM 调用将快速失败")
+            except Exception as e:
+                logger.debug(f"让 LLM 失效时异常: {e}")
+            # 5. 等待扫描线程退出（30s - 兼容 LLM SDK 重试）
             thread = getattr(self, "_scan_thread", None)
             if thread and thread.is_alive():
-                logger.info(f"等待扫描线程退出 (timeout=10s)...")
-                thread.join(timeout=10.0)
+                logger.info(f"等待扫描线程退出 (timeout=30s)...")
+                thread.join(timeout=30.0)
                 if thread.is_alive():
-                    logger.warning("扫描线程 10s 内未退出，强制继续（线程可能卡在 LLM 调用）")
+                    logger.warning("扫描线程 30s 内未退出，daemon 兜底（MP 进程结束时会被强制结束）")
                 else:
                     logger.info("扫描线程已退出")
             self._scan_thread = None

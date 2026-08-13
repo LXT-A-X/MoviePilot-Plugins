@@ -139,9 +139,12 @@ class PeopleTranslator:
     # ─────────────────────────────────────
     def translate_batch(self, title: str, year: Any,
                         name_terms: List[str], role_terms: List[str],
-                        batch_size: int = 5) -> Tuple[Dict[str, str], Dict[str, str]]:
+                        batch_size: int = 5,
+                        stop_check=None) -> Tuple[Dict[str, str], Dict[str, str]]:
         """
         批量翻译人名和角色名
+        v1.3.3: 新增 stop_check 回调 - 让 Plugin 在每批 LLM 调用前检查停止信号
+                防止插件关闭/扫描停止时卡在 LLM 调用中（之前要等 LLM timeout）
         返回: (人名翻译映射, 角色翻译映射)
         """
         name_translations = {}
@@ -183,6 +186,10 @@ class PeopleTranslator:
             return name_translations, role_translations
 
         for i in range(0, len(all_remaining), batch_size):
+            # v1.3.3: 每批 LLM 调用前检查停止 - 让 stop_requested 快速生效
+            if stop_check is not None and stop_check():
+                logger.info("[Translator] 检测到停止信号，提前结束本批翻译")
+                break
             batch = all_remaining[i:i + batch_size]
             try:
                 result = self.llm.translate_terms(title, year, batch)

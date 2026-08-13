@@ -152,7 +152,10 @@ terms: {terms_json}
         return 6144
 
     def _call_sdk(self, prompt: str, terms_count: int = 5) -> Dict[str, str]:
-        """通过 openai SDK 调用"""
+        """通过 openai SDK 调用
+        v1.3.3: 显式传 timeout - 之前只在 client 构造时传了 timeout，create() 调用时未传，
+        某些 SDK 版本会忽略 client 的 timeout，导致单次调用耗时可达 6 分钟
+        """
         try:
             max_tokens = self._calc_max_tokens(terms_count)
             resp = self._client.chat.completions.create(
@@ -163,6 +166,7 @@ terms: {terms_json}
                 ],
                 temperature=0.1,
                 max_tokens=max_tokens,
+                timeout=self.timeout,  # v1.3.3: 显式传 timeout 让 stop 能快速生效
             )
             text = resp.choices[0].message.content.strip()
             return self._parse_response(text)
