@@ -7,19 +7,15 @@ from app.log import logger
 
 from .common import (
     _row, _col, _section, _switch, _text_field, _select, _textarea,
-    _btn, _chip, _alert, _confirm_danger_zone,
+    _btn, _chip, _alert,
     C_PRIMARY, C_INFO, C_SUCCESS, C_WARNING, C_ERROR,
 )
 
 
 def build_form(lib_options, plugin, invalid_libraries=None) -> list:
     """v1.2.9: 设置页表单 - 拆出独立函数
-    三个等级按钮：
-    - 主操作 (开始扫描): elevated + primary
-    - 普通 (保存): outlined
-    - 危险 (清空缓存): tonal + error
-
-    v1.3.2: 防御 - plugin 为 None 时返回空表单
+    v1.3.4: 按用户要求所有交互改为开关 - 删除「清空缓存（危险）」按钮、「刷新 LLM」按钮、
+            新增「重试失败任务」「刷新 LLM」开关
     """
     if plugin is None:
         logger.warning("build_form: plugin is None，返回空表单")
@@ -28,7 +24,6 @@ def build_form(lib_options, plugin, invalid_libraries=None) -> list:
     invalid_libraries = invalid_libraries or []
     llm_ready = getattr(plugin, "_llm", None) is not None
     llm_model = getattr(plugin._llm, "model", "") if llm_ready else ""
-    # v1.3.0: 统一从 _scan_status 读取"运行中"状态，杜绝 _is_running 未恢复导致按钮卡住的隐患
     scan_status = plugin._build_scan_status() if hasattr(plugin, "_build_scan_status") else {}
     is_scanning = bool(scan_status.get("running", False))
 
@@ -39,13 +34,17 @@ def build_form(lib_options, plugin, invalid_libraries=None) -> list:
             _col(12, [_switch("run_scan", "立即扫描（保存后执行）", "打开开关后点下方保存按钮，插件自动开始扫描")], sm=6),
         ]),
         _row([
-            _col(12, [_switch("run_clear_cache", "清空缓存", "清空所有人名/角色缓存、已处理记录和历史，不触发扫描。下次扫描时重新翻译。")], sm=6),
+            _col(12, [_switch("run_clear_cache", "清空缓存", "清空所有人名/角色缓存、已处理记录和历史，不可恢复。保存后立即执行。")], sm=6),
             _col(12, [_switch("run_lock_cast", "批量补锁定旧条目", "为已翻译但未锁定的旧条目补充 Cast 锁定")], sm=6),
+        ]),
+        _row([
+            _col(12, [_switch("run_retry_failed", "重试失败任务", "对失败任务列表中的条目重新处理。保存后立即执行。")], sm=6),
+            _col(12, [_switch("run_refresh_llm", "刷新 LLM 客户端", "重新加载 LLM 配置（改了 API Key/模型名后用这个）。保存后立即执行。")], sm=6),
         ]),
         _row([
             _col(12, [_switch("notify_on_complete", "扫描完成后发送通知", "每次扫描完成推送通知，包含翻译统计和缓存命中率")], sm=6),
             _col(12, [{"component": "div", "props": {"class": "text-caption text-medium-emphasis"},
-                        "text": "「立即扫描」「清除缓存」「补锁定」均为一次性触发，执行完成后自动复位。"}], sm=6),
+                        "text": "「立即扫描/清空缓存/补锁定/重试/刷新LLM」均为一次性触发，打开后保存即执行，完成后自动复位。"}], sm=6),
         ]),
         _row([
             _col(12, [_select("libraries", "选择媒体库（多选，留空 = 全部）", lib_options,
@@ -59,10 +58,8 @@ def build_form(lib_options, plugin, invalid_libraries=None) -> list:
         basic_rows.append(_row([_col(12, [_alert(f"已自动移除失效的媒体库配置：{', '.join(invalid_libraries)}。")])]))
     if not lib_options:
         basic_rows.append(_row([_col(12, [_alert("未获取到任何媒体库，请检查 Emby 服务器是否在线、API Key 是否有效。", "error")])]))
-    # v1.3.0: 危险操作二次确认 - 清空缓存 VDialog（即使去掉停止按钮也要保留）
-    basic_rows.append(_row([_col(12, [_confirm_danger_zone(is_scanning)])]))
-    # v1.3.3: 按用户要求去掉「⏹ 停止扫描」按钮
-    # 扫描控制完全通过「立即扫描」开关实现
+    # v1.3.4: 删除了「清空缓存（危险）」红色按钮 + VDialog 弹窗
+    # 清空缓存改用上面的「清空缓存」开关（保存即执行）
     card_basic = _section("基础设置", C_PRIMARY, basic_rows, icon="mdi-cog-outline")
 
     # ────────── LLM 连接 ──────────
@@ -100,12 +97,8 @@ def build_form(lib_options, plugin, invalid_libraries=None) -> list:
             _col(12, [_text_field("llm_timeout", "超时（秒）", "120", "LLM 请求超时", "number")], sm=2),
         ]),
         _row([
-            _col(8, [{"component": "div", "props": {"class": "text-caption text-medium-emphasis"},
-                       "text": f"留空 = 使用 {effective_source}（避免硬编码，提升可维护性）"}], sm=9),
-            # v1.2.9: 刷新 LLM 按钮 - 主操作
-            _col(4, [_btn("🔄 刷新 LLM", C_PRIMARY,
-                            "plugin/EmbyPeopleLocalize/refresh_llm",
-                            variant="elevated", block=False, icon="mdi-refresh")], sm=3),
+            _col(12, [{"component": "div", "props": {"class": "text-caption text-medium-emphasis"},
+                       "text": f"留空 = 使用 {effective_source}（避免硬编码，提升可维护性）。改了 LLM 配置后请到基础设置打开「刷新 LLM 客户端」开关。"}]),
         ]),
     ], icon="mdi-robot")
 

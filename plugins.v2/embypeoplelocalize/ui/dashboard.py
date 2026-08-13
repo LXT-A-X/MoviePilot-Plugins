@@ -84,14 +84,7 @@ def _build_header(plugin) -> dict:
                          _chip("插件独立" if using_plugin_any else "MP 系统",
                                "info" if using_plugin_any else "success",
                                icon="mdi-cog-outline" if using_plugin_any else "mdi-cog"),
-                         # v1.3.3: 刷新按钮 - 解决 dashboard 统计不实时问题
-                         # 点击后调 /status 触发前端重新拉 page
-                         {"component": "VBtn",
-                          "props": {"icon": "true", "variant": "text", "size": "small",
-                                    "color": C_PRIMARY, "title": "刷新当前页"},
-                          "text": "mdi-refresh",
-                          "events": {"click": {"api": "plugin/EmbyPeopleLocalize/status",
-                                                "method": "POST"}}},
+                         # v1.3.4: 去掉刷新按钮 - 按用户要求所有交互改为开关控制
                      ]}
                 ], md="auto"),
             ], justify="space-between", align="center")]
@@ -389,22 +382,15 @@ def _build_failed_card(plugin) -> dict:
         ]})
 
     content_blocks = [
-        {"component": "VCardText", "props": {"class": "py-2 px-4 d-flex align-center justify-space-between"},
+        {"component": "VCardText", "props": {"class": "py-2 px-4 d-flex align-center"},
          "content": [
-             {"component": "div", "props": {"class": "d-flex align-center"}, "content": [
-                 _icon("mdi-alert-circle", color=color),
-                 {"component": "span",
-                  "props": {"class": "text-body-2 font-weight-medium text-high-emphasis"},
-                  "text": f"失败任务：{len(failed)}"},
-             ]},
-             # v1.2.9: 重试按钮 - 用 tonal 等级视觉降权
-             {"component": "VBtn",
-              "props": {"color": C_ERROR, "variant": "tonal", "size": "small",
-                        "rounded": "lg", "prepend_icon": "mdi-refresh",
-                        "class": "text-none",
-                        "disabled": is_running},
-              "text": "重试",
-              "events": {"click": {"api": "plugin/EmbyPeopleLocalize/retry_failed", "method": "POST"}}},
+             _icon("mdi-alert-circle", color=color),
+             {"component": "span",
+              "props": {"class": "text-body-2 font-weight-medium text-high-emphasis"},
+              "text": f"失败任务：{len(failed)}"},
+             # v1.3.4: 去掉「重试」按钮 - 按用户要求改为设置页「重试失败任务」开关
+             {"component": "span", "props": {"class": "ml-2 text-caption text-medium-emphasis"},
+              "text": "去设置页打开「重试失败任务」开关"},
          ]},
     ]
     if list_items:
