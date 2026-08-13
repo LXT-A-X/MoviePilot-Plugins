@@ -48,12 +48,23 @@ def build_status_bar(scan_status: Dict[str, Any], plugin=None) -> list:
         status_color = "grey"
         status_icon = "mdi-minus-circle"
 
+    # v1.3.2: 始终显示历史统计 - 让用户随时看到累计数据
+    # v1.3.3: 失败数从 plugin 取真实值（之前写死 0 是 bug）
+    _failed_count = 0
+    if plugin is not None:
+        try:
+            _failed_count = len(getattr(plugin, "_failed", []) or [])
+        except Exception:
+            _failed_count = 0
+
     content = [{"component": "VCardText", "props": {"class": "py-2 px-4 d-flex align-center"},
                 "content": [
                     _icon(status_icon, color=status_color),
                     {"component": "span",
                      "props": {"class": "text-body-2 font-weight-medium text-high-emphasis"},
                      "text": status_text},
+                    {"component": "span", "props": {"class": "ml-auto text-caption text-medium-emphasis"},
+                     "text": f"已处理 {done} 条 · 失败 {_failed_count} 条"},
                 ]}]
 
     # 进度条
@@ -132,6 +143,23 @@ def build_status_bar(scan_status: Dict[str, Any], plugin=None) -> list:
         }
         content.append({
             "component": "VCardText", "props": {"class": "px-4 pt-0 pb-3"}, "content": [stop_btn]
+        })
+
+    # v1.3.2: 非运行状态显示「开始扫描」按钮 - 首页也能直接启动
+    elif not is_paused:
+        action_btn = {
+            "component": "VBtn",
+            "props": {
+                "color": "primary", "variant": "tonal", "rounded": "lg",
+                "prepend_icon": "mdi-play-circle",
+                "class": "text-none mt-2",
+                "block": True,
+            },
+            "text": "▶ 开始扫描",
+            "events": {"click": {"api": "plugin/EmbyPeopleLocalize/scan", "method": "POST"}},
+        }
+        content.append({
+            "component": "VCardText", "props": {"class": "px-4 pt-0 pb-3"}, "content": [action_btn]
         })
 
     return content

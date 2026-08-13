@@ -15,7 +15,9 @@ from .progress import build_status_bar
 
 
 def _build_header(plugin) -> dict:
-    """v1.2.9: 字体升级 - 标题 h5 / 数字 h4 / 描述 caption"""
+    """v1.2.9: 字体升级 - 标题 h5 / 数字 h4 / 描述 caption
+    v1.3.2: 新增插件启动状态徽章 - 让用户一眼看出插件是否已加载
+    """
     emby_connected = getattr(plugin, "_emby", None) is not None
     llm_ready = getattr(plugin, "_llm", None) is not None
     llm_model = getattr(plugin._llm, "model", "") if llm_ready else ""
@@ -23,6 +25,29 @@ def _build_header(plugin) -> dict:
     plugin_llm_base = getattr(plugin, "_llm_base_url", "") or ""
     plugin_llm_key = getattr(plugin, "_llm_api_key", "") or ""
     using_plugin_any = bool(plugin_llm_model or plugin_llm_base or plugin_llm_key)
+
+    # v1.3.2: 插件启动状态 - 区分 5 种情况
+    plugin_state = "unknown"
+    if not emby_connected and not llm_ready:
+        plugin_state = "未启动"  # Emby+LLM 都没就绪 = 插件未真正启动
+    elif not emby_connected:
+        plugin_state = "Emby 未连接"
+    elif not llm_ready:
+        plugin_state = "LLM 未配置"
+    else:
+        plugin_state = "运行中"
+
+    state_chip_map = {
+        "运行中": ("success", "mdi-check-circle"),
+        "未启动": ("error", "mdi-power-off"),
+        "Emby 未连接": ("warning", "mdi-server-off"),
+        "LLM 未配置": ("warning", "mdi-robot-off"),
+        "unknown": ("grey", "mdi-help-circle"),
+    }
+    state_color, state_icon = state_chip_map.get(plugin_state, ("grey", "mdi-help-circle"))
+
+    # v1.3.2: 插件版本号 - 让用户清楚当前加载的版本
+    plugin_version = getattr(plugin, "plugin_version", "?")
 
     return {
         "component": "VCard",
@@ -39,6 +64,8 @@ def _build_header(plugin) -> dict:
                          {"component": "span",
                           "props": {"class": "text-h5 font-weight-bold text-high-emphasis"},
                           "text": "Emby 演职人员中文化"},
+                         # v1.3.2: 版本号徽章
+                         _chip(f"v{plugin_version}", "primary", icon="mdi-tag-outline"),
                      ]},
                     {"component": "div", "props": {"class": "text-caption text-medium-emphasis mt-1"},
                      "text": "利用大模型将英文 / 罗马音 / 日文人名翻译为简体中文"},
@@ -46,6 +73,8 @@ def _build_header(plugin) -> dict:
                 _col("auto", [
                     {"component": "div", "props": {"class": "d-flex ga-2", "style": {"flexWrap": "wrap"}},
                      "content": [
+                         # v1.3.2: 启动状态徽章 - 第一个显示
+                         _chip(f"插件{plugin_state}", state_color, icon=state_icon),
                          _chip("Emby 已连接" if emby_connected else "Emby 未连接",
                                "success" if emby_connected else "error",
                                icon="mdi-server-network" if emby_connected else "mdi-server-off"),
@@ -107,7 +136,20 @@ def _build_webhook_card(plugin) -> dict:
     wh_last_event = getattr(plugin, "_webhook_last_event", "") or ""
     wh_error = getattr(plugin, "_webhook_error", "") or ""
     wh_success_rate = round(wh_processed / max(wh_received, 1) * 100, 1) if wh_received > 0 else 0.0
-    wh_status_text = "正常" if wh_received == 0 else (f"{wh_success_rate}%")
+    # v1.3.2: 状态文字 + 颜色分离 - 「正常」不应该是红色
+    if wh_received == 0:
+        # 没收到过任何事件 - 中性「等待中」(info/grey)
+        wh_status_text = "等待中"
+        wh_status_color = "info"
+    elif wh_success_rate >= 90:
+        wh_status_text = f"正常 {wh_success_rate}%"
+        wh_status_color = "success"
+    elif wh_success_rate >= 50:
+        wh_status_text = f"部分失败 {wh_success_rate}%"
+        wh_status_color = "warning"
+    else:
+        wh_status_text = f"异常 {wh_success_rate}%"
+        wh_status_color = "error"
     wh_last_time_str = datetime.fromtimestamp(wh_last_time).strftime("%m-%d %H:%M:%S") if wh_last_time else ""
 
     return {"component": "VCard", "props": {"class": "mb-3 rounded-lg", "variant": "outlined",
@@ -121,8 +163,7 @@ def _build_webhook_card(plugin) -> dict:
                                 _icon("mdi-webhook", color=C_INFO),
                                 {"component": "span", "props": {"class": "text-subtitle-2 font-weight-bold text-high-emphasis"},
                                  "text": "Webhook"},
-                                _chip(wh_status_text,
-                                      "success" if wh_success_rate >= 90 else ("warning" if wh_success_rate >= 50 else "error")),
+                                _chip(wh_status_text, wh_status_color),
                             ]},
                             {"component": "div", "props": {"class": "text-caption text-medium-emphasis mt-1"},
                              "text": f"已接收 {wh_received} · 成功 {wh_processed} · 失败 {wh_failed}"},
@@ -315,15 +356,20 @@ def _build_failed_card(plugin) -> dict:
     recent_failed = list(reversed(failed[-3:]))
     list_items = []
     for f in recent_failed:
-        list_items.append({"component": "div", "props": {"class": "d-flex align-center py-1"},
-                           "content": [
-                               _icon("mdi-alert", color=C_ERROR, size="x-small", extra_class="mr-2"),
-                               {"component": "span",
-                                "props": {"class": "text-caption text-truncate flex-grow-1"},
-                                "text": f.get("title", "?")},
-                               {"component": "span", "props": {"class": "text-caption text-medium-emphasis ml-2"},
-                                "text": f.get("reason", "")[:30]},
-                           ]})
+        reason = f.get("reason", "") or ""
+        list_items.append({"component": "div", "props": {"class": "py-1"}, "content": [
+            {"component": "div", "props": {"class": "d-flex align-center"}, "content": [
+                _icon("mdi-alert", color=C_ERROR, size="x-small", extra_class="mr-2"),
+                {"component": "span",
+                 "props": {"class": "text-caption text-truncate flex-grow-1"},
+                 "text": f.get("title", "?")},
+            ]},
+            # v1.3.2: 失败原因不截断到 30 字符，最多 100 + tooltip
+            {"component": "div", "props": {"class": "ml-5 mt-1 text-caption",
+                                           "style": {"color": C_ERROR, "opacity": 0.85}},
+             "text": f"原因：{reason[:100]}{'…' if len(reason) > 100 else ''}",
+             "title": reason} if reason else None,
+        ]})
 
     content_blocks = [
         {"component": "VCardText", "props": {"class": "py-2 px-4 d-flex align-center justify-space-between"},
