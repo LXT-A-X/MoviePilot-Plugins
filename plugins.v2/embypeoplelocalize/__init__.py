@@ -1798,6 +1798,10 @@ class EmbyPeopleLocalize(_PluginBase):
         "itemadded", "item.added", "library.new", "added", "newcontent",
         "itemupdated", "item.updated", "library.update",
     )
+    # v1.3.6: 排除播放相关事件，避免播放时触发翻译
+    _WEBHOOK_EXCLUDE_EVENT_TYPES = (
+        "playback", "playstate", "session", "user", "notification",
+    )
 
     @eventmanager.register(EventType.WebhookMessage)
     def handle_webhook(self, event: Event):
@@ -1967,6 +1971,12 @@ class EmbyPeopleLocalize(_PluginBase):
             return bool(self._extract_item_id(data))
         
         event_type_lower = event_type.lower()
+        
+        # v1.3.6: 先排除播放、会话等非入库事件
+        for exclude_keyword in self._WEBHOOK_EXCLUDE_EVENT_TYPES:
+            if exclude_keyword in event_type_lower:
+                logger.debug(f"[Webhook] 排除非入库事件: {event_type}")
+                return False
         
         # 检查是否为已知的 Item 事件类型
         for keyword in self._WEBHOOK_ITEM_EVENT_TYPES:
