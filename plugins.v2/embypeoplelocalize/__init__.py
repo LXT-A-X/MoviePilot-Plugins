@@ -201,8 +201,9 @@ class EmbyPeopleLocalize(_PluginBase):
             with open(tmp_file, "w", encoding="utf-8") as f:
                 json.dump(state, f, ensure_ascii=False, indent=2)
             os.replace(tmp_file, state_file)
+            logger.debug(f"状态已保存到: {state_file}")
         except Exception as e:
-            logger.warning(f"保存状态失败: {e}")
+            logger.error(f"保存状态失败: {e}\n{traceback.format_exc()}")
 
     def _load_state(self):
         try:
@@ -984,11 +985,11 @@ class EmbyPeopleLocalize(_PluginBase):
         if config:
             self._load_config(config)
 
-        # 检查插件是否被禁用，如果是则停止正在运行的扫描
+        # v1.3.6: 检查插件是否被禁用，如果是则停止正在运行的扫描
         if not self._enabled and self._is_running:
             logger.info("插件已禁用，正在停止扫描...")
-            self._stop_requested = True
-            self._is_paused = True
+            # 调用 stop_service 强制停止扫描线程（包括关闭 LLM 连接）
+            self.stop_service()
 
         if self._is_running:
             logger.info("扫描正在运行，配置将在下次扫描时生效")
@@ -1766,15 +1767,13 @@ class EmbyPeopleLocalize(_PluginBase):
             self._is_paused = False
             # 3. 保存当前状态（含 cursor）
             self._save_state()
-            # 4. v1.3.3: 先让 LLM 客户端失效 - 这样卡在 LLM 调用中的线程
-            # 会在下一次 SDK 重试/后续调用时快速抛错退出
-            # 注意：保留 self._llm 引用对象但把底层 _client 置 None
+            # 4. v1.3.6: 强制关闭 LLM HTTP 连接 - 让卡住的 LLM 调用立即抛异常退出
             try:
-                if self._llm is not None and hasattr(self._llm, "_client"):
-                    self._llm._client = None
-                    logger.info("已让 LLM 客户端失效，停止中的 LLM 调用将快速失败")
+                if self._llm is not None and hasattr(self._llm, "close"):
+                    self._llm.close()
+                    logger.info("已强制关闭 LLM HTTP 连接，停止中的 LLM 调用将立即失败")
             except Exception as e:
-                logger.debug(f"让 LLM 失效时异常: {e}")
+                logger.debug(f"关闭 LLM 连接时异常: {e}")
             # 5. 等待扫描线程退出（30s - 兼容 LLM SDK 重试）
             thread = getattr(self, "_scan_thread", None)
             if thread and thread.is_alive():

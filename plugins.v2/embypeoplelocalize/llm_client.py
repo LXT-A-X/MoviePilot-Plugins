@@ -26,6 +26,7 @@ class LLMClient:
         # v1.2.7: SSL 验证可配置 - 内网环境可关闭
         self.verify_ssl = verify_ssl
         self._client = None
+        self._http_client = None  # v1.3.6: 保存 httpx.Client 引用，用于强制关闭连接
         self._use_sdk = False
         self._init_client()
 
@@ -52,6 +53,12 @@ class LLMClient:
                     verify=self.verify_ssl,
                 )
                 logger.info(f"[LLMClient] 已配置 httpx 代理: {proxy}")
+            else:
+                # v1.3.6: 即使没有代理，也创建 httpx.Client 以便后续强制关闭连接
+                http_client = httpx.Client(
+                    timeout=self.timeout,
+                    verify=self.verify_ssl,
+                )
 
             client_kwargs = {
                 "base_url": self.base_url,
@@ -61,11 +68,13 @@ class LLMClient:
             if http_client is not None:
                 client_kwargs["http_client"] = http_client
             self._client = openai.OpenAI(**client_kwargs)
+            self._http_client = http_client  # v1.3.6: 保存引用用于强制关闭
             self._use_sdk = True
             logger.info(f"[LLMClient] SDK 模式初始化成功: {self.model}")
         except Exception as e:
             logger.warning(f"[LLMClient] SDK 初始化失败，降级为 requests: {e}")
             self._client = None
+            self._http_client = None
             self._use_sdk = False
 
     def _parse_proxy(self) -> Optional[dict]:
@@ -151,10 +160,26 @@ terms: {terms_json}
             return 4096
         return 6144
 
+    def close(self):
+        """v1.3.6: 强制关闭底层 HTTP 连接，让卡住的 LLM 调用立即抛异常退出"""
+        try:
+            if self._http_client is not None:
+                self._http_client.close()
+                logger.info("[LLMClient] 已强制关闭 HTTP 连接")
+        except Exception:
+            pass
+        try:
+            if self._client is not None and hasattr(self._client, 'close'):
+                self._client.close()
+        except Exception:
+            pass
+        self._client = None
+        self._http_client = None
+
     def _call_sdk(self, prompt: str, terms_count: int = 5) -> Dict[str, str]:
         """通过 openai SDK 调用
-        v1.3.3: 显式传 timeout - 之前只在 client 构造时传了 timeout，create() 调用时未传，
-        某些 SDK 版本会忽略 client 的 timeout，导致单次调用耗时可达 6 分钟
+        v1.3.6: 移除 create() 中无效的 timeout 参数（openai SDK 不支持该参数）
+        timeout 已在 httpx.Client 构造时设置，由 stop_service 调用 close() 强制中断
         """
         try:
             max_tokens = self._calc_max_tokens(terms_count)
@@ -166,7 +191,6 @@ terms: {terms_json}
                 ],
                 temperature=0.1,
                 max_tokens=max_tokens,
-                timeout=self.timeout,  # v1.3.3: 显式传 timeout 让 stop 能快速生效
             )
             text = resp.choices[0].message.content.strip()
             return self._parse_response(text)
