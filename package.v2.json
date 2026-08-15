@@ -3,12 +3,11 @@
     "name": "Emby 演职人员中文化",
     "description": "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回（可选库/全库），支持 Webhook 入库自动翻译、角色名独立缓存、缓存命中率统计、LLM 配置动态刷新。",
     "labels": "Emby,LLM,翻译,人名本地化,声优,演职人员",
-    "version": "1.3.6",
+    "version": "1.3.5",
     "icon": "embypeoplelocalize.jpg",
     "author": "LXT-A-X",
     "level": 1,
     "history": {
-      "v1.3.6": "修复关闭插件后扫描线程无法停止的问题。① 移除 _call_sdk 中无效的 timeout 参数（openai SDK 的 create() 不支持该参数，导致实际超时达 6 分钟）；② 在 _init_client 中保存 httpx.Client 引用；③ 新增 LLMClient.close() 方法强制关闭底层 HTTP 连接；④ stop_service 调用 close() 让卡住的 LLM 调用立即抛异常退出，而非等待 30 秒超时；⑤ 增强 _save_state 错误日志，便于定位状态持久化失败原因。",
       "v1.3.5": "修复失败任务清理与重试崩溃。① clear_cache() 同步清空失败任务列表 - 缓存清空后旧失败记录已无意义，避免显示一堆 stale 的 'NoneType.get_cached_role' 错误；② _process_item 缓存命中统计循环增加 None 防御 - 重试时若 translator 被外部置 None（reload/重置），立即停止并返回失败，避免 'NoneType' object has no attribute 'get_cached_role' 崩溃。",
       "v1.3.4": "交互优化：所有操作统一为开关控制（不再用实时触摸按钮）。① 移除首页头部「刷新」按钮（当前 VPage 组件不支持动态刷新，手动进出即可）；② 移除首页失败任务「重试」按钮，改为提示文字「去设置页打开『重试失败任务』开关」；③ 移除设置页「清空缓存（危险）」红色按钮及 VDialog 弹窗，统一用「清空缓存」开关；④ 移除 LLM 区块「刷新 LLM」按钮，新增「刷新 LLM 客户端」开关；⑤ 新增「重试失败任务」开关。所有一次性操作（立即扫描/清空缓存/补锁定/重试/刷新 LLM）均通过设置页开关触发，保存后自动执行并复位。",
       "v1.3.3": "体验优化：① 去掉首页+设置页的「开始/停止扫描」按钮（按用户要求完全由「立即扫描」开关控制，避免点击冲突）；② 首页头部新增「刷新」按钮 - 解决统计卡延迟问题，用户可手动触发立即刷新；③ 失败任务卡支持折行 + word-break 展示完整错误原因（之前被 text-truncate 截断到 100 字符也看不到后半段）；④ LLM SDK 显式传 timeout（之前只传 client 不传 create 调用，导致某些版本实际 6 分钟才超时）；⑤ translator.translate_batch 新增 stop_check 回调 - 每批 LLM 调用前检查停止信号，不再卡在 LLM 调用中；⑥ stop_service 等待 10s → 30s + 让 LLM._client=None 强制让卡住的 LLM 调用快速失败；⑦ 修复 _translator 在扫描中途被外部重置后 NoneType 崩溃（防御 None 检查并停止扫描）；⑧ 翻译器异常降级 - 翻译器失效时该项算失败而不是崩溃整个扫描；⑨ 「清除缓存并重扫」开关改为「清空缓存」- 只清空缓存/已处理记录/历史，不再自动重扫",
