@@ -64,7 +64,7 @@ class EmbyPeopleLocalize(_PluginBase):
     plugin_name = "Emby 演职人员中文化"
     plugin_desc = "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回"
     plugin_icon = "embypeoplelocalize.jpg"
-    plugin_version = "1.3.7"
+    plugin_version = "1.3.8"
     plugin_author = "LXT-A-X"
     plugin_config_prefix = "embypeoplelocalize_"
     plugin_order = 27
@@ -973,6 +973,12 @@ class EmbyPeopleLocalize(_PluginBase):
         self._webhook_last_time = None
         self._webhook_last_event = ""
         self._webhook_error = ""
+        # v1.3.8: Webhook 去重 - 记录已处理的 ItemId + 时间戳，避免 Emby 重复触发
+        self._webhook_dedup: Dict[str, float] = {}
+        # v1.3.8: 通知聚合队列 - {series_name: [item_info, ...]}
+        self._notification_queue: Dict[str, List[Dict[str, Any]]] = {}
+        self._notification_flush_timer: Optional[threading.Timer] = None
+        self._notification_lock = threading.Lock()
 
         # 状态持久化路径
         self._state_file = ""
@@ -1798,9 +1804,12 @@ class EmbyPeopleLocalize(_PluginBase):
         "itemadded", "item.added", "library.new", "added", "newcontent",
         "itemupdated", "item.updated", "library.update",
     )
-    # v1.3.6: 排除播放相关事件，避免播放时触发翻译
+    # v1.3.7: 排除播放相关事件，避免播放时触发翻译
+    # Emby Webhook 事件类型：PlaybackStart, PlaybackProgress, PlaybackStopped, SessionStarted 等
     _WEBHOOK_EXCLUDE_EVENT_TYPES = (
         "playback", "playstate", "session", "user", "notification",
+        "playbackstart", "playbackprogress", "playbackstopped",
+        "sessionstarted", "sessionended",
     )
 
     @eventmanager.register(EventType.WebhookMessage)
@@ -1842,6 +1851,15 @@ class EmbyPeopleLocalize(_PluginBase):
             if not item_id:
                 return  # 无 ItemId 的事件直接跳过，不记录日志
 
+            # v1.3.8: 去重 - 同一 ItemId 在 30 秒内只处理一次
+            now = time.time()
+            with self._state_lock:
+                last_seen = self._webhook_dedup.get(item_id, 0)
+                if now - last_seen < 30:
+                    logger.info(f"[Webhook] 重复事件，跳过: ItemId={item_id}（距上次 {now - last_seen:.0f}s）")
+                    return
+                self._webhook_dedup[item_id] = now
+
             self._webhook_received += 1
             self._webhook_last_time = time.time()
 
@@ -1851,6 +1869,9 @@ class EmbyPeopleLocalize(_PluginBase):
 
             logger.info(f"[Webhook] ===== 收到事件 #{self._webhook_received} =====")
             logger.info(f"[Webhook] ItemId={item_id}, server_id={server_id}, type={event_type_str}, source={source}")
+            if not event_type_str:
+                # type 为空时打印完整数据用于调试
+                logger.info(f"[Webhook] 事件类型为空，原始数据: {json.dumps(raw_data, ensure_ascii=False, default=str)[:2000]}")
 
             # 更新状态
             self._webhook_last_event = f"{event_type_str} | ItemId={item_id}"
@@ -1937,14 +1958,15 @@ class EmbyPeopleLocalize(_PluginBase):
         if not isinstance(data, dict):
             return ""
         
-        for key in ["NotificationType", "notification_type", "Type", "type", "EventType", "event_type"]:
+        # v1.3.7: 增加 Event 字段支持（Emby 播放事件使用此字段）
+        for key in ["NotificationType", "notification_type", "Type", "type", "EventType", "event_type", "Event"]:
             val = data.get(key, "")
             if val:
                 return str(val).lower()
         
         nested = data.get("data") or data.get("Data")
         if nested and isinstance(nested, dict):
-            for key in ["NotificationType", "notification_type", "Type", "type"]:
+            for key in ["NotificationType", "notification_type", "Type", "type", "Event"]:
                 val = nested.get(key, "")
                 if val:
                     return str(val).lower()
@@ -1966,13 +1988,13 @@ class EmbyPeopleLocalize(_PluginBase):
 
     def _is_item_event(self, event_type: str, data: Any) -> bool:
         """判断是否为媒体项相关事件"""
+        # v1.3.7: 如果事件类型为空，不认为是入库事件（避免播放事件误触发）
         if not event_type:
-            # 有 ItemId 就认为是有效事件
-            return bool(self._extract_item_id(data))
+            return False
         
         event_type_lower = event_type.lower()
         
-        # v1.3.6: 先排除播放、会话等非入库事件
+        # v1.3.7: 先排除播放、会话等非入库事件
         for exclude_keyword in self._WEBHOOK_EXCLUDE_EVENT_TYPES:
             if exclude_keyword in event_type_lower:
                 logger.debug(f"[Webhook] 排除非入库事件: {event_type}")
@@ -1985,11 +2007,6 @@ class EmbyPeopleLocalize(_PluginBase):
         
         # 如果包含 ItemId 且事件名包含 item 或 library，也认为是相关事件
         if "item" in event_type_lower or "library" in event_type_lower or "media" in event_type_lower:
-            return True
-        
-        # 检查数据中是否有 ItemId
-        if self._extract_item_id(data):
-            logger.info(f"[Webhook] 虽然事件类型不明确，但检测到 ItemId，视为有效事件")
             return True
         
         return False
@@ -2078,7 +2095,7 @@ class EmbyPeopleLocalize(_PluginBase):
                     self._webhook_error = ""
                 
                 # 发送完成通知
-                self._notify_webhook_completed(item_id, display_title, translated, failed)
+                self._notify_webhook_completed(item_id, display_title, translated, failed, item)
                 return  # 成功，退出重试循环
                 
             except Exception as e:
@@ -2118,10 +2135,32 @@ class EmbyPeopleLocalize(_PluginBase):
         logger.warning(f"[Webhook] 未找到匹配的服务器 (server_id={server_id})，使用第一个")
         return services[0]
 
-    def _notify_webhook_completed(self, item_id: str, title: str, translated: int, failed: int):
-        """发送 Webhook 翻译完成通知"""
+    def _notify_webhook_completed(self, item_id: str, title: str, translated: int, failed: int, item: dict = None):
+        """发送 Webhook 翻译完成通知（v1.3.8: 支持聚合）"""
+        if not self._notify_on_complete:
+            return
         try:
-            if self._notify_on_complete:
+            # 提取剧集信息用于聚合
+            series_name = ""
+            episode_num = None
+            season_num = None
+            if item and isinstance(item, dict):
+                series_name = item.get("SeriesName") or item.get("series_name") or ""
+                episode_num = item.get("IndexNumber") or item.get("index_number")
+                season_num = item.get("ParentIndexNumber") or item.get("parent_index_number")
+            
+            if series_name and episode_num is not None:
+                # 剧集模式：加入聚合队列
+                self._add_notification_to_queue(
+                    series_name=series_name,
+                    title=title,
+                    season_num=season_num,
+                    episode_num=episode_num,
+                    translated=translated,
+                    failed=failed,
+                )
+            else:
+                # 电影/非剧集：直接发送
                 if translated > 0 or failed > 0:
                     self.post_message(
                         mtype=NotificationType.Manual,
@@ -2136,6 +2175,66 @@ class EmbyPeopleLocalize(_PluginBase):
                     )
         except Exception as e:
             logger.debug(f"[Webhook] 发送完成通知失败（非致命）: {e}")
+
+    def _add_notification_to_queue(self, series_name: str, title: str, season_num, episode_num, translated: int, failed: int):
+        """v1.3.8: 将剧集通知加入聚合队列"""
+        info = {
+            "title": title,
+            "season_num": season_num,
+            "episode_num": episode_num,
+            "translated": translated,
+            "failed": failed,
+        }
+        with self._notification_lock:
+            if series_name not in self._notification_queue:
+                self._notification_queue[series_name] = []
+            self._notification_queue[series_name].append(info)
+            # 重置定时器：5 秒后聚合发送
+            if self._notification_flush_timer:
+                self._notification_flush_timer.cancel()
+            self._notification_flush_timer = threading.Timer(5.0, self._flush_notification_queue)
+            self._notification_flush_timer.daemon = True
+            self._notification_flush_timer.start()
+            logger.info(f"[Webhook] 通知已入队: {series_name} 第{episode_num}集（等待聚合）")
+
+    def _flush_notification_queue(self):
+        """v1.3.8: 聚合发送通知队列"""
+        with self._notification_lock:
+            queue = dict(self._notification_queue)
+            self._notification_queue.clear()
+            self._notification_flush_timer = None
+
+        for series_name, items in queue.items():
+            try:
+                episodes = sorted(set(i["episode_num"] for i in items if i["episode_num"] is not None))
+                seasons = sorted(set(i["season_num"] for i in items if i["season_num"] is not None))
+                total_translated = sum(i["translated"] for i in items)
+                total_failed = sum(i["failed"] for i in items)
+
+                # 构建集数显示
+                if len(episodes) == 1:
+                    ep_text = f"第{episodes[0]}集"
+                else:
+                    ep_text = f"第{episodes[0]}-{episodes[-1]}集"
+
+                season_text = ""
+                if len(seasons) == 1:
+                    season_text = f"第{seasons[0]}季 "
+                elif len(seasons) > 1:
+                    season_text = f"第{seasons[0]}-{seasons[-1]}季 "
+
+                if total_translated > 0 or total_failed > 0:
+                    text = f"翻译完成：{series_name} {season_text}{ep_text} - 翻译 {total_translated} 条, 失败 {total_failed} 条"
+                else:
+                    text = f"{series_name} {season_text}{ep_text} - 无需翻译"
+
+                self.post_message(
+                    mtype=NotificationType.Manual,
+                    title=self.plugin_name,
+                    text=text,
+                )
+            except Exception as e:
+                logger.debug(f"[Webhook] 聚合通知发送失败: {e}")
 
     # ─────────────────────────────────────────────
     # Webhook 状态 API
