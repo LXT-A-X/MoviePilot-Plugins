@@ -1856,8 +1856,7 @@ class EmbyPeopleLocalize(_PluginBase):
             with self._state_lock:
                 last_seen = self._webhook_dedup.get(item_id, 0)
                 if now - last_seen < 30:
-                    logger.info(f"[Webhook] 重复事件，跳过: ItemId={item_id}（距上次 {now - last_seen:.0f}s）")
-                    return
+                    return  # 重复事件静默丢弃
                 self._webhook_dedup[item_id] = now
 
             self._webhook_received += 1
@@ -1878,13 +1877,11 @@ class EmbyPeopleLocalize(_PluginBase):
 
             # 检查是否为 Emby 事件
             if source and "emby" not in source.lower():
-                logger.info(f"[Webhook] 来源不是 Emby，跳过: source={source}")
-                return
+                return  # 非 Emby 来源静默丢弃
 
             # 检查事件类型是否与媒体项相关
             if not self._is_item_event(event_type_str, raw_data):
-                logger.info(f"[Webhook] 非媒体项事件，跳过: type={event_type_str}")
-                return
+                return  # 非入库事件静默丢弃（playback/playstate 等播放事件）
 
             # 记录原始数据摘要
             self._webhook_error = ""
