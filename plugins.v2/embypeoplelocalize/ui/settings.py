@@ -26,25 +26,34 @@ def build_form(lib_options, plugin, invalid_libraries=None) -> list:
     llm_model = getattr(plugin._llm, "model", "") if llm_ready else ""
     scan_status = plugin._build_scan_status() if hasattr(plugin, "_build_scan_status") else {}
     is_scanning = bool(scan_status.get("running", False))
+    is_paused = bool(scan_status.get("paused", False))
 
     # ────────── 基础设置 ──────────
+    # v1.3.11: 扫描运行时把「立即扫描」切换为「停止扫描」开关，保存即执行
+    scan_action_label = "停止扫描（保存后执行）" if is_scanning else "立即扫描（保存后执行）"
+    scan_action_help = (
+        "打开开关后保存，先写缓存再安全停止扫描线程"
+        if is_scanning else
+        "打开开关后点下方保存按钮，插件自动开始扫描"
+    )
+    scan_action_key = "run_stop_scan" if is_scanning else "run_scan"
     basic_rows = [
         _row([
             _col(12, [_switch("enabled", "启用插件", "开启后入库时自动翻译演职人员")], sm=6),
-            _col(12, [_switch("run_scan", "立即扫描（保存后执行）", "打开开关后点下方保存按钮，插件自动开始扫描")], sm=6),
+            _col(12, [_switch(scan_action_key, scan_action_label, scan_action_help)], sm=6),
         ]),
         _row([
             _col(12, [_switch("run_clear_cache", "清空缓存", "清空所有人名/角色缓存、已处理记录和历史，不可恢复。保存后立即执行。")], sm=6),
             _col(12, [_switch("run_lock_cast", "批量补锁定旧条目", "为已翻译但未锁定的旧条目补充 Cast 锁定")], sm=6),
         ]),
         _row([
-            _col(12, [_switch("run_retry_failed", "重试失败任务", "对失败任务列表中的条目重新处理。保存后立即执行。")], sm=6),
-            _col(12, [_switch("run_refresh_llm", "刷新 LLM 客户端", "重新加载 LLM 配置（改了 API Key/模型名后用这个）。保存后立即执行。")], sm=6),
-        ]),
-        _row([
             _col(12, [_switch("notify_on_complete", "扫描完成后发送通知", "每次扫描完成推送通知，包含翻译统计和缓存命中率")], sm=6),
             _col(12, [{"component": "div", "props": {"class": "text-caption text-medium-emphasis"},
-                        "text": "「立即扫描/清空缓存/补锁定/重试/刷新LLM」均为一次性触发，打开后保存即执行，完成后自动复位。"}], sm=6),
+                        "text": "「立即扫描/清空缓存/补锁定/停止扫描/重试/刷新/暂停」均为一次性触发，打开后保存即执行，完成后自动复位。"}], sm=6),
+        ]),
+        _row([
+            _col(12, [_switch("run_retry_failed", "重试失败任务（保存后执行）", "对失败队列中的条目重新执行翻译流程")], sm=6),
+            _col(12, [_switch("run_refresh_llm", "刷新 LLM 客户端（保存后执行）", "重新初始化 LLM 连接，应用最新配置")], sm=6),
         ]),
         _row([
             _col(12, [_select("libraries", "选择媒体库（多选，留空 = 全部）", lib_options,
@@ -52,8 +61,18 @@ def build_form(lib_options, plugin, invalid_libraries=None) -> list:
         ]),
         _row([
             _col(12, [_text_field("delay", "批间延迟（秒）", "2", "每次请求间隔，避免触发限流", "number")], sm=6),
+            _col(12, [_text_field("batch_titles", "跨剧集批处理数量", "10", "每 N 个剧集打包发给 AI（1=关闭批处理，10=推荐值），越大越快但单次 LLM 负载越高", "number")], sm=6),
         ]),
     ]
+    # v1.3.11: 暂停/恢复动态开关（扫描运行时可用）— 用 append 避免 None 混入
+    if is_scanning:
+        pause_label = "恢复任务（保存后执行）" if is_paused else "暂停任务（保存后执行）"
+        pause_help = "保存后恢复扫描" if is_paused else "保存后暂停扫描，保留线程和断点"
+        basic_rows.append(
+            _row([
+                _col(12, [_switch("run_pause", pause_label, pause_help)], sm=6),
+            ])
+        )
     if invalid_libraries:
         basic_rows.append(_row([_col(12, [_alert(f"已自动移除失效的媒体库配置：{', '.join(invalid_libraries)}。")])]))
     if not lib_options:
@@ -161,11 +180,5 @@ def build_form(lib_options, plugin, invalid_libraries=None) -> list:
                                   f"事件选 Library - New 或类似。延迟默认 {webhook_delay} 秒。"}])]),
     ], icon="mdi-webhook")
 
-    # ────────── 保存按钮（v1.2.9: 主操作 - elevated 蓝紫）──────────
-    save_row = _row([_col(12, [
-        _btn("保存设置", C_PRIMARY, "plugin/EmbyPeopleLocalize/save_config",
-             variant="elevated", icon="mdi-content-save"),
-    ])])
-
-    form = [card_basic, card_llm, card_scope, card_prompt, card_advanced, card_webhook, save_row]
+    form = [card_basic, card_llm, card_scope, card_prompt, card_advanced, card_webhook]
     return form
