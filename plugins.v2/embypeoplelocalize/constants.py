@@ -53,6 +53,7 @@ CFG_TRANSLATE_WRITER = "translate_writer"
 CFG_TRANSLATE_PRODUCER = "translate_producer"
 CFG_MAX_PEOPLE_PER_TITLE = "max_people_per_title"
 CFG_MAX_PEOPLE_PER_BATCH = "max_people_per_batch"
+CFG_BATCH_TITLES = "batch_titles"  # v1.3.11: 跨剧集批处理数量
 CFG_OVERWRITE_CHINESE = "overwrite_chinese"
 CFG_DELAY = "delay"
 CFG_LOCK_CAST = "lock_cast"
@@ -69,6 +70,10 @@ CFG_USE_PROXY = "use_proxy"
 CFG_RUN_SCAN = "run_scan"
 CFG_RUN_LOCK_CAST = "run_lock_cast"
 CFG_RUN_CLEAR_CACHE = "run_clear_cache"
+CFG_RUN_STOP_SCAN = "run_stop_scan"  # v1.3.11
+CFG_RUN_RETRY_FAILED = "run_retry_failed"  # v1.3.11
+CFG_RUN_REFRESH_LLM = "run_refresh_llm"  # v1.3.11
+CFG_RUN_PAUSE = "run_pause"  # v1.3.11
 CFG_ONCE = "onlyonce"
 
 # 默认值
@@ -76,6 +81,7 @@ DEFAULT_DELAY = 2
 DEFAULT_WEBHOOK_DELAY = 60
 DEFAULT_MAX_PEOPLE = 20  # v1.3.1: 10→20，剧集演员较多
 DEFAULT_BATCH_SIZE = 5
+DEFAULT_BATCH_TITLES = 10  # v1.3.11: 每次打包 10 个剧集发给 AI
 DEFAULT_LLM_TIMEOUT = 120
 DEFAULT_USE_PROXY = False  # v1.3.1: 默认不读系统代理
 MAX_HISTORY = 200
