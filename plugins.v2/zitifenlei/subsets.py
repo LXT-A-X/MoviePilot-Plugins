@@ -10,6 +10,7 @@ assfonts 用法（见上游 wyzdwdz/assfonts README）：
 """
 
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -28,9 +29,20 @@ class AssfontsMissingError(Exception):
 
 
 def get_binary(plugin_root: Path) -> Optional[Path]:
-    """插件根目录下的 bin/assfonts 可执行文件"""
+    """插件根目录下的 bin/assfonts 可执行文件。
+
+    Windows 推送/市场克隆常丢失 Unix 可执行位（git 存成 100644），
+    容器内以 root（PUID=0）运行时检测到无可执行权限即自动 chmod +x 兜底。
+    """
     p = Path(plugin_root) / "bin" / "assfonts"
-    return p if p.is_file() else None
+    if not p.is_file():
+        return None
+    try:
+        if not os.access(str(p), os.X_OK):
+            os.chmod(str(p), 0o755)
+    except Exception:
+        pass
+    return p if os.access(str(p), os.X_OK) else None
 
 
 def build_index(binary: Path, font_dirs: List[str], db_path: Path) -> Tuple[bool, str]:

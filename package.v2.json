@@ -18,11 +18,12 @@
     "name": "字体分类管家",
     "description": "字体归档整理与 ASS 字幕字体检查插件：扫描/上传字体到字体库，检查字幕缺失字体。",
     "labels": "字体,字幕,整理,ASS",
-    "version": "1.2.16",
+    "version": "1.2.17",
     "icon": "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/zitifenlei.png",
     "author": "LXT-A-X",
     "level": 1,
     "history": {
+      "v1.2.17": "修复容器内重建索引/子集化 Permission denied：bin/assfonts 经 Windows 推送或市场克隆会丢失 Unix 可执行位（git 存成 100644），容器里一调用就报 [Errno 13] Permission denied；现 get_binary 检测到二进制无可执行权限时自动 chmod +x（容器以 root/PUID=0 运行可正常提权），不再依赖仓库权限位，本地/容器部署均自愈。",
       "v1.2.16": "修正插件注册信息：plugin_author 由 trae 改为 LXT-A-X、plugin_icon 指向你仓库的 raw 直链、author_url 补齐；package.v2.json 的 author 由 local 统一为 LXT-A-X——MP 已安装列表作者与你 GitHub 仓库名一致，不再沿用旧本地注册名。",
       "v1.2.15": "① 字体库左侧目录树「厂商层」改为按字体数量从多到少排序（数量相同按名称），格式等子层保持名称排序——大厂商一眼可见；② 新增设置开关「移动归档时删除重复源文件」（默认开）：仅作用于「移动原文件」归档模式——字体库已有同名同后缀字体、判重跳过时自动删除监控目录里残留的重复源文件，不再越积越多；复制模式不受影响；覆盖监控自动归档/全量检查（_archive_font_file）与一键整理（api_confirm_upload）两条链路，删除/失败均有日志。",
       "v1.2.14": "① 设置页「插件总开关」拨向关闭时拦截后台任务：新增 GET /task/status（按 _scan_lock 是否被占用判定）——有全量检查/全量扫描/子集化在运行则弹「后台有任务运行」提示框并阻止切换（开关保持开启），任务跑完再关，配合 v1.2.13 优雅停止不留半截状态；② 前端总开关改单向 :model-value + @update:model-value 由回调控制赋值（v-model 会先写值再触发回调导致拦截失效），查询期间开关显示 loading，接口异常时放行不卡开关。",
