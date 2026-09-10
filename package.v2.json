@@ -113,6 +113,6 @@
       "v1.0.52": "界面按钮统一为「全量检查」：① 检查页顶部右侧新增「全量检查」按钮——递归扫描 ASS 字幕目录全部字幕并检查（POST /ass/scan_all，按 file_path upsert 幂等，存量字幕一键全查，结果进左侧列表+缺失窗口+通知）；② 字体库页「检查归档」按钮改名为「全量检查」（功能不变：递归扫描输入监控目录字体加入待确认区）；③ 移除检查页原「全量扫描」（扫字体入库）按钮——字体入口统一在字体库页「全量检查」，需要直接入库时由「目录自动收集」开启后的监控自动归档（/fonts/scan_all 接口保留可供调用）。"
     },
     "v2": true,
-    "icon": "https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/icons/zitifenlei.png"
+    "icon": "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/zitifenlei.png"
   }
 }
