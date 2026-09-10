@@ -63,7 +63,7 @@ from . import constants
 class EmbyPeopleLocalize(_PluginBase):
     plugin_name = "Emby 演职人员中文化"
     plugin_desc = "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回"
-    plugin_icon = "embypeoplelocalize.jpg"
+    plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/embypeoplelocalize.jpg"
     plugin_version = "1.3.11"
     plugin_author = "LXT-A-X"
     plugin_config_prefix = "embypeoplelocalize_"
