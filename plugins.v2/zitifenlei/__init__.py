@@ -258,10 +258,10 @@ class Zitifenlei(_PluginBase):
     # ─── 插件元信息 ───────────────────────────────────────
     plugin_name = "字体分类管家"
     plugin_desc = "字体归档整理与 ASS 字幕字体检查插件：扫描/上传字体到字体库，检查字幕缺失字体。"
-    plugin_icon = "https://raw.githubusercontent.com/trae-cn/MoviePilot-Plugins/main/icons/zitifenlei.png"
-    plugin_version = "1.2.15"
-    plugin_author = "trae"
-    author_url = ""
+    plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/zitifenlei.png"
+    plugin_version = "1.2.16"
+    plugin_author = "LXT-A-X"
+    author_url = "https://github.com/LXT-A-X/MoviePilot-Plugins"
     plugin_config_prefix = "zitifenlei_"
     plugin_order = 30
     auth_level = 1
