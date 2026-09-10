@@ -211,8 +211,10 @@ const flatNodes = computed(() => {
       }
     }
   }
-  // 根目录下直接文件
-  const rootChildren = [...dirMap.values()].filter(d => d.depth === 1)
+  // 根目录下直接文件（厂商层：按字体数量从多到少，数量相同按名称）
+  const rootChildren = [...dirMap.values()]
+    .filter(d => d.depth === 1)
+    .sort((a, b) => (b.total_fonts || 0) - (a.total_fonts || 0) || (a.label < b.label ? -1 : 1))
   const hasRoot = dirMap.has('__root__')
   const rootDir = dirMap.get('__root__')
   if (hasRoot && rootDir.fonts.length) {
