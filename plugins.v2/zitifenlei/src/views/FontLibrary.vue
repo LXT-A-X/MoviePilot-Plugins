@@ -192,7 +192,13 @@ const flatNodes = computed(() => {
     }
     const dirChildren = [...dirMap.values()]
       .filter(d => d.depth === dirNode.depth + 1 && (d.path.startsWith(dirNode.path + '/') || (dirNode.path === '' && d.path.indexOf('/') < 0)))
-      .sort((a, b) => (a.label < b.label ? -1 : 1))
+      .sort((a, b) => {
+        // 厂商层（一级目录）按字体数量从多到少，数量相同按名称；格式等子层保持名称排序
+        if (dirNode.depth === 0) {
+          return (b.total_fonts || 0) - (a.total_fonts || 0) || (a.label < b.label ? -1 : 1)
+        }
+        return a.label < b.label ? -1 : 1
+      })
     const hasVisible = dirNode.fonts.length > 0 || dirChildren.length > 0
     if (hasVisible) {
       nodes.push({ key: 'dir:' + dirNode.path, type: 'dir', dir: dirNode, depth: dirNode.depth })

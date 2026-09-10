@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import { _ as _export_sfc, a as apiModule, S as Settings, C as Check, F as FontLibrary, D as Dashboard } from './Settings-DsxzWOMS.js';
+import { _ as _export_sfc, a as apiModule, S as Settings, C as Check, F as FontLibrary, D as Dashboard } from './Settings-BJtwxi_I.js';
 
 const {createTextVNode:_createTextVNode$2,resolveComponent:_resolveComponent$2,withCtx:_withCtx$2,createVNode:_createVNode$2,createElementVNode:_createElementVNode$2,toDisplayString:_toDisplayString$2,openBlock:_openBlock$2,createBlock:_createBlock$2,createCommentVNode:_createCommentVNode$2,createElementBlock:_createElementBlock$2,renderList:_renderList$2,Fragment:_Fragment$2,normalizeClass:_normalizeClass} = await importShared('vue');
 

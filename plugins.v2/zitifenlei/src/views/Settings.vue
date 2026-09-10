@@ -19,6 +19,8 @@ const DEFAULT_CONFIG = {
   subset_dir: '',
   scan_mode: 'internal',
   archive_mode: 'copy',
+  // 移动归档时删除判重跳过的残留源文件（只作用于「移动原文件」模式）
+  move_delete_duplicate: true,
   // 是否利用字体内部名称命名（开：用字体内部 PostScript 名；关：保持原文件名）
   font_name_internal: false,
   // 是否启用监控（总开关）：统一控制字体监控目录 / ASS字幕目录监控 / ASS目录监控子集
@@ -277,6 +279,13 @@ watch(() => config.value.auto_subset, (v) => {
             </template>
           </v-radio>
         </v-radio-group>
+        <div class="zt-switch-row mt-2">
+          <div class="flex-grow-1">
+            <div class="zt-switch-title">移动归档时删除重复源文件</div>
+            <div class="zt-switch-desc">仅作用于「移动原文件」模式：字体库已有同名字体、判重跳过时，自动删除监控目录里残留的重复源文件；复制模式不受影响（源文件本就保留）</div>
+          </div>
+          <v-switch v-model="config.move_delete_duplicate" color="primary" hide-details></v-switch>
+        </div>
         <div class="zt-switch-row mt-2">
           <div class="flex-grow-1">
             <div class="zt-switch-title">利用字体内部名称命名</div>

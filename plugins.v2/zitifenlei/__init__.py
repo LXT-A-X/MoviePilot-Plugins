@@ -124,6 +124,10 @@ _DEFAULT_CONFIG = {
     "scan_mode": "internal",
     "archive_mode": "copy",
     "font_name_internal": False,  # 利用字体内部名称（PostScript 名 nameID 6）命名归档：开用内部名，关保持原名
+    # 移动归档时删除判重跳过的残留源文件：只作用于「移动原文件」模式——
+    # move 归档判重跳过（字体库已存在同名同后缀）时，监控目录的源文件会残留，
+    # 开关开=删除残留；关=保留（复制模式不受影响，源文件本就保留）
+    "move_delete_duplicate": True,
     "monitor_enabled": False,  # 是否启用监控（总开关）：统一控制字体监控目录 / ASS字幕目录监控 / ASS目录监控子集的启停
     # 老版本监控开关（auto_monitor/auto_check）已被 monitor_enabled 合并，保留键仅用于旧配置迁移读取
     "auto_monitor": False,
@@ -254,9 +258,9 @@ class Zitifenlei(_PluginBase):
     # ─── 插件元信息 ───────────────────────────────────────
     plugin_name = "字体分类管家"
     plugin_desc = "字体归档整理与 ASS 字幕字体检查插件：扫描/上传字体到字体库，检查字幕缺失字体。"
-    plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/zitifenlei.png"
-    plugin_version = "1.2.14"
-    plugin_author = "LXT-A-X"
+    plugin_icon = "https://raw.githubusercontent.com/trae-cn/MoviePilot-Plugins/main/icons/zitifenlei.png"
+    plugin_version = "1.2.15"
+    plugin_author = "trae"
     author_url = ""
     plugin_config_prefix = "zitifenlei_"
     plugin_order = 30
@@ -996,6 +1000,18 @@ class Zitifenlei(_PluginBase):
                 # 字体库已存在同名同后缀字体（含旧平铺布局与格式子文件夹）：
                 # 跳过本次归档（不再生成 -2/-3 副本，保证轮询/兜底全量扫描存量文件时幂等）
                 self._db.add_log(f"跳过 {file_path.name}：字体库已存在 {existing.name}", "info")
+                # 「移动原文件」模式 + 开关开启：删除监控目录残留的重复源文件，
+                # 避免 move 模式下判重跳过导致源文件一直堆在监控目录；复制模式不受影响
+                if archive_mode == "move" and self.get_resource_or_config("move_delete_duplicate"):
+                    try:
+                        if file_path.is_file():
+                            file_path.unlink()
+                            self._db.add_log(
+                                f"已删除监控目录残留的重复源文件 {file_path.name}（字体库已有 {existing.name}）",
+                                "info",
+                            )
+                    except Exception as err:
+                        self._db.add_log(f"删除重复源文件失败 {file_path.name}: {err}", "warning")
                 # 源文件虽然同源已入库（仅更名），同样算已处理，「待整理」不再计入
                 self._db.mark_font_processed(str(file_path))
                 return None
@@ -2825,6 +2841,17 @@ class Zitifenlei(_PluginBase):
                 if existing:
                     # 字体库已存在同名同后缀字体（含旧平铺布局与格式子文件夹）：跳过
                     self._db.add_log(f"整理跳过 {src.name}：字体库已存在 {existing.name}", "info")
+                    # 「移动原文件」模式 + 开关开启：删除判重跳过的残留源文件，不留重复
+                    if archive_mode == "move" and self.get_resource_or_config("move_delete_duplicate"):
+                        try:
+                            if src.is_file():
+                                src.unlink(missing_ok=True)
+                                self._db.add_log(
+                                    f"已删除残留的重复源文件 {src.name}（字体库已有 {existing.name}）",
+                                    "info",
+                                )
+                        except Exception as err:
+                            self._db.add_log(f"删除重复源文件失败 {src.name}: {err}", "warning")
                     self._db.delete_pending(item["id"])
                     continue
                 try:
