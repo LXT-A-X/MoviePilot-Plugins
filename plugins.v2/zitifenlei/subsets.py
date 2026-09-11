@@ -39,22 +39,31 @@ _EXPECTED_MACHINE = 0x3E
 
 
 def _binary_ok(path: Path) -> bool:
-    """校验 assfonts 是否为有效且架构匹配（x86_64 ELF）的二进制。
+    """校验 assfonts 是否真正可执行。
 
-    某些部署环境（如 MP 卸载备份恢复）会用损坏/错误架构的文件覆盖 bin/assfonts，
-    导致 Exec format error；这里只读文件头做轻量校验。
+    只查 ELF 头还不够——MP 备份恢复的坏文件可能头部正常但内容残缺，
+    执行时才抛 Exec format error；故再叠加实际执行探测：
+    Exec format error 会在 subprocess 启动进程时以 OSError 抛出，
+    能走到 exec 即认为二进制可用（退出码/输出无关紧要）。
     """
     try:
         with open(path, "rb") as f:
-            head = f.read(20)
-        if len(head) < 20:
+            head = f.read(4)
+        if head != _EXPECTED_ELF_MAGIC:
             return False
-        if head[:4] != _EXPECTED_ELF_MAGIC:
-            return False
-        machine = struct.unpack("<H", head[18:20])[0]
-        return machine == _EXPECTED_MACHINE
-    except Exception:
+        subprocess.run(
+            [str(path), "--probe-exec"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+        )
+        return True
+    except OSError:
         return False
+    except subprocess.TimeoutExpired:
+        return True
+    except Exception:
+        return True
 
 
 def _repair_binary(path: Path) -> bool:
@@ -81,6 +90,10 @@ def _repair_binary(path: Path) -> bool:
                         os.remove(tmp)
                     except Exception:
                         pass
+            # 覆盖后再次执行探测，确保下载的版本真正可用
+            if not _binary_ok(path):
+                _LOGGER.warning("字体分类管家: 自动修复下载的 assfonts 校验未通过，尝试下一源")
+                continue
             _LOGGER.info(f"字体分类管家: bin/assfonts 已自动修复（重新下载 {len(data)} 字节）")
             return True
         except Exception as err:

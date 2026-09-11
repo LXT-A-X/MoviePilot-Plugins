@@ -18,7 +18,7 @@
     "name": "字体分类管家",
     "description": "字体归档整理与 ASS 字幕字体检查插件：扫描/上传字体到字体库，检查字幕缺失字体。",
     "labels": "字体,字幕,整理,ASS",
-    "version": "1.2.19",
+    "version": "1.2.20",
     "icon": "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/zitifenlei.png",
     "author": "LXT-A-X",
     "level": 1,
