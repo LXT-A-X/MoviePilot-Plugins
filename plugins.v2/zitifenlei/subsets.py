@@ -10,33 +10,100 @@ assfonts 用法（见上游 wyzdwdz/assfonts README）：
 """
 
 import json
+import logging
 import os
 import re
+import struct
 import subprocess
+import tempfile
+import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+import shutil
 
 _SUBSET_DIR_SUFFIX = "_subsetted"
 _OUT_SUFFIX = ".assfonts.ass"
 
+_LOGGER = logging.getLogger("ZitifenleiFile")
 
-class AssfontsMissingError(Exception):
-    """字体缺失（Missing the font）"""
+# assfonts 二进制自动修复下载源（合约：插件仓库 main 分支下的 Linux x86_64 构建）
+_ASSFONTS_REPO_URLS = (
+    "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/plugins.v2/zitifenlei/bin/assfonts",
+    "https://cdn.jsdelivr.net/gh/LXT-A-X/MoviePilot-Plugins@main/plugins.v2/zitifenlei/bin/assfonts",
+)
 
-    def __init__(self, missing: List[str]) -> None:
-        super().__init__("缺字体: " + "、".join(missing))
-        self.missing = missing or []
+# 期望的 ELF 头：魔数 \x7fELF + e_machine == 0x3E（x86_64）
+_EXPECTED_ELF_MAGIC = b"\x7fELF"
+_EXPECTED_MACHINE = 0x3E
+
+
+def _binary_ok(path: Path) -> bool:
+    """校验 assfonts 是否为有效且架构匹配（x86_64 ELF）的二进制。
+
+    某些部署环境（如 MP 卸载备份恢复）会用损坏/错误架构的文件覆盖 bin/assfonts，
+    导致 Exec format error；这里只读文件头做轻量校验。
+    """
+    try:
+        with open(path, "rb") as f:
+            head = f.read(20)
+        if len(head) < 20:
+            return False
+        if head[:4] != _EXPECTED_ELF_MAGIC:
+            return False
+        machine = struct.unpack("<H", head[18:20])[0]
+        return machine == _EXPECTED_MACHINE
+    except Exception:
+        return False
+
+
+def _repair_binary(path: Path) -> bool:
+    """从插件仓库下载正确的 assfonts 覆盖损坏文件；成功返回 True。"""
+    for url in _ASSFONTS_REPO_URLS:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Zitifenlei/1.0"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = resp.read()
+            if not data or data[:4] != _EXPECTED_ELF_MAGIC:
+                continue
+            if len(data) < 20 or struct.unpack("<H", data[18:20])[0] != _EXPECTED_MACHINE:
+                continue
+            fd, tmp = tempfile.mkstemp(prefix="assfonts_", dir=str(path.parent))
+            os.close(fd)
+            try:
+                with open(tmp, "wb") as f:
+                    f.write(data)
+                os.chmod(tmp, 0o755)
+                shutil.move(tmp, path)
+            finally:
+                if os.path.exists(tmp):
+                    try:
+                        os.remove(tmp)
+                    except Exception:
+                        pass
+            _LOGGER.info(f"字体分类管家: bin/assfonts 已自动修复（重新下载 {len(data)} 字节）")
+            return True
+        except Exception as err:
+            _LOGGER.warning(f"字体分类管家: 自动修复 assfonts 下载源 {url} 失败: {err}")
+    _LOGGER.error("字体分类管家: bin/assfonts 损坏且自动下载修复失败，请检查容器网络或手动替换 bin/assfonts")
+    return False
 
 
 def get_binary(plugin_root: Path) -> Optional[Path]:
     """插件根目录下的 bin/assfonts 可执行文件。
 
-    Windows 推送/市场克隆常丢失 Unix 可执行位（git 存成 100644），
-    容器内以 root（PUID=0）运行时检测到无可执行权限即自动 chmod +x 兜底。
+    自愈逻辑（三层）：
+    1. 文件不存在 → 返回 None；
+    2. 存在但损坏/架构不符（Windows 推送丢权限之前只 chmod，MP 备份恢复可能整文件被旧坏版覆盖）
+       → 自动从插件仓库下载正确版覆盖；
+    3. 无执行权限 → chmod +x。
     """
     p = Path(plugin_root) / "bin" / "assfonts"
     if not p.is_file():
         return None
+    if not _binary_ok(p):
+        if not _repair_binary(p):
+            return None
     try:
         if not os.access(str(p), os.X_OK):
             os.chmod(str(p), 0o755)
