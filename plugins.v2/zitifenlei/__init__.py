@@ -259,7 +259,7 @@ class Zitifenlei(_PluginBase):
     plugin_name = "字体分类管家"
     plugin_desc = "字体归档整理与 ASS 字幕字体检查插件：扫描/上传字体到字体库，检查字幕缺失字体。"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/zitifenlei.png"
-    plugin_version = "1.2.23"
+    plugin_version = "1.2.24"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X/MoviePilot-Plugins"
     plugin_config_prefix = "zitifenlei_"
@@ -1471,6 +1471,14 @@ class Zitifenlei(_PluginBase):
                 f = Path(f)
                 if not f.is_file() or not is_ass_file(f.name):
                     continue
+                # 上传临时目录的缓存源字幕不受「输出覆盖原文件」影响：上传→子集化→生成新成品
+                # （原名.assfonts.ass）供下载，从不覆盖上传的源字幕；覆盖模式只作用于媒体库/监控
+                # 目录里的源字幕。上传源缓存子集化后即清理。
+                try:
+                    if self._tmp_dir and str(f.resolve()).startswith(str(Path(self._tmp_dir).resolve())):
+                        overwrite = False
+                except Exception:
+                    pass
                 # 原始字幕名（去掉上传临时目录的 subset_<uuid> 前缀），全部状态记录统一用它
                 orig = self._original_subset_name(f)
                 # 已内嵌（子集化）字幕跳过，不重复处理
