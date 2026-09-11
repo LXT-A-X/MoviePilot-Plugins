@@ -748,6 +748,7 @@ const _hoisted_28 = { class: "zt-preview-family mb-3" };
 
 const {computed: computed$1,watch: watch$2,onActivated,onMounted: onMounted$2,onUnmounted: onUnmounted$1,ref: ref$2} = await importShared('vue');
 
+const FONT_BATCH_SIZE = 200;
 const PREVIEW_FONT_FAMILY = 'zt-preview-font';
 
 
@@ -793,6 +794,33 @@ async function refreshCollectFlag() {
 
 // ===== 目录树 =====
 const expandedDirs = ref$2(new Set());
+// 展开目录下的字体按需渲染：初始渲染前 FONT_BATCH_SIZE 个，滚动到底自动追加，避免上万字体一次性渲染卡死手机端
+const renderedFonts = ref$2(FONT_BATCH_SIZE);
+function resetRenderedFonts() {
+  renderedFonts.value = FONT_BATCH_SIZE;
+}
+// 可见节点：目录节点永远全部渲染（保证子树可导航），字体节点受 renderedFonts 数量限制
+const visibleNodes = computed$1(() => {
+  let remain = renderedFonts.value;
+  const out = [];
+  for (const node of flatNodes.value) {
+    if (node.type === 'dir') out.push(node);
+    else if (remain > 0) {
+      out.push(node);
+      remain--;
+    }
+  }
+  return out
+});
+// 左侧列表容器滚动接近底部时追加一屏字体
+const listCardRef = ref$2(null);
+function onListScroll() {
+  const el = listCardRef.value;
+  if (!el) return
+  if (el.scrollTop + el.clientHeight >= el.scrollHeight - 120) {
+    renderedFonts.value += FONT_BATCH_SIZE;
+  }
+}
 
 // ===== 删除字体（记录+本地文件，二次确认） =====
 const deleteDialog = ref$2(false);
@@ -988,7 +1016,11 @@ function toggleDir(dir) {
   if (set.has(key)) set.delete(key);
   else set.add(key);
   expandedDirs.value = set;
+  resetRenderedFonts();
 }
+
+// 搜索/厂商筛选变化时重置按需渲染计数
+watch$2([search, vendorFilter], () => resetRenderedFonts());
 
 // ===== 数据加载 =====
 async function loadFonts() {
@@ -998,6 +1030,7 @@ async function loadFonts() {
     allFonts.value = data.list || [];
     libDir.value = data.lib_dir || '';
     loaded.value = true;
+    resetRenderedFonts();
     // 若当前选中字体已不存在则清除：
     // 目录自动收集开启时监控自动入库、删除后选中失效应自动清理；
     // 关闭时（监控字体在待确认、用户正在整理）保留选中，不做自动清理
@@ -1435,7 +1468,12 @@ return (_ctx, _cache) => {
           md: "5"
         }, {
           default: _withCtx$2(() => [
-            _createVNode$2(_component_v_card, { class: "zt-card-bg zt-list-card" }, {
+            _createVNode$2(_component_v_card, {
+              class: "zt-card-bg zt-list-card",
+              ref_key: "listCardRef",
+              ref: listCardRef,
+              onScroll: onListScroll
+            }, {
               default: _withCtx$2(() => [
                 _createVNode$2(_component_v_card_text, { class: "pa-0" }, {
                   default: _withCtx$2(() => [
@@ -1489,7 +1527,7 @@ return (_ctx, _cache) => {
                             nav: ""
                           }, {
                             default: _withCtx$2(() => [
-                              (_openBlock$2(true), _createElementBlock$2(_Fragment$2, null, _renderList$2(flatNodes.value, (node) => {
+                              (_openBlock$2(true), _createElementBlock$2(_Fragment$2, null, _renderList$2(visibleNodes.value, (node) => {
                                 return (_openBlock$2(), _createElementBlock$2(_Fragment$2, {
                                   key: node.key
                                 }, [
@@ -1603,7 +1641,7 @@ return (_ctx, _cache) => {
                 })
               ]),
               _: 1
-            })
+            }, 512)
           ]),
           _: 1
         }),
@@ -2196,7 +2234,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const FontLibrary = /*#__PURE__*/_export_sfc(_sfc_main$2, [['__scopeId',"data-v-de742a03"]]);
+const FontLibrary = /*#__PURE__*/_export_sfc(_sfc_main$2, [['__scopeId',"data-v-77535287"]]);
 
 const {createTextVNode:_createTextVNode$1,resolveComponent:_resolveComponent$1,withCtx:_withCtx$1,createVNode:_createVNode$1,createElementVNode:_createElementVNode$1,toDisplayString:_toDisplayString$1,openBlock:_openBlock$1,createElementBlock:_createElementBlock$1,createCommentVNode:_createCommentVNode$1,createBlock:_createBlock$1,renderList:_renderList$1,Fragment:_Fragment$1,withModifiers:_withModifiers,normalizeClass:_normalizeClass$1} = await importShared('vue');
 

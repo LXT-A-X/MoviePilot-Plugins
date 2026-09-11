@@ -18,11 +18,12 @@
     "name": "字体分类管家",
     "description": "字体归档整理与 ASS 字幕字体检查插件：扫描/上传字体到字体库，检查字幕缺失字体。",
     "labels": "字体,字幕,整理,ASS",
-    "version": "1.2.20",
+    "version": "1.2.21",
     "icon": "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/zitifenlei.png",
     "author": "LXT-A-X",
     "level": 1,
     "history": {
+      "v1.2.21": "① 字体库左侧目录树按需渲染：展开厂商/子文件夹不再一次性渲染全部字体（Fontworks 6284 个、华康 4883 个等超大目录手机端直接卡死），改为目录节点始终完整渲染、展开目录下的字体先渲染前 200 个，滚动列表接近底部自动追加下一批，拉多少渲染多少——电脑手机都不卡；搜索/筛选/展开收起/数据刷新自动重置计数。② 修复「全量检查后不通知」：检查页全量检查按钮走的 /fonts/scan 接口此前两个分支都未发系统通知（全量扫描 /fonts/scan_all 有通知而它漏了），现补上——目录自动收集开启时通知「已归档 N 个字体」并附带索引重建结果，关闭时通知「新增 N 个待确认字体」；通知仍受设置页「发送通知」开关（notify_enabled）控制，默认关闭需手动开启。",
       "v1.2.19": "根治 bin/assfonts 被旧坏文件覆盖导致的 Exec format error：MP 卸载/重装时会从 plugins_backup 恢复插件目录，历史上一次本地安装残留的 10.8MB 坏 assfonts 被反复恢复、手动修复也随重装丢失；现 get_binary 三层自愈——①存在校验 ELF 魔数 + e_machine（x86_64），损坏/架构不符则自动从插件仓库（raw.githubusercontent + jsdelivr 双源）重新下载正确版覆盖；②无执行权限自动 chmod +x；③任一步失败返回 None 并记错误日志。部署后无需手动替换，子集化/重建索引前自动完成修复。",
       "v1.2.18": "修复「厂商层按字体数量排序」从未生效的 bug（v1.2.15 实现位置错误）：排序逻辑写在 walk() 递归内部、判断 dirNode.depth===0，但厂商层是顶层遍历（rootChildren，depth=1）进入，条件永远不成立——目录树一直按后端原始顺序显示；现改为直接在 rootChildren 上按 total_fonts 从多到少排序（数量相同按名称），厂商层（Fontworks/华康/方正…）一眼按体量排列，格式等子层仍保持名称排序。",
       "v1.2.17": "修复容器内重建索引/子集化 Permission denied：bin/assfonts 经 Windows 推送或市场克隆会丢失 Unix 可执行位（git 存成 100644），容器里一调用就报 [Errno 13] Permission denied；现 get_binary 检测到二进制无可执行权限时自动 chmod +x（容器以 root/PUID=0 运行可正常提权），不再依赖仓库权限位，本地/容器部署均自愈。",

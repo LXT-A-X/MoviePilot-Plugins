@@ -259,7 +259,7 @@ class Zitifenlei(_PluginBase):
     plugin_name = "字体分类管家"
     plugin_desc = "字体归档整理与 ASS 字幕字体检查插件：扫描/上传字体到字体库，检查字幕缺失字体。"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/zitifenlei.png"
-    plugin_version = "1.2.20"
+    plugin_version = "1.2.21"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X/MoviePilot-Plugins"
     plugin_config_prefix = "zitifenlei_"
@@ -2975,6 +2975,13 @@ class Zitifenlei(_PluginBase):
                     # 归档成功但索引重建失败：提示但不阻塞归档结果
                     self._db.add_log(f"assfonts 索引自动重建失败: {idx_msg}", "warning")
                 self._db.set_last_scan_time()  # 记录「上次全量检查」时间（仪表盘展示）
+                if self.get_resource_or_config("notify_enabled"):
+                    self._notify(
+                        "字体分类管家：全量检查完成",
+                        f"✅ 全量检查完成\n已归档 {added} 个字体"
+                        + ("，assfonts 索引已自动重建" if idx_ok else "")
+                        + ("，索引重建失败" if (added and not idx_ok) else ""),
+                    )
                 return self._ok(
                     {"added": added, "index_ok": idx_ok},
                     f"已归档 {added} 个字体" + ("，assfonts 索引已自动重建" if idx_ok else ""),
@@ -3034,6 +3041,12 @@ class Zitifenlei(_PluginBase):
                     )
                     added += 1
                 self._db.add_log(f"检查归档：发现 {added} 个新字体（已加入待确认，目录自动收集已关闭）", "info")
+                if self.get_resource_or_config("notify_enabled"):
+                    self._notify(
+                        "字体分类管家：全量检查完成",
+                        f"✅ 全量检查完成\n新增 {added} 个待确认字体"
+                        + (f"，已跳过 {skipped} 个已在待确认中的文件" if skipped else ""),
+                    )
                 return self._ok({"added": added, "skipped": skipped}, f"发现 {added} 个新字体")
             except Exception as err:
                 self._db.add_log(f"检查归档失败: {err}", "error")

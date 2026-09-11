@@ -38,6 +38,34 @@ async function refreshCollectFlag() {
 
 // ===== 目录树 =====
 const expandedDirs = ref(new Set())
+// 展开目录下的字体按需渲染：初始渲染前 FONT_BATCH_SIZE 个，滚动到底自动追加，避免上万字体一次性渲染卡死手机端
+const FONT_BATCH_SIZE = 200
+const renderedFonts = ref(FONT_BATCH_SIZE)
+function resetRenderedFonts() {
+  renderedFonts.value = FONT_BATCH_SIZE
+}
+// 可见节点：目录节点永远全部渲染（保证子树可导航），字体节点受 renderedFonts 数量限制
+const visibleNodes = computed(() => {
+  let remain = renderedFonts.value
+  const out = []
+  for (const node of flatNodes.value) {
+    if (node.type === 'dir') out.push(node)
+    else if (remain > 0) {
+      out.push(node)
+      remain--
+    }
+  }
+  return out
+})
+// 左侧列表容器滚动接近底部时追加一屏字体
+const listCardRef = ref(null)
+function onListScroll() {
+  const el = listCardRef.value
+  if (!el) return
+  if (el.scrollTop + el.clientHeight >= el.scrollHeight - 120) {
+    renderedFonts.value += FONT_BATCH_SIZE
+  }
+}
 
 // ===== 删除字体（记录+本地文件，二次确认） =====
 const deleteDialog = ref(false)
@@ -235,7 +263,11 @@ function toggleDir(dir) {
   if (set.has(key)) set.delete(key)
   else set.add(key)
   expandedDirs.value = set
+  resetRenderedFonts()
 }
+
+// 搜索/厂商筛选变化时重置按需渲染计数
+watch([search, vendorFilter], () => resetRenderedFonts())
 
 // ===== 数据加载 =====
 async function loadFonts() {
@@ -245,6 +277,7 @@ async function loadFonts() {
     allFonts.value = data.list || []
     libDir.value = data.lib_dir || ''
     loaded.value = true
+    resetRenderedFonts()
     // 若当前选中字体已不存在则清除：
     // 目录自动收集开启时监控自动入库、删除后选中失效应自动清理；
     // 关闭时（监控字体在待确认、用户正在整理）保留选中，不做自动清理
@@ -628,7 +661,7 @@ onUnmounted(() => {
     <v-row no-gutters class="zt-font-row">
       <!-- 左栏：搜索 + 筛选 + 目录树 -->
       <v-col cols="12" md="5">
-        <v-card class="zt-card-bg zt-list-card">
+        <v-card class="zt-card-bg zt-list-card" ref="listCardRef" @scroll="onListScroll">
           <v-card-text class="pa-0">
             <div class="pa-3 pb-2">
               <v-text-field
@@ -661,7 +694,7 @@ onUnmounted(() => {
             <div v-else class="zt-list-body" @click="onListClick">
               <v-list density="compact" class="pa-0" nav>
                 <!-- 目录节点：v 箭头展开/收起 -->
-                <template v-for="node in flatNodes" :key="node.key">
+                <template v-for="node in visibleNodes" :key="node.key">
                   <v-list-item
                     v-if="node.type === 'dir'"
                     class="zt-dir-item"
