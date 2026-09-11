@@ -259,7 +259,7 @@ class Zitifenlei(_PluginBase):
     plugin_name = "字体分类管家"
     plugin_desc = "字体归档整理与 ASS 字幕字体检查插件：扫描/上传字体到字体库，检查字幕缺失字体。"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/zitifenlei.png"
-    plugin_version = "1.2.21"
+    plugin_version = "1.2.22"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X/MoviePilot-Plugins"
     plugin_config_prefix = "zitifenlei_"
@@ -1449,7 +1449,7 @@ class Zitifenlei(_PluginBase):
 
         调用方需已持有 _scan_lock（入库自动与页面全量互斥）。
         """
-        stats: Dict[str, Any] = {"success": 0, "skipped": 0, "missing": 0, "error": 0, "missing_fonts": [], "file_status": {}}
+        stats: Dict[str, Any] = {"success": 0, "skipped": 0, "missing": 0, "error": 0, "missing_fonts": [], "file_status": {}, "out_files": []}
         if not files:
             return stats
         if self._db is None or self._assfonts_idx is None:
@@ -1608,6 +1608,12 @@ class Zitifenlei(_PluginBase):
                         }
                     )
                     stats["success"] += 1
+                    # 记录成功成品路径：清理待处理临时源文件时排除它（覆盖模式成品替换了源文件，误删会丢下载结果）
+                    try:
+                        if record_out:
+                            stats["out_files"].append(str(Path(record_out).resolve()))
+                    except Exception:
+                        pass
                     self._db.add_log(f"子集化成功: {f.name} → {Path(record_out or final_out).name}", "info")
                 elif status == "missing":
                     reason = str(res.get("reason") or "")
@@ -3504,7 +3510,7 @@ class Zitifenlei(_PluginBase):
             manual_files = _collect([r for r in pending if r.get("source") != "watch"])
             if not (watch_files or manual_files):
                 return self._ok({"success": 0, "skipped": 0, "missing": 0, "error": 0}, "待处理列表为空（可上传字幕，或开启「目录监控」自动收集）")
-            stats: Dict[str, Any] = {"success": 0, "skipped": 0, "missing": 0, "error": 0, "missing_fonts": [], "file_status": {}}
+            stats: Dict[str, Any] = {"success": 0, "skipped": 0, "missing": 0, "error": 0, "missing_fonts": [], "file_status": {}, "out_files": []}
             for batch, src in ((manual_files, "manual"), (watch_files, "watch")):
                 if not batch:
                     continue
@@ -3513,9 +3519,11 @@ class Zitifenlei(_PluginBase):
                     stats[k] += sub.get(k, 0)
                 stats["missing_fonts"].extend(sub.get("missing_fonts") or [])
                 stats["file_status"].update(sub.get("file_status") or {})
+                stats["out_files"].extend(sub.get("out_files") or [])
             # 处理完成：移除待处理记录；上传到临时目录的缓存源文件仅成功/跳过才清理，
             # 缺字体/失败（file_status=keep）保留供「重试失败」补字后再次处理
             keep_map = stats.get("file_status") or {}
+            out_set = set(stats["out_files"] or [])
             for r in pending:
                 try:
                     self._db.delete_subset_pending(r["id"])
@@ -3524,7 +3532,8 @@ class Zitifenlei(_PluginBase):
                 fp = Path(r.get("file_path") or "")
                 if self._tmp_dir and str(fp.resolve()).startswith(str(Path(self._tmp_dir).resolve())):
                     try:
-                        if keep_map.get(str(fp.resolve())) != "keep":
+                        # 覆盖模式成品==源文件路径：成品不可当临时源删（下载依赖它）
+                        if keep_map.get(str(fp.resolve())) != "keep" and str(fp.resolve()) not in out_set:
                             fp.unlink(missing_ok=True)
                     except Exception:
                         pass
