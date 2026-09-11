@@ -259,7 +259,7 @@ class Zitifenlei(_PluginBase):
     plugin_name = "字体分类管家"
     plugin_desc = "字体归档整理与 ASS 字幕字体检查插件：扫描/上传字体到字体库，检查字幕缺失字体。"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/zitifenlei.png"
-    plugin_version = "1.2.22"
+    plugin_version = "1.2.23"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X/MoviePilot-Plugins"
     plugin_config_prefix = "zitifenlei_"
@@ -1499,10 +1499,20 @@ class Zitifenlei(_PluginBase):
                     orig = self._original_subset_name(f)
                     base = orig[:-4] if orig.lower().endswith(".ass") else orig
                     if overwrite:
-                        # 覆盖模式：子集化结果直接替换原字幕文件（原名不变）
+                        # 覆盖模式：子集化结果直接替换原字幕文件（原名不变）。
+                        # 上传临时缓存文件名带 subset_<uuid>_ 前缀，同名覆盖会让成品带前缀，
+                        # 这里先把成品落到「原始名」路径，再清理带前缀的临时缓存副本
                         try:
-                            out.replace(f)
-                            final_out = f
+                            if f.name != orig:
+                                target_f = Path(f.parent) / orig
+                                if target_f.exists():
+                                    target_f.unlink(missing_ok=True)
+                                out.replace(target_f)
+                                final_out = target_f
+                                f.unlink(missing_ok=True)
+                            else:
+                                out.replace(f)
+                                final_out = f
                         except Exception:
                             final_out = out
                     else:
