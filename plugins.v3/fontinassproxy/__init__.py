@@ -4,20 +4,22 @@
 反代 Emby/Jellyfin 字幕流，实时对字幕用到的字体做子集化并以 ``[Fonts]`` 段
 嵌入 ASS 返回，使未安装对应字体的设备也能正确显示特效字幕。
 
-部署拓扑（nginx）：
-    location ~* /videos/(.*)/Subtitles/(.*)/(Stream[.]ass|Stream[.]ssa|Stream[.]srt|Stream[.])$ {
-        proxy_set_header X-Original-URI $request_uri;
-        proxy_pass http://moviepilot:3000/api/v1/plugin/FontInAssProxy/subtitle;
-    }
+接入方式（二选一，默认推荐内置反代，免 nginx）：
+  1. 内置反代端口（默认 8097）：客户端把 Emby 地址指到反代端口，
+     非字幕路径透传、字幕路径走本插件处理，无需任何 nginx 配置。
+  2. nginx 反代（备选，需自行配置）：
+      location ~* /videos/(.*)/Subtitles/(.*)/(Stream[.]ass|Stream[.]ssa|Stream[.]srt|Stream[.])$ {
+          proxy_set_header X-Original-URI $request_uri;
+          proxy_pass http://moviepilot:3000/api/v1/plugin/FontInAssProxy/subtitle;
+      }
 
 实现要点：
-- 插件 API 匿名访问：``"allow_anonymous": True``，字幕端点免鉴权由 nginx 直转。
+- 插件 API 端点（/subtitle）声明 ``"allow_anonymous": True``，字幕请求免鉴权直转。
 - 直接返回 ``starlette.Response`` 即原样透传（``/api/v1/...`` 绕开统一响应包装）。
 - 子集化走线程池 + 全局信号量（Semaphore 4），并优先使用 uharfbuzz（C）加速，
   失败自动回退 fontTools。
 - 宿主导入使用稳定 SDK（``app.sdk.logging`` / ``app.sdk.config``），适配 MoviePilot V3。
 """
-
 from __future__ import annotations
 
 import asyncio
