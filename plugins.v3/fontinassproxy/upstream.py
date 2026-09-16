@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """字幕字体代理 — Emby 回源层。
 
-- 从 nginx 传来的 ``X-Original-URI`` 重建上游 URL（保留全部 query 参数）。
+- 从请求头 ``X-Original-URI``（若客户端提供）或原始 URL 重建上游地址（保留全部 query 参数）。
 - ``Accept-Encoding: identity``，避免拿到 gzip 再解压。
 - 编码识别：BOM -> 声明/探测 -> UTF-8 兜底。
 - 提供 ``to_full_uri``：把 ``/Subtitles/{index}/{StartPositionTicks}/Stream.*``

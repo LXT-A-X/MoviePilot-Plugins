@@ -4,14 +4,8 @@
 反代 Emby/Jellyfin 字幕流，实时对字幕用到的字体做子集化并以 ``[Fonts]`` 段
 嵌入 ASS 返回，使未安装对应字体的设备也能正确显示特效字幕。
 
-接入方式（二选一，默认推荐内置反代，免 nginx）：
-  1. 内置反代端口（默认 8097）：客户端把 Emby 地址指到反代端口，
-     非字幕路径透传、字幕路径走本插件处理，无需任何 nginx 配置。
-  2. nginx 反代（备选，需自行配置）：
-      location ~* /videos/(.*)/Subtitles/(.*)/(Stream[.]ass|Stream[.]ssa|Stream[.]srt|Stream[.])$ {
-          proxy_set_header X-Original-URI $request_uri;
-          proxy_pass http://moviepilot:3000/api/v1/plugin/FontInAssProxy/subtitle;
-      }
+接入方式：内置反代端口（默认 8097）——客户端把 Emby 地址指到反代端口，
+非字幕路径透传、字幕路径走本插件处理。无需 nginx，也无需走 MP 主端口。
 
 实现要点：
 - 插件 API 端点（/subtitle）声明 ``"allow_anonymous": True``，字幕请求免鉴权直转。
@@ -143,7 +137,7 @@ class FontInAssProxy(_PluginBase):
     plugin_name = "字幕字体代理"
     plugin_desc = "反代 Emby/Jellyfin 字幕流，实时子集化并嵌入字体（[Fonts] 段），未装字体的设备也能正常显示特效字幕"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/fontinassproxy.jpg"
-    plugin_version = "3.0.0"
+    plugin_version = "3.0.1"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X/MoviePilot-Plugins"
     plugin_config_prefix = "fontinassproxy_"
@@ -264,7 +258,7 @@ class FontInAssProxy(_PluginBase):
         else:
             _app_logger.warning("未配置 Emby 地址，处理将无法回源")
 
-        # 内置反代（可选，替代外部 nginx）
+        # 内置反代端口（默认 8097，免外部反代）
         if cfg.get("internal_proxy_enabled"):
             try:
                 port = int(cfg.get("internal_proxy_port") or 8097)
@@ -437,7 +431,7 @@ class FontInAssProxy(_PluginBase):
                 "methods": ["GET"],
                 "allow_anonymous": True,   # auth: None 会被强制改成 apikey，匿名开关是它
                 "summary": "字幕字体代理流端点",
-                "description": "由 nginx 拦截字幕路径后反代到此，处理并返回嵌入字体的 ASS",
+                "description": "内置反代（8097）拦截字幕路径，处理后返回嵌入字体的 ASS",
             },
             {"path": "/config", "endpoint": self.api_get_config, "methods": ["GET"], "auth": "bear", "summary": "获取插件配置"},
             {"path": "/config", "endpoint": self.api_save_config, "methods": ["POST"], "auth": "bear", "summary": "保存插件配置"},

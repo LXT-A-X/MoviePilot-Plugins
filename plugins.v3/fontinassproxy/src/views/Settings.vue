@@ -106,7 +106,7 @@ async function save() {
       </v-col>
       <v-col cols="12" md="6">
         <v-switch v-model="cfg.internal_proxy_enabled" label="启用内置反代端口"
-                  hint="不依赖 nginx，客户端直接访问本端口；需要在 MP 容器映射该端口" persistent-hint />
+                  hint="客户端直接访问本端口；需要在 MP 容器映射该端口" persistent-hint />
       </v-col>
       <v-col cols="12" md="6">
         <v-text-field v-model="cfg.internal_proxy_port" label="内置反代端口" type="number"

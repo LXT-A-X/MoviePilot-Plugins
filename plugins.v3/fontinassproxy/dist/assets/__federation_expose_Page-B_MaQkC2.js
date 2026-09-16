@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import _sfc_main$2, { a as apiModule } from './__federation_expose_Config-bMq6QQt6.js';
+import _sfc_main$2, { a as apiModule } from './__federation_expose_Config-q3V4nzvq.js';
 
 const _export_sfc = (sfc, props) => {
   const target = sfc.__vccOpts || sfc;

@@ -10,7 +10,7 @@
   一句话：不用再把字体装到播放设备上。
 - **uharfbuzz 引擎**：子集化走 HarfBuzz C 实现（比纯 Python fontTools 快约 140 倍），
   失败自动回退 fontTools，兼容性有保障；复杂文字（阿拉伯文、缅甸文等）布局闭包完整保留。
-- **内置反代端口**：默认 `8097`，免 nginx —— 客户端直接把 Emby 地址指到反代端口即可使用。
+- **内置反代端口**：默认 `8097` —— 客户端直接把 Emby 地址指到反代端口即可使用，无需外部反代。
 - **1.7 万字体大库支撑**：SQLite 索引 + watchdog 增量监听，新增字体自动收录，无需手动重建。
 - **精准匹配**：内部名 > 文件名分层匹配，容器格式优先（ttf > ttc > otf > otc），
   中文名/拼音名/日文名多编码识别（GBK/BIG5/UTF-16）。
@@ -38,14 +38,6 @@
 7. 客户端（Kodi / Jellyfin App / 电视）里把 Emby 服务器地址填成
    `http://<moviepilot-ip>:8097` —— 播放时字幕自动走代理并嵌入字体
 
-### 进阶：nginx 反代（不用内置端口时）
-
-```nginx
-location ~* /videos/(.*)/Subtitles/(.*)/(Stream[.]ass|Stream[.]ssa|Stream[.]srt|Stream[.])$ {
-    proxy_set_header X-Original-URI $request_uri;
-    proxy_pass http://moviepilot:3000/api/v1/plugin/FontInAssProxy/subtitle;
-}
-```
 
 ## 设置项说明
 
@@ -61,7 +53,7 @@ location ~* /videos/(.*)/Subtitles/(.*)/(Stream[.]ass|Stream[.]ssa|Stream[.]srt|
 | 缓存有效期（小时） | 磁盘缓存保留时长，默认 24（1 天），每 4 小时清理 |
 | 子集化并发上限 | 保护 MP 主进程，超限请求降级透传 |
 | 处理失败时返回原始字幕 | 失败透传原字幕（关则 500） |
-| 内置反代端口 | 默认 8097，免 nginx |
+| 内置反代端口 | 默认 8097，客户端直连本端口 |
 | 启用通知 | 缺字体 / 处理错误时发消息通知 |
 
 ## 状态页说明

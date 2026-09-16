@@ -293,7 +293,7 @@ return (_ctx, _cache) => {
                 modelValue: cfg.value.internal_proxy_enabled,
                 "onUpdate:modelValue": _cache[11] || (_cache[11] = $event => ((cfg.value.internal_proxy_enabled) = $event)),
                 label: "启用内置反代端口",
-                hint: "不依赖 nginx，客户端直接访问本端口；需要在 MP 容器映射该端口",
+                hint: "客户端直接访问本端口；需要在 MP 容器映射该端口",
                 "persistent-hint": ""
               }, null, 8, ["modelValue"])
             ]),

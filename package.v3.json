@@ -29,12 +29,13 @@
     "name": "字幕字体代理",
     "description": "反代 Emby/Jellyfin 字幕流，实时对字幕用到的字体做子集化并以 [Fonts] 段嵌入 ASS 返回（内嵌字体进字幕，任何设备都能正确显示特效字幕）；内置反代端口免 nginx；uharfbuzz 子集化引擎 + 双层缓存。",
     "labels": "字幕,Emby,字体,子集化",
-    "version": "3.0.0",
+    "version": "3.0.1",
     "icon": "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/fontinassproxy.jpg",
     "author": "LXT-A-X",
     "level": 1,
     "system_version": ">=3.0.0",
     "history": {
+      "v3.0.1": "清理 nginx 相关文档与注释：接入方式只保留内置反代端口（默认 8097，免外部反代）；前端产出去除旧 nginx 文案。",
       "v3.0.0": "V3 专用版：宿主导入迁移到稳定 SDK（app.sdk.logging / app.sdk.config）；依赖改用 pyproject.toml；首次入库。功能：uharfbuzz 主路径子集化 + fontTools 兜底、分层精准匹配（内部名优先级 + 容器格式 ttf>ttc>otf>otc）、中文名多编码识别、已有 [Fonts] 跳过、缓存默认 24h 每 4h 清理、内置反代端口、FontInAss 风格分步日志。"
     }
   }
