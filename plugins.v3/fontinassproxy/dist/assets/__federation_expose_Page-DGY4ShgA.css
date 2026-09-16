@@ -1,0 +1,212 @@
+
+/* 列表容器：限制高度、内部滚动（缺失字体用） */
+.fia-list-wrap[data-v-7cca8b46] {
+  max-height: 400px;
+  overflow-y: auto;
+  padding-top: 0 !important;
+  padding-bottom: 8px !important;
+}
+/* 日志卡片（对齐 zitifenlei：固定 300px 高 + 内部滚动） */
+.fia-log-card[data-v-7cca8b46] {
+  height: 300px;
+  display: flex;
+  flex-direction: column;
+}
+.fia-log-body[data-v-7cca8b46] {
+  flex: 1;
+  min-height: 0;
+}
+.fia-log-box[data-v-7cca8b46] {
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+}
+.fia-log-table[data-v-7cca8b46] {
+  width: 100%;
+}
+.fia-log-table[data-v-7cca8b46] td {
+  padding: 4px 8px;
+}
+.fia-log-time[data-v-7cca8b46] {
+  width: 150px;
+  min-width: 150px;
+  white-space: nowrap;
+  font-size: 12px;
+  opacity: 0.75;
+}
+.fia-log-level[data-v-7cca8b46] {
+  width: 64px;
+  min-width: 64px;
+}
+.fia-log-message[data-v-7cca8b46] {
+  font-size: 13px;
+  word-break: break-all;
+}
+.fia-empty[data-v-7cca8b46] {
+  font-size: 13px;
+  opacity: 0.6;
+  text-align: center;
+  padding: 16px;
+}
+
+/* 全局（非 scoped）：深色主题下浅色卡片 + 边框，提升可见性（对齐字体分类管家） */
+.ffa-card-bg {
+  background: rgba(255, 255, 255, 0.05) !important;
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+}
+
+/* 根容器：吃满宿主宽度，窗口高度固定 */
+.ffa-app[data-v-6adbe0b1] {
+  width: 100%;
+  height: min(720px, calc(100vh - 100px));
+  min-height: 560px;
+  overflow: hidden;
+  box-sizing: border-box;
+  position: relative;
+}
+
+/* Flex 左右布局 */
+.ffa-layout[data-v-6adbe0b1] {
+  display: flex;
+  flex-direction: row;
+  width: 100%;
+  height: 100%;
+}
+
+/* 左侧导航：固定宽度 180px（同字体分类管家） */
+.ffa-nav[data-v-6adbe0b1] {
+  width: 180px;
+  flex-shrink: 0;
+  height: 100%;
+  border-right: 1px solid rgba(128, 128, 128, 0.25);
+  overflow-y: auto;
+  box-sizing: border-box;
+  padding: 16px 0;
+}
+.ffa-nav-header[data-v-6adbe0b1] {
+  padding: 0 16px 16px;
+}
+.ffa-app-title[data-v-6adbe0b1] {
+  font-weight: 600;
+  font-size: 16px;
+}
+.ffa-app-subtitle[data-v-6adbe0b1] {
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+/* 右侧内容区：吃满剩余空间，内部滚动 */
+.ffa-content[data-v-6adbe0b1] {
+  flex-grow: 1;
+  flex-shrink: 1;
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 20px;
+  box-sizing: border-box;
+  position: relative;
+}
+
+/* 插件停用遮罩 */
+.ffa-disabled-mask[data-v-6adbe0b1] {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.ffa-disabled-card[data-v-6adbe0b1] {
+  padding: 24px 32px;
+  border-radius: 10px;
+  text-align: center;
+  min-width: 280px;
+}
+.ffa-disabled-title[data-v-6adbe0b1] {
+  font-size: 17px;
+  font-weight: 600;
+}
+.ffa-disabled-desc[data-v-6adbe0b1] {
+  font-size: 13px;
+  opacity: 0.7;
+  margin-top: 4px;
+}
+.ffa-disabled-banner[data-v-6adbe0b1] {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  right: 10px;
+  z-index: 15;
+}
+/* 右上角关闭按钮（常驻） */
+.ffa-close-btn[data-v-6adbe0b1] {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 30;
+}
+.ffa-loading[data-v-6adbe0b1] {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+
+/* ── 手机端适配 ── */
+.ffa-mobile-nav[data-v-6adbe0b1] {
+  display: none;
+}
+@media (max-width: 820px) {
+.ffa-app[data-v-6adbe0b1] {
+    width: 100%;
+    height: 100dvh;
+    max-height: 100dvh;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+.ffa-nav[data-v-6adbe0b1] {
+    display: none;
+}
+.ffa-layout[data-v-6adbe0b1] {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+    height: auto;
+    width: 100%;
+}
+.ffa-content[data-v-6adbe0b1] {
+    flex: 1 1 auto;
+    min-height: 0;
+    height: auto;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 12px 12px 16px;
+}
+.ffa-mobile-nav[data-v-6adbe0b1] {
+    display: block;
+    flex: 0 0 auto;
+}
+.ffa-mnav-current[data-v-6adbe0b1] {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    gap: 8px;
+    padding: 12px;
+    background: transparent;
+    border: none;
+    color: inherit;
+    font-size: 15px;
+    font-weight: 600;
+}
+.ffa-mnav-caret[data-v-6adbe0b1] {
+    opacity: 0.6;
+}
+}

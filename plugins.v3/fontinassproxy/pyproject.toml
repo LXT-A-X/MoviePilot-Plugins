@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "moviepilot-fontinassproxy"
+version = "3.0.0"
+description = "字幕字体代理：反代 Emby/Jellyfin 字幕流，实时子集化并嵌入字体（[Fonts] 段）（MoviePilot V3）"
+requires-python = ">=3.10"
+dependencies = [
+    "fonttools>=4.55.0",
+    "watchdog>=3.0.0",
+    "cachetools>=5.3.0",
+    "httpx>=0.24.0",
+    "charset-normalizer>=3.0.0",
+    "uharfbuzz>=0.40.0",
+]
