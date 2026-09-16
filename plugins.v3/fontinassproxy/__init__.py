@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""MoviePilot V2 插件：字幕字体代理（FontInAssProxy）。
+"""MoviePilot V3 插件：字幕字体代理（FontInAssProxy）。
 
 反代 Emby/Jellyfin 字幕流，实时对字幕用到的字体做子集化并以 ``[Fonts]`` 段
 嵌入 ASS 返回，使未安装对应字体的设备也能正确显示特效字幕。
@@ -11,11 +11,11 @@
     }
 
 实现要点：
-- 插件 API 匿名访问：``"allow_anonymous": True``（MP v2 会把 ``auth: None``
-  强制改成 ``apikey``，真正的匿名开关是 ``allow_anonymous``）。
-- 直接返回 ``starlette.Response`` 即原样透传（不受 V2ResponseMiddleware 包装，
-  ``/api/v1/...`` 完全绕开该中间件）。
-- 子集化走线程池 + 全局信号量，避免阻塞/拖垮 MP 主进程。
+- 插件 API 匿名访问：``"allow_anonymous": True``，字幕端点免鉴权由 nginx 直转。
+- 直接返回 ``starlette.Response`` 即原样透传（``/api/v1/...`` 绕开统一响应包装）。
+- 子集化走线程池 + 全局信号量（Semaphore 4），并优先使用 uharfbuzz（C）加速，
+  失败自动回退 fontTools。
+- 宿主导入使用稳定 SDK（``app.sdk.logging`` / ``app.sdk.config``），适配 MoviePilot V3。
 """
 
 from __future__ import annotations
@@ -142,7 +142,7 @@ class FontInAssProxy(_PluginBase):
     plugin_desc = "反代 Emby/Jellyfin 字幕流，实时子集化并嵌入字体（[Fonts] 段），未装字体的设备也能正常显示特效字幕"
     plugin_icon = "fontinassproxy.jpg"
     plugin_version = "3.0.0"
-    plugin_author = "local"
+    plugin_author = "LXT-A-X"
     plugin_config_prefix = "fontinassproxy_"
     plugin_order = 100
     auth_level = 2
@@ -552,7 +552,7 @@ class FontInAssProxy(_PluginBase):
     def api_logs(self, lines: int = 300) -> Dict[str, Any]:
         """读取本插件日志并结构化（对齐 zitifenlei：id/time/level/message）。
 
-        MP v2 插件日志独立存放于 LOG_PATH/plugins/fontinassproxy.log；
+        插件日志独立存放于 LOG_PATH/plugins/fontinassproxy.log；
         优先读独立插件日志，不存在时兜底读 moviepilot.log 过滤。
         """
         n = int(lines) if lines else 300
