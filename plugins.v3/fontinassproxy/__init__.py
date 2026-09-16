@@ -140,7 +140,7 @@ class FontInAssProxy(_PluginBase):
 
     plugin_name = "字幕字体代理"
     plugin_desc = "反代 Emby/Jellyfin 字幕流，实时子集化并嵌入字体（[Fonts] 段），未装字体的设备也能正常显示特效字幕"
-    plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/author.png"
+    plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/fontinassproxy.jpg"
     plugin_version = "3.0.0"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X/MoviePilot-Plugins"
