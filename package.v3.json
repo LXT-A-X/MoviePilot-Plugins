@@ -30,7 +30,7 @@
     "description": "反代 Emby/Jellyfin 字幕流，实时对字幕用到的字体做子集化并以 [Fonts] 段嵌入 ASS 返回（内嵌字体进字幕，任何设备都能正确显示特效字幕）；内置反代端口免 nginx；uharfbuzz 子集化引擎 + 双层缓存。",
     "labels": "字幕,Emby,字体,子集化",
     "version": "3.0.0",
-    "icon": "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/fontinass.png",
+    "icon": "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/fontinassproxy.jpg",
     "author": "LXT-A-X",
     "level": 1,
     "system_version": ">=3.0.0",
