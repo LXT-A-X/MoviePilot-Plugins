@@ -1,0 +1,184 @@
+"""
+ui/settings.py - 设置页
+v1.2.9: 拆出 - 基础设置 / LLM 连接 / 范围 / 提示词 / 高级 / Webhook
+"""
+from app.sdk.config import settings as _mp_settings
+from app.sdk.logging import logger
+
+from .common import (
+    _row, _col, _section, _switch, _text_field, _select, _textarea,
+    _btn, _chip, _alert,
+    C_PRIMARY, C_INFO, C_SUCCESS, C_WARNING, C_ERROR,
+)
+
+
+def build_form(lib_options, plugin, invalid_libraries=None) -> list:
+    """v1.2.9: 设置页表单 - 拆出独立函数
+    v1.3.4: 按用户要求所有交互改为开关 - 删除「清空缓存（危险）」按钮、「刷新 LLM」按钮、
+            新增「重试失败任务」「刷新 LLM」开关
+    """
+    if plugin is None:
+        logger.warning("build_form: plugin is None，返回空表单")
+        return [{"component": "VAlert", "props": {"type": "warning", "variant": "tonal"},
+                 "text": "插件实例不可用，请刷新页面或重新加载插件"}]
+    invalid_libraries = invalid_libraries or []
+    llm_ready = getattr(plugin, "_llm", None) is not None
+    llm_model = getattr(plugin._llm, "model", "") if llm_ready else ""
+    scan_status = plugin._build_scan_status() if hasattr(plugin, "_build_scan_status") else {}
+    is_scanning = bool(scan_status.get("running", False))
+    is_paused = bool(scan_status.get("paused", False))
+
+    # ────────── 基础设置 ──────────
+    # v1.3.11: 扫描运行时把「立即扫描」切换为「停止扫描」开关，保存即执行
+    scan_action_label = "停止扫描（保存后执行）" if is_scanning else "立即扫描（保存后执行）"
+    scan_action_help = (
+        "打开开关后保存，先写缓存再安全停止扫描线程"
+        if is_scanning else
+        "打开开关后点下方保存按钮，插件自动开始扫描"
+    )
+    scan_action_key = "run_stop_scan" if is_scanning else "run_scan"
+    basic_rows = [
+        _row([
+            _col(12, [_switch("enabled", "启用插件", "开启后入库时自动翻译演职人员")], sm=6),
+            _col(12, [_switch(scan_action_key, scan_action_label, scan_action_help)], sm=6),
+        ]),
+        _row([
+            _col(12, [_switch("run_clear_cache", "清空缓存", "清空所有人名/角色缓存、已处理记录和历史，不可恢复。保存后立即执行。")], sm=6),
+            _col(12, [_switch("run_lock_cast", "批量补锁定旧条目", "为已翻译但未锁定的旧条目补充 Cast 锁定")], sm=6),
+        ]),
+        _row([
+            _col(12, [_switch("notify_on_complete", "扫描完成后发送通知", "每次扫描完成推送通知，包含翻译统计和缓存命中率")], sm=6),
+            _col(12, [{"component": "div", "props": {"class": "text-caption text-medium-emphasis"},
+                        "text": "「立即扫描/清空缓存/补锁定/停止扫描/重试/刷新/暂停」均为一次性触发，打开后保存即执行，完成后自动复位。"}], sm=6),
+        ]),
+        _row([
+            _col(12, [_switch("run_retry_failed", "重试失败任务（保存后执行）", "对失败队列中的条目重新执行翻译流程")], sm=6),
+            _col(12, [_switch("run_refresh_llm", "刷新 LLM 客户端（保存后执行）", "重新初始化 LLM 连接，应用最新配置")], sm=6),
+        ]),
+        _row([
+            _col(12, [_select("libraries", "选择媒体库（多选，留空 = 全部）", lib_options,
+                               "选择要扫描的媒体库，支持跨服务器；留空则扫描所有服务器所有库")]),
+        ]),
+        _row([
+            _col(12, [_text_field("delay", "批间延迟（秒）", "2", "每次请求间隔，避免触发限流", "number")], sm=6),
+            _col(12, [_text_field("batch_titles", "跨剧集批处理数量", "10", "每 N 个剧集打包发给 AI（1=关闭批处理，10=推荐值），越大越快但单次 LLM 负载越高", "number")], sm=6),
+        ]),
+    ]
+    # v1.3.11: 暂停/恢复动态开关（扫描运行时可用）— 用 append 避免 None 混入
+    if is_scanning:
+        pause_label = "恢复任务（保存后执行）" if is_paused else "暂停任务（保存后执行）"
+        pause_help = "保存后恢复扫描" if is_paused else "保存后暂停扫描，保留线程和断点"
+        basic_rows.append(
+            _row([
+                _col(12, [_switch("run_pause", pause_label, pause_help)], sm=6),
+            ])
+        )
+    if invalid_libraries:
+        basic_rows.append(_row([_col(12, [_alert(f"已自动移除失效的媒体库配置：{', '.join(invalid_libraries)}。")])]))
+    if not lib_options:
+        basic_rows.append(_row([_col(12, [_alert("未获取到任何媒体库，请检查 Emby 服务器是否在线、API Key 是否有效。", "error")])]))
+    # v1.3.4: 删除了「清空缓存（危险）」红色按钮 + VDialog 弹窗
+    # 清空缓存改用上面的「清空缓存」开关（保存即执行）
+    card_basic = _section("基础设置", C_PRIMARY, basic_rows, icon="mdi-cog-outline")
+
+    # ────────── LLM 连接 ──────────
+    plugin_base_url = getattr(plugin, "_llm_base_url", "") or ""
+    plugin_api_key = getattr(plugin, "_llm_api_key", "") or ""
+    plugin_model = getattr(plugin, "_llm_model", "") or ""
+    mp_base_url = getattr(_mp_settings, "LLM_BASE_URL", "") or ""
+    mp_api_key = getattr(_mp_settings, "LLM_API_KEY", "") or ""
+    mp_model = getattr(_mp_settings, "LLM_MODEL", "") or ""
+    using_plugin_any = bool(plugin_base_url or plugin_api_key or plugin_model)
+    current_llm_model = llm_model or plugin_model or mp_model or "未配置"
+    effective_source = "插件独立配置" if using_plugin_any else "MoviePilot 系统配置"
+
+    def _src_label(plugin_val, mp_val, field_name):
+        if plugin_val: return f"{field_name}：插件自定义"
+        elif mp_val: return f"{field_name}：系统默认"
+        else: return f"{field_name}：未配置"
+
+    card_llm = _section("大模型连接", C_INFO, [
+        _row([_col(12, [{"component": "div", "props": {"class": "d-flex align-center ga-2 mb-2 flex-wrap"}, "content": [
+            {"component": "span", "props": {"class": "text-body-2 font-weight-medium text-high-emphasis"}, "text": "当前状态："},
+            _chip("已就绪", "success", icon="mdi-check-circle") if llm_ready else _chip("未配置", "warning", icon="mdi-alert"),
+            _chip("插件独立 LLM", "info", icon="mdi-cog-outline") if using_plugin_any else _chip("MP 系统 LLM", "success", icon="mdi-server"),
+            {"component": "span", "props": {"class": "text-caption text-medium-emphasis ml-2"}, "text": f"模型：{current_llm_model}"},
+        ]}])]),
+        _row([
+            _col(12, [_text_field("llm_base_url", "API 地址", "https://api.example.com/v1",
+                                   _src_label(plugin_base_url, mp_base_url, "API 地址"))]),
+        ]),
+        _row([
+            _col(12, [_text_field("llm_api_key", "API Key", "sk-xxx",
+                                   _src_label(plugin_api_key, mp_api_key, "API Key"), "password")], sm=6),
+            _col(12, [_text_field("llm_model", "模型名称", "deepseek-ai/DeepSeek-V4-Flash",
+                                   _src_label(plugin_model, mp_model, "模型"))], sm=4),
+            _col(12, [_text_field("llm_timeout", "超时（秒）", "120", "LLM 请求超时", "number")], sm=2),
+        ]),
+        _row([
+            _col(12, [{"component": "div", "props": {"class": "text-caption text-medium-emphasis"},
+                       "text": f"留空 = 使用 {effective_source}（避免硬编码，提升可维护性）。改了 LLM 配置后请到基础设置打开「刷新 LLM 客户端」开关。"}]),
+        ]),
+    ], icon="mdi-robot")
+
+    # ────────── 翻译范围 ──────────
+    translate_all = getattr(plugin, "_translate_all", False)
+    card_scope = _section("翻译范围", C_SUCCESS, [
+        _row([_col(12, [_switch("translate_all", "全部翻译",
+                                "开启后忽略下方角色类型，所有职位的人名+角色名都翻译（会与下方各角色类型开关互斥）")])]),
+        _row([
+            _col(12, [_switch("translate_actor", "演员 Actor", "电影/剧集的主演", disabled=translate_all)], sm=6),
+            _col(12, [_switch("translate_director", "导演 Director", disabled=translate_all)], sm=6),
+        ]),
+        _row([
+            _col(12, [_switch("translate_writer", "编剧 Writer", disabled=translate_all)], sm=6),
+            _col(12, [_switch("translate_producer", "制片人 Producer", disabled=translate_all)], sm=6),
+        ]),
+        _row([
+            _col(12, [_switch("translate_role", "翻译角色名",
+                                "翻译人物饰演的具体角色名（如\"钢铁侠\"→中文），不影响已有人名")]),
+        ]),
+        _row([
+            _col(12, [_switch("overwrite_chinese", "重译已有中文名",
+                                "对已经是中文的人名/角色名强制重新翻译（适合换了更准确的译名时使用）")]),
+        ]),
+        _row([
+            _col(12, [_text_field("max_people_per_title", "单作品最大人数", "10",
+                                   "每个作品最多翻译多少个人物，超出截断", "number")], sm=6),
+            _col(12, [_text_field("max_people_per_batch", "单批翻译条数", "5",
+                                   "每批 LLM 翻译多少条；越大越快但 token 越多", "number")], sm=6),
+        ]),
+    ], icon="mdi-account-multiple-outline")
+
+    # ────────── 提示词 ──────────
+    default_prompt = "你是影视翻译专家。将以下词条翻译成简体中文。\ncontext: {\"title\": {title_json}, \"year\": {year_json}}\nterms: {terms_json}\n输出: JSON 对象，键为原文，值为译文。无法翻译保留原文。只输出 JSON，不要 markdown。"
+    current_prompt = getattr(plugin, "_prompt_template", "") or default_prompt
+    card_prompt = _section("提示词模板", C_WARNING, [
+        _row([_col(12, [_textarea("prompt_template", "提示词", default_prompt,
+                                   "支持占位符 {title_json} / {year_json} / {terms_json}，留空使用默认模板", rows=8)])]),
+        _row([_col(12, [{"component": "div", "props": {"class": "text-caption text-medium-emphasis"},
+                          "text": f"当前长度：{len(current_prompt)} 字符。修改后会与 LLM 配置一起保存。"}])]),
+    ], icon="mdi-message-text-outline")
+
+    # ────────── 高级 ──────────
+    card_advanced = _section("高级选项", C_WARNING, [
+        _row([
+            _col(12, [_switch("lock_cast", "翻译后立即锁定 Cast",
+                                "在 Emby 中锁定该作品的演职人员列表，避免重新刮削时覆盖中文名")]),
+        ]),
+    ], icon="mdi-lock-outline")
+
+    # ────────── Webhook ──────────
+    webhook_delay = getattr(plugin, "_webhook_delay", 60) or 60
+    card_webhook = _section("Webhook 入库触发", C_INFO, [
+        _row([
+            _col(12, [_text_field("webhook_delay", "入库延迟（秒）", "60",
+                                   "Emby 入库后等待多少秒再开始翻译，给元数据刮削留时间", "number")]),
+        ]),
+        _row([_col(12, [{"component": "div", "props": {"class": "text-caption text-medium-emphasis"},
+                          "text": f"在 Emby Webhook 中配置：'http://<MoviePilot地址>/api/webhook?token=<你的Token>'，" \
+                                  f"事件选 Library - New 或类似。延迟默认 {webhook_delay} 秒。"}])]),
+    ], icon="mdi-webhook")
+
+    form = [card_basic, card_llm, card_scope, card_prompt, card_advanced, card_webhook]
+    return form

@@ -1,0 +1,105 @@
+
+/* 全局（非 scoped）：深色主题下浅色卡片 + 边框，提升可见性 */
+.zt-card-bg {
+  background: rgba(255, 255, 255, 0.05) !important;
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+}
+
+/* 根容器：吃满宿主宽度，严禁溢出 */
+.zt-app[data-v-0dc9c564] {
+  width: 100%;
+  height: 100%;
+  min-height: 640px;     /* 兜底：即使宿主高度自适应也不塌缩 */
+  overflow: hidden;      /* 关键：绝不撑大窗口 */
+  box-sizing: border-box;
+  position: relative;    /* 停用遮罩的定位基准 */
+}
+
+/* Flex 左右布局 */
+.zt-layout[data-v-0dc9c564] {
+  display: flex;
+  flex-direction: row;
+  width: 100%;
+  height: 100%;
+}
+
+/* 左侧导航：固定宽度，禁止压缩 */
+.zt-nav[data-v-0dc9c564] {
+  width: 180px;
+  flex-shrink: 0;
+  height: 100%;
+  border-right: 1px solid rgba(128, 128, 128, 0.25);
+  overflow-y: auto;
+  box-sizing: border-box;
+  padding: 16px 0;
+}
+.zt-nav-header[data-v-0dc9c564] {
+  padding: 0 16px 16px;
+}
+.zt-app-title[data-v-0dc9c564] {
+  font-weight: 600;
+  font-size: 16px;
+}
+.zt-app-subtitle[data-v-0dc9c564] {
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+/* 右侧内容区：吃掉所有剩余空间 */
+.zt-content[data-v-0dc9c564] {
+  flex-grow: 1;
+  flex-shrink: 1;
+  height: 100%;
+  min-height: 640px;    /* 内容区统一最小高度，任何页面都不再变矮 */
+  overflow-y: auto;     /* 内容多了只在右侧内部滚 */
+  overflow-x: hidden;
+  padding: 20px;
+  box-sizing: border-box;
+  position: relative;
+}
+
+/* 插件停用遮罩 */
+.zt-disabled-mask[data-v-0dc9c564] {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.zt-disabled-card[data-v-0dc9c564] {
+  padding: 24px 32px;
+  border-radius: 10px;
+  text-align: center;
+  min-width: 280px;
+}
+.zt-disabled-title[data-v-0dc9c564] {
+  font-size: 17px;
+  font-weight: 600;
+}
+.zt-disabled-desc[data-v-0dc9c564] {
+  font-size: 13px;
+  opacity: 0.7;
+  margin-top: 4px;
+}
+.zt-disabled-banner[data-v-0dc9c564] {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  right: 10px;
+  z-index: 15;
+}
+/* 右上角关闭按钮（常驻，悬浮于所有层之上） */
+.zt-close-btn[data-v-0dc9c564] {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 30;
+}
+.zt-loading[data-v-0dc9c564] {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}

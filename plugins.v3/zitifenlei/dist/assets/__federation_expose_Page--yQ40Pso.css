@@ -1,0 +1,319 @@
+
+.zt-topbar[data-v-c7aa3cca] {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.zt-list-card[data-v-c7aa3cca] {
+  height: 620px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.zt-list-body[data-v-c7aa3cca] {
+  min-height: 60px;
+  flex: 1 1 auto;
+  overflow-y: auto;
+}
+/* 结果区筛选栏：状态下拉 + 搜索框 */
+.zt-filter-row[data-v-c7aa3cca] {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+}
+.zt-filter-status[data-v-c7aa3cca] {
+  width: 130px;
+  flex-shrink: 0;
+}
+.zt-filter-search[data-v-c7aa3cca] {
+  flex: 1 1 auto;
+  min-width: 120px;
+}
+.zt-record-body[data-v-c7aa3cca] {
+  min-height: 60px;
+  flex: 1 1 auto;
+  overflow-y: auto;
+}
+.zt-loading-more[data-v-c7aa3cca] {
+  font-size: 12px;
+  opacity: 0.7;
+}
+.zt-card-title[data-v-c7aa3cca] {
+  font-size: 15px;
+  font-weight: 600;
+}
+.zt-empty[data-v-c7aa3cca] {
+  font-size: 13px;
+  opacity: 0.6;
+  text-align: center;
+  line-height: 1.8;
+}
+.zt-empty-sub[data-v-c7aa3cca] {
+  font-size: 12px;
+  opacity: 0.55;
+}
+.zt-font-name[data-v-c7aa3cca] {
+  font-size: 14px;
+  font-weight: 500;
+}
+/* 缺字体/失败状态标签可点击（跳缺失字体页）：手型 + 虚线提示 */
+.zt-status-link[data-v-c7aa3cca] {
+  cursor: pointer;
+  text-decoration: underline dashed;
+  text-underline-offset: 2px;
+}
+.zt-status-link[data-v-c7aa3cca]:hover {
+  filter: brightness(1.15);
+}
+.zt-font-meta[data-v-c7aa3cca] {
+  font-size: 12px;
+  opacity: 0.7;
+  word-break: break-all;
+}
+.zt-status-hint[data-v-c7aa3cca] {
+  opacity: 0.75;
+  white-space: nowrap;
+}
+
+.zt-card-title[data-v-1b5e831d] {
+  font-size: 15px;
+  font-weight: 600;
+}
+.zt-missing-col[data-v-1b5e831d] {
+  height: 560px;
+  overflow: auto;
+}
+.zt-list-body[data-v-1b5e831d] {
+  min-height: 60px;
+}
+.zt-uploads[data-v-1b5e831d] {
+  max-height: 120px;
+  overflow-y: auto;
+  border: 1px solid var(--v-divider-color);
+  border-radius: 4px;
+}
+.zt-empty[data-v-1b5e831d] {
+  font-size: 13px;
+  opacity: 0.6;
+  text-align: center;
+  line-height: 1.8;
+}
+.zt-font-name[data-v-1b5e831d] {
+  font-size: 14px;
+  font-weight: 500;
+}
+.zt-font-meta[data-v-1b5e831d] {
+  font-size: 12px;
+  opacity: 0.7;
+}
+.zt-tip[data-v-1b5e831d] {
+  opacity: 0.65;
+}
+
+/* 全局（非 scoped）：深色主题下浅色卡片 + 边框，提升可见性 */
+.zt-card-bg {
+  background: rgba(255, 255, 255, 0.05) !important;
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+}
+
+/* 根容器：吃满宿主宽度，窗口高度固定（不再随页面内容上下跳动） */
+.zt-app[data-v-c271debd] {
+  width: 100%;
+  height: min(720px, calc(100vh - 100px));  /* 固定高度：大屏 720px，小屏随视口收缩 */
+  min-height: 560px;
+  overflow: hidden;      /* 关键：绝不撑大/缩水宿主窗口 */
+  box-sizing: border-box;
+  position: relative;    /* 停用遮罩的定位基准 */
+}
+
+/* Flex 左右布局 */
+.zt-layout[data-v-c271debd] {
+  display: flex;
+  flex-direction: row;
+  width: 100%;
+  height: 100%;
+}
+
+/* 左侧导航：固定宽度，禁止压缩 */
+.zt-nav[data-v-c271debd] {
+  width: 180px;
+  flex-shrink: 0;
+  height: 100%;
+  border-right: 1px solid rgba(128, 128, 128, 0.25);
+  overflow-y: auto;
+  box-sizing: border-box;
+  padding: 16px 0;
+}
+.zt-nav-header[data-v-c271debd] {
+  padding: 0 16px 16px;
+}
+.zt-app-title[data-v-c271debd] {
+  font-weight: 600;
+  font-size: 16px;
+}
+.zt-app-subtitle[data-v-c271debd] {
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+/* 右侧内容区：吃掉所有剩余空间，高度严格跟随 .zt-app（固定窗口），内容多了内部滚 */
+.zt-content[data-v-c271debd] {
+  flex-grow: 1;
+  flex-shrink: 1;
+  height: 100%;
+  min-height: 0;        /* 允许收缩，避免小屏时内容区撑破固定窗口底部被裁剪 */
+  overflow-y: auto;     /* 内容多了只在右侧内部滚（用户要的“滑块”） */
+  overflow-x: hidden;
+  padding: 20px;
+  box-sizing: border-box;
+  position: relative;
+}
+
+/* 插件停用遮罩 */
+.zt-disabled-mask[data-v-c271debd] {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.zt-disabled-card[data-v-c271debd] {
+  padding: 24px 32px;
+  border-radius: 10px;
+  text-align: center;
+  min-width: 280px;
+}
+.zt-disabled-title[data-v-c271debd] {
+  font-size: 17px;
+  font-weight: 600;
+}
+.zt-disabled-desc[data-v-c271debd] {
+  font-size: 13px;
+  opacity: 0.7;
+  margin-top: 4px;
+}
+.zt-disabled-banner[data-v-c271debd] {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  right: 10px;
+  z-index: 15;
+}
+/* 右上角关闭按钮（常驻，悬浮于所有层之上） */
+.zt-close-btn[data-v-c271debd] {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 30;
+}
+.zt-loading[data-v-c271debd] {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+
+/* ── 手机端适配（视口媒体查询，对齐 subscribeplus 全屏方案） ── */
+.zt-mobile-nav[data-v-c271debd] {
+  display: none;   /* 默认隐藏，仅窄屏显示 */
+}
+@media (max-width: 820px) {
+  /* 手机端：全屏铺满视口。dvh 随浏览器地址栏动态收缩，竖屏自适应。 */
+.zt-app[data-v-c271debd] {
+    width: 100%;
+    height: 100dvh;
+    max-height: 100dvh;
+    min-height: 0;
+    border-radius: 0;
+    display: flex;
+    flex-direction: column;
+}
+  /* 隐藏左侧导航 */
+.zt-nav[data-v-c271debd] {
+    display: none;
+}
+  /* 布局列向排列：导航在顶部（order:-1），内容区吃满剩余高度 */
+.zt-layout[data-v-c271debd] {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+    height: auto;
+    width: 100%;
+}
+  /* 内容区吃满剩余空间（flex 链），内部滚动，底部无缝铺到屏幕底 */
+.zt-content[data-v-c271debd] {
+    flex: 1 1 auto;
+    min-height: 0;
+    height: auto;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 12px 12px 16px;
+}
+  /* 移动端导航：固定在顶部，宽度吃满（flex 链式排列），
+     右侧留 48px 给右上角关闭按钮；当前项 + 下拉按钮 */
+.zt-mobile-nav[data-v-c271debd] {
+    display: flex;
+    align-items: center;
+    flex: 0 0 auto;
+    order: -1;
+    position: static;
+    left: auto;
+    right: auto;
+    top: auto;
+    bottom: auto;
+    z-index: 40;
+    height: 56px;
+    padding: 0 48px 0 12px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+}
+.zt-mnav-current[data-v-c271debd] {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    height: 100%;
+    padding: 0 10px;
+    background: transparent;
+    border: none;
+    color: inherit;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+}
+.zt-mnav-caret[data-v-c271debd] {
+    opacity: 0.6;
+}
+  /* 底部选择面板：切换页面（对齐 subscribeplus 的 VBottomSheet 交互） */
+.zt-sheet-card[data-v-c271debd] {
+    padding: 12px 16px 20px;
+    border-top-left-radius: 16px;
+    border-top-right-radius: 16px;
+}
+.zt-sheet-title[data-v-c271debd] {
+    font-size: 15px;
+    font-weight: 600;
+    padding: 4px 4px 10px;
+}
+.zt-sheet-list[data-v-c271debd] {
+    padding: 8px 0 4px;
+}
+.zt-sheet-item[data-v-c271debd] {
+    margin: 2px 4px;
+}
+  /* 右上角关闭按钮：悬浮于页面右上角（导航占顶部，但按钮压在其右上角） */
+.zt-close-btn[data-v-c271debd] {
+    top: 10px;
+    right: 10px !important;
+    z-index: 50;
+}
+  /* 调整停用卡片宽度 */
+.zt-disabled-card[data-v-c271debd] {
+    min-width: 240px;
+    padding: 18px 24px;
+}
+}

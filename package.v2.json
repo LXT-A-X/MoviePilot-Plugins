@@ -7,6 +7,7 @@
     "icon": "embypeoplelocalize.jpg",
     "author": "LXT-A-X",
     "level": 1,
+    "v3": false,
     "history": {
       "v1.3.11": "架构升级 - 跨剧集批处理 + 运行控制全面开关化：① 新增 _process_items_batch 跨剧集批处理 - scan worker 收集 N 个剧集的所有 People 合并去重后一次性发 AI，max_tokens 自动放大，失败自动降级为单剧集串行翻译；预计整体扫描速度提升 5-10 倍；② 新增 CFG_BATCH_TITLES 配置（默认 10），UI「基础设置」可调整；③ 修复基础设置卡消失 bug（_row 条件返回 None 混入列表，改用 append 模式）；④ 修复保存配置卡顿/504 - stop_service 扫描线程 join 超时从 30s 降到 3s；⑤ 修复『翻译器或 LLM 未初始化』崩溃 - init_plugin 区分首次初始化 vs 配置热更新，扫描运行时不再重置运行时对象；⑥ 修复缓存回退 - _auto_save 改为每条目立即保存；⑦ 新增 _process_lock 全局互斥锁防止 scan/webhook 并发写回冲突；⑧ 新增『停止扫描/暂停任务/重试/刷新 LLM』四个开关，统一交互模式。",
       "v1.3.10": "修复多服务器 Webhook 冲突：① Webhook 调度队列 key 从 item_id 改为 server_id:item_id，避免多 Emby 服务器出现相同 ItemId 时任务互相覆盖；② 单 Worker 日志增加 ServerId 标识，便于排查。",
@@ -22,6 +23,7 @@
     "icon": "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/zitifenlei.png",
     "author": "LXT-A-X",
     "level": 1,
+    "v3": false,
     "history": {
       "v1.2.24": "手动上传的字幕完全不受「输出覆盖原文件」与其它输出模式影响：上传→子集化→生成新成品（原名.assfonts.ass）下载，从不覆盖上传的源字幕，源缓存子集化完即清理；覆盖模式只对媒体库/监控目录中的源字幕生效（按源文件位置判断——位于插件临时目录即视为手动上传来源，重试场景同样适用）。",
       "v1.2.23": "修复「输出覆盖原文件」开启时手动上传的子集化成品名残留 subset_<uuid>_ 前缀：上传临时缓存文件名带 subset_<32hex>_ 前缀，覆盖模式 out.replace(f) 直接把成品落到该路径、原名还原逻辑被吞掉——成品名变成 xxx 带前缀的文件；现覆盖模式先将成品落到「原始名」路径（同目录原名，如 虚構推理 S02E12.ass），再清理带前缀的临时缓存副本，不再出现奇奇怪怪的 uuid 前缀文件名。",

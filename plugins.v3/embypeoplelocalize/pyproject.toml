@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "moviepilot-embypeoplelocalize"
+version = "3.0.0"
+description = "大模型翻译 Emby 人名为中文（MoviePilot V3）"
+requires-python = ">=3.10"
+dependencies = [
+    "requests",
+]
