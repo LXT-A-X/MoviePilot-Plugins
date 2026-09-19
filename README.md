@@ -38,7 +38,7 @@ MoviePilot 插件仓库，兼容 **V2 与 V3**，收录实用插件。
 
 ---
 
-## Emby 演职人员中文化 (EmbyPeopleLocalize)
+## Emby 演职人员中文化 (EmbyPeopleLocalize)（在重构）
 
 利用大模型（LLM）把 Emby 中英文/罗马音/日文人名翻译为正式中文名并写回。
 
