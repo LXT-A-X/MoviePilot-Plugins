@@ -356,15 +356,20 @@ def normalize_name(name: str) -> str:
 
 
 def _tokenize(name: str) -> Set[str]:
-    """按空格与 camelCase 边界切词。"""
+    """切词：空格/连字符/下划线 + 字母-数字边界 + camelCase 边界。
+
+    增强（Fix）：让 `DFPOP1-W5`、`DFPOP1Std-W5`、`DFPOP1 Std W5` 都能拆出
+    {dfpop1, w5} / {dfpop1, std, w5} 这类词元，使字幕写 DFPOP1-W5、字库是
+    DFPOP1Std-W5（华康/Adobe 喜欢加 Std/Win/GB/B5 中缀）时也能重合命中。
+    """
     words = set()
-    for part in name.split():
-        # camelCase 切分
-        parts = re.split(r"(?<=[a-z0-9])(?=[A-Z])", part)
+    # 先按 空格/连字符/下划线 切段，再在段内切 camelCase 与数字边界
+    for part in re.split(r"[\s_\-]+", name):
+        parts = re.split(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Za-z])(?=[0-9])", part)
         for p in parts:
-            p = p.strip()
+            p = p.strip().lower()
             if p:
-                words.add(p.lower())
+                words.add(p)
     return words
 
 
@@ -493,17 +498,20 @@ def score_font(query_name: str, query_weight: int, query_italic: bool,
         return 0.0
 
     # 属性修正（仅对候选有效，小幅惩罚）
+    # Fix：华康等字体 usWeightClass 常是 400/500，而 ASS 字幕常标 Bold(700)，
+    # 原来的 0.25 惩罚会把名字明确命中的候选打出阈值。降档为排序级微调，
+    # 名字匹配越强越不该因字重差被否（字重差异用于同名候选间的优选）。
     penalty = 0.0
     font_weight = int(font.get("weight") or 400)
     font_italic = bool(font.get("italic"))
     if query_weight and font_weight:
         diff_weight = abs(font_weight - query_weight)
         if diff_weight > 150:
-            penalty += 0.25
+            penalty += 0.15
         elif diff_weight > 50:
-            penalty += 0.10
+            penalty += 0.06
     if query_italic != font_italic:
-        penalty += 0.15
+        penalty += 0.10
     score = max(0.0, base - penalty)
 
     # 格式加成：ttf 0.030 > ttc 0.020 > otf 0.010 > otc 0
