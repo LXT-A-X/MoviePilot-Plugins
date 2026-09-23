@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import base64
 import io
 import logging
 from typing import Iterable, List, Optional, Set, Tuple
@@ -38,7 +39,13 @@ _NAME_TABLE_TAG = 1851878757
 CHUNK_SIZE = 80   # 每行最多 80 个 ASCII 字符
 OFFSET = 33       # 6-bit 值 + 33（'!')，与 ASS 规范一致
 
-_CH_MAP = [chr(i + OFFSET) for i in range(64)]
+# 核心：base64 的字母表正好覆盖 6-bit 值 0..63，与 UU 变体逐字节对齐，
+# 因此用 bytes.translate 做字符平移 + 尾部去 '=' + 80 字符行宽插入换行，
+# 即可完全等价于 fontInAss c_utils.pyx 的 uuencode，且是 C 级速度（性能-1）。
+_B64_ALPHABET = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+_UU_ALPHABET = bytes(range(OFFSET, OFFSET + 64))   # '!' .. '`'
+_B64_TO_UU = bytes.maketrans(_B64_ALPHABET, _UU_ALPHABET)
+_B64_PAD = b"="
 
 
 def uuencode(data: bytes) -> str:
@@ -52,37 +59,16 @@ def uuencode(data: bytes) -> str:
     """
     if not data:
         return ""
-    out: List[str] = []
-    chars_in_line = 0
-    n = len(data)
-    i = 0
-    limit = n - (n % 3)
-    while i < limit:
-        b0, b1, b2 = data[i], data[i + 1], data[i + 2]
-        packed = (b0 << 16) | (b1 << 8) | b2
-        out.append(_CH_MAP[(packed >> 18) & 0x3F])
-        out.append(_CH_MAP[(packed >> 12) & 0x3F])
-        out.append(_CH_MAP[(packed >> 6) & 0x3F])
-        out.append(_CH_MAP[packed & 0x3F])
-        chars_in_line += 4
-        if chars_in_line == CHUNK_SIZE:
-            out.append("\n")
-            chars_in_line = 0
-        i += 3
-    rem = n - limit
-    if rem == 1:
-        packed = data[i] << 16
-        out.append(_CH_MAP[(packed >> 18) & 0x3F])
-        out.append(_CH_MAP[(packed >> 12) & 0x3F])
-    elif rem == 2:
-        packed = (data[i] << 16) | (data[i + 1] << 8)
-        out.append(_CH_MAP[(packed >> 18) & 0x3F])
-        out.append(_CH_MAP[(packed >> 12) & 0x3F])
-        out.append(_CH_MAP[(packed >> 6) & 0x3F])
-    # 尾部恰好满一行时去掉刚插入的换行
-    if chars_in_line == 0 and out and out[-1] == "\n":
-        out.pop()
-    return "".join(out)
+    # b64 每 3 字节 -> 4 个 6-bit 值，与 UU 分组一致；但 UU 字符集本身含 '='（值28），
+    # 不能用 rstrip 去填充——按原始数据长度计算 b64 填充数精确裁剪（轻微）。
+    enc = base64.b64encode(data).translate(_B64_TO_UU)
+    pad = (3 - len(data) % 3) % 3
+    if pad:
+        enc = enc[:-pad]
+    if len(enc) <= CHUNK_SIZE:
+        return enc.decode("ascii")
+    lines = (enc[i:i + CHUNK_SIZE] for i in range(0, len(enc), CHUNK_SIZE))
+    return (b"\n".join(lines)).decode("ascii")
 
 
 def _sanitize_file_stem(name: str) -> str:

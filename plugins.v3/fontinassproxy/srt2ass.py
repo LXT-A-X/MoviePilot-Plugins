@@ -53,7 +53,7 @@ def srt_to_ass(srt_text: str, font_name: str = "思源黑体 CN",
         if line.isdigit() and ln + 1 < len(lines) and _TIME_DETECT.match(lines[ln + 1]):
             # 新字幕块开始
             if tmp_lines:
-                sub_lines += tmp_lines.replace("\n", "\\n") + "\n"
+                sub_lines += tmp_lines.replace("\n", "\\N") + "\n"
             tmp_lines = ""
             line_count = 0
         else:
@@ -65,7 +65,7 @@ def srt_to_ass(srt_text: str, font_name: str = "思源黑体 CN",
             line_count += 1
         ln += 1
 
-    sub_lines += tmp_lines.replace("\n", "\\n") + "\n"
+    sub_lines += tmp_lines.replace("\n", "\\N") + "\n"
 
     sub_lines = _TIME_CAPTURE.sub(r"\1.\2", sub_lines)
     sub_lines = _TIME_ARROW.sub(",", sub_lines)

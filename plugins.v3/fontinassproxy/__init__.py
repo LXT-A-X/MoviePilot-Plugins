@@ -8,8 +8,6 @@
 非字幕路径透传、字幕路径走本插件处理。无需 nginx，也无需走 MP 主端口。
 
 实现要点：
-- 插件 API 端点（/subtitle）声明 ``"allow_anonymous": True``，字幕请求免鉴权直转。
-- 直接返回 ``starlette.Response`` 即原样透传（``/api/v1/...`` 绕开统一响应包装）。
 - 子集化走线程池 + 全局信号量（Semaphore 4），并优先使用 uharfbuzz（C）加速，
   失败自动回退 fontTools。
 - 宿主导入使用稳定 SDK（``app.sdk.logging`` / ``app.sdk.config``），适配 MoviePilot V3。
@@ -30,7 +28,6 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
-from starlette.responses import Response
 from fastapi import Request
 
 from .assparser import clip_dialogues_by_ticks, parse_ass
@@ -82,6 +79,7 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
     "srt_default_font": "思源黑体 CN",
     "srt_font_size": 20,
     "srt_primary_colour": "&H00FFFFFF",
+    "srt_to_ass_enabled": True,   # SRT 转 ASS：关闭后 .srt/.subrip 原样透传（不做字体注入）
     "cache_enabled": True,
     "cache_ttl_hours": 24,
     "max_concurrent_subset": 4,
@@ -111,18 +109,25 @@ _LOG_FALLBACK_RE = re.compile(
 
 
 def _tail_log(path: str, n_lines: int = 300) -> List[str]:
-    """从文件尾部读最后 n_lines 行（避免整文件加载）。"""
+    """从文件尾部读最后 n_lines 行（避免整文件加载）。
+
+    性能-7：用累计行数变量代替每轮 join+splitlines 全量重算，避免 O(块数²)。
+    """
     with open(path, "rb") as f:
         f.seek(0, 2)
         size = f.tell()
         block = 8192
         chunks: List[bytes] = []
         remaining = size
-        while remaining > 0 and len(b"".join(chunks).splitlines()) < n_lines * 3:
+        seen_lines = 0
+        # 多读几倍行数（n_lines*3），确保整行拿全（避免从行中间截断）
+        while remaining > 0 and seen_lines < n_lines * 3:
             read = min(block, remaining)
             f.seek(remaining - read)
-            chunks.append(f.read(read))
+            chunk = f.read(read)
             remaining -= read
+            chunks.append(chunk)
+            seen_lines += chunk.count(b"\n")
         content = b"".join(reversed(chunks)).decode("utf-8", errors="ignore")
     return content.splitlines()[-n_lines:]
 
@@ -137,7 +142,7 @@ class FontInAssProxy(_PluginBase):
     plugin_name = "字幕字体代理"
     plugin_desc = "反代 Emby/Jellyfin 字幕流，实时子集化并嵌入字体（[Fonts] 段），未装字体的设备也能正常显示特效字幕"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/fontinassproxy.jpg"
-    plugin_version = "3.0.2"
+    plugin_version = "3.1.0"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X/MoviePilot-Plugins"
     plugin_config_prefix = "fontinassproxy_"
@@ -164,6 +169,7 @@ class FontInAssProxy(_PluginBase):
     def init_plugin(self, config: Optional[Dict[str, Any]] = None) -> None:
         self.stop_service()
         self._enabled = False
+        self._missing_notified = False  # 重载后允许再次触发缺失通知（轻微-5）
         self._config = {}
         if not config:
             return
@@ -188,6 +194,8 @@ class FontInAssProxy(_PluginBase):
         缺失的包补装；fontTools 版本过低（<4.55，CFF/大字体子集化有 bug）自动升级。
         检查放后台线程，不阻塞插件启动。
         """
+        # 已确认满足的依赖集合（进程内缓存，避免每次 init 都跑 pip 子进程）
+        self._deps_ok: set = set()
         def _run():
             try:
                 # 1) 缺失/过旧 -> 收集要装的
@@ -197,11 +205,18 @@ class FontInAssProxy(_PluginBase):
                     ver = tuple(int(x) for x in (getattr(ft, "version", "0") or "0").split(".")[:2])
                     if ver < (4, 55):
                         need.append("fonttools>=4.55.0")
+                    else:
+                        self._deps_ok.add("fontTools")
                 except Exception:
                     need.append("fonttools>=4.55.0")
-                for mod in ("watchdog", "cachetools", "httpx", "charset_normalizer"):
+                # 依赖检查补 uharfbuzz（中等-2 缺静默回退极慢）+ webockets（中等-7 WS 透传）
+                for mod in ("watchdog", "cachetools", "httpx", "charset_normalizer",
+                            "uharfbuzz", "websockets"):
+                    if mod in self._deps_ok:
+                        continue
                     try:
                         importlib.import_module(mod)
+                        self._deps_ok.add(mod)
                     except Exception:
                         need.append(mod)
                 if not need:
@@ -223,12 +238,16 @@ class FontInAssProxy(_PluginBase):
     def _apply_runtime(self, cfg: Dict[str, Any]) -> None:
         """按最新配置重建运行时资源（启动与配置热生效共用）。"""
         self._base_data_dir = self._data_dir()
+        # 无条件先释放旧缓存：cache_enabled 关闭时必须真正停用（严重-3）
+        self._cache = None
         # 并发闸门与线程池
         try:
-            max_con = max(1, int(cfg.get("max_concurrent_subset") or 2))
+            max_con = cfg.get("max_concurrent_subset")
+            max_con = max(1, int(max_con if max_con is not None else _DEFAULT_CONFIG["max_concurrent_subset"]))
         except (TypeError, ValueError):
-            max_con = 2
-        self._semaphore = asyncio.Semaphore(max_con)
+            max_con = int(_DEFAULT_CONFIG["max_concurrent_subset"])
+        # threading 信号量：跨事件循环安全（反代 loop 与 MP 主 loop 共用同一实例）
+        self._semaphore = threading.BoundedSemaphore(max_con)
         self._executor = ThreadPoolExecutor(
             max_workers=max_con * 2, thread_name_prefix="fiasub")
 
@@ -244,10 +263,11 @@ class FontInAssProxy(_PluginBase):
         # 缓存
         if cfg.get("cache_enabled"):
             cache_dir = str(cfg.get("cache_dir") or "") or os.path.join(self._base_data_dir, "cache")
+            ttl = cfg.get("cache_ttl_hours")
             self._cache = SubtitleCache(
                 cache_dir,
                 mem_size=256,
-                ttl_hours=float(cfg.get("cache_ttl_hours") or 720),
+                ttl_hours=float(ttl if ttl is not None else _DEFAULT_CONFIG["cache_ttl_hours"]),
             )
             _app_logger.info(f"字幕缓存目录: {self._cache.cache_dir}")
 
@@ -290,7 +310,11 @@ class FontInAssProxy(_PluginBase):
         # Emby/Jellyfin 媒体流端点（videos 播放流 / 音频 / 字幕预览不在此列）
         if "/videos/" in path and ("/stream." in path or path.rstrip("/").endswith("/stream")):
             return True
-        if "/audios/" in path and "/stream." in path:
+        if "/audios/" in path and ("/stream." in path or "universal" in path):
+            return True
+        if "/items/" in path and path.endswith("/download"):
+            return True
+        if "/hls1/" in path or "/hlsmain/" in path:
             return True
         if path.endswith((".mp4", ".mkv", ".ts", ".m2ts", ".mp3", ".flac", ".m4a",
                           ".opus", ".ogg", ".aac", ".webm", ".mov", ".wav")):
@@ -334,15 +358,13 @@ class FontInAssProxy(_PluginBase):
             pass
         try:
             if self._upstream:
-                try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        loop.create_task(self._upstream.aclose())
-                    else:
-                        loop.run_until_complete(self._upstream.aclose())
-                except Exception:
-                    pass
+                up = self._upstream
                 self._upstream = None
+                # 独立线程 + 独立事件循环关闭，避免主/反代循环绑定问题（轻微-3）
+                threading.Thread(
+                    target=lambda: asyncio.run(up.aclose()),
+                    daemon=True, name="FontInAssProxy-close-upstream",
+                ).start()
         except Exception:
             self._upstream = None
 
@@ -395,18 +417,18 @@ class FontInAssProxy(_PluginBase):
         if not index:
             return
         try:
-            added, removed = index.drain_changes()
+            added, removed, modified = index.drain_changes()
         except Exception as e:
             _app_logger.warning(f"字体变更统计失败: {e}")
             return
-        if added or removed:
-            _app_logger.info(f"字体目录变更：新增 {added} 个，删除 {removed} 个")
+        if added or removed or modified:
+            _app_logger.info(f"字体目录变更：新增 {added} 个，修改 {modified} 个，删除 {removed} 个")
             if not bool((self._config or {}).get("notify_enabled", True)):
                 return
             try:
                 self.post_message(
                     title="字幕字体代理：字体索引更新",
-                    text=f"检测到字体目录变化：新增 {added} 个字体，删除 {removed} 个。已自动更新索引并生效。",
+                    text=f"检测到字体目录变化：新增 {added} 个、修改 {modified} 个、删除 {removed} 个。已自动更新索引并生效。",
                 )
             except Exception:
                 pass
@@ -423,14 +445,6 @@ class FontInAssProxy(_PluginBase):
     # ------------------------------------------------------------------ API
     def get_api(self) -> List[Dict[str, Any]]:
         return [
-            {
-                "path": "/subtitle",
-                "endpoint": self.handle_subtitle,
-                "methods": ["GET"],
-                "allow_anonymous": True,   # auth: None 会被强制改成 apikey，匿名开关是它
-                "summary": "字幕字体代理流端点",
-                "description": "内置反代（8097）拦截字幕路径，处理后返回嵌入字体的 ASS",
-            },
             {"path": "/config", "endpoint": self.api_get_config, "methods": ["GET"], "auth": "bear", "summary": "获取插件配置"},
             {"path": "/config", "endpoint": self.api_save_config, "methods": ["POST"], "auth": "bear", "summary": "保存插件配置"},
             {"path": "/status", "endpoint": self.api_status, "methods": ["GET"], "auth": "bear", "summary": "运行状态"},
@@ -561,13 +575,13 @@ class FontInAssProxy(_PluginBase):
             pass
         candidates += ["/config/logs/plugins/fontinassproxy.log", "/config/logs/moviepilot.log"]
         raw_rows: List[str] = []
-        seen: Optional[str] = None
+        seen: Set[str] = set()
         for path in candidates:
             if not os.path.exists(path):
                 continue
-            if seen == path:
+            if path in seen:
                 continue
-            seen = path
+            seen.add(path)
             try:
                 rows = _tail_log(path, n)
             except OSError:
@@ -648,17 +662,6 @@ class FontInAssProxy(_PluginBase):
         return self._ok({"removed": removed}, f"已清空缓存（{removed} 个文件）")
 
     # ------------------------------------------------------------------ 主链路
-    async def handle_subtitle(self, request: Request) -> Response:
-        """插件 API 端点（/api/v1/plugin/FontInAssProxy/subtitle）。"""
-        try:
-            original_uri = request.headers.get("X-Original-URI") or str(request.url)
-            status, body, headers = await self._serve_uri(
-                original_uri, dict(request.headers), request.method)
-            return Response(content=body, status_code=status, headers=headers)
-        except Exception as e:
-            _app_logger.exception(f"字幕处理异常: {e}")
-            return Response(content=b"", status_code=500, media_type="text/plain")
-
     async def _serve_uri(self, original_uri: str,
                          headers: Dict[str, str], method: str = "GET",
                          body: bytes = b"") -> Tuple[int, bytes, Dict[str, str]]:
@@ -677,6 +680,9 @@ class FontInAssProxy(_PluginBase):
         is_srt = fmt in (".srt", ".subrip")
         if (not is_ass and not is_srt) or not self._enabled:
             return await self._passthrough_uri(original_uri, headers, method, body)
+        # SRT 转 ASS 开关：关闭时 SRT 字幕原样透传（不注入字体、不转 ASS）
+        if is_srt and not bool((self._config or {}).get("srt_to_ass_enabled", True)):
+            return await self._passthrough_uri(original_uri, headers, method, body)
 
         ticks = 0
         try:
@@ -692,6 +698,7 @@ class FontInAssProxy(_PluginBase):
         if self._cache:
             key = self._cache.make_key(
                 m.group("item"), m.group("msid"), m.group("idx"), fmt,
+                str((self._config or {}).get("emby_url") or ""),  # 换回源地址后旧缓存失效
                 self._index.db.index_version() if self._index else 0,
                 self._srt_cfg_ver(),
             )
@@ -701,11 +708,10 @@ class FontInAssProxy(_PluginBase):
                 return 200, self._clip_ass(cached, ticks), self._ass_headers()
 
         # 全局并发闸门：加速后单请求 ~1s，等待 3s 内腾不出许可才降级透传
-        # （字幕晚 3 秒出来，远比完全没有字体好）
+        # （字幕晚 3 秒出来，远比完全没有字体好）；threading 信号量 + to_thread 阻塞等待
         if self._semaphore:
-            try:
-                await asyncio.wait_for(self._semaphore.acquire(), timeout=3.0)
-            except asyncio.TimeoutError:
+            acquired = await asyncio.to_thread(self._semaphore.acquire, 3.0)
+            if not acquired:
                 _app_logger.warning("子集化并发已满，请求降级透传")
                 return await self._passthrough_uri(original_uri, headers, method, body)
             try:
@@ -725,16 +731,31 @@ class FontInAssProxy(_PluginBase):
         async def do_process():
             return await self._build_ass(headers, original_uri, full_uri, is_srt_fmt)
 
+        is_leader = True
         if key:
-            body = await self._flight.run(key, do_process)
+            body, is_leader = await self._flight.run(key, do_process)
         else:
             body = await do_process()
 
         if body is None:
+            # 中等-1: passthrough_on_error 开关决定失败时透传原始字幕 or 返回 500
+            if not bool((self._config or {}).get("passthrough_on_error")):
+                _app_logger.warning("按配置 passthrough_on_error=False，处理失败返回 500")
+                return 500, b"subtitle processing failed", {
+                    "content-type": "text/plain; charset=utf-8"}
+            # 轻微-12: 复用本请求已回源的完整字幕字节，不再二次回源
+            fb = getattr(self, "_fallback_raw", None)
+            if fb:
+                self._fallback_raw = None
+                ct = "text/x-ssa; charset=utf-8"
+                if is_srt_fmt:
+                    ct = "text/plain; charset=utf-8"
+                _app_logger.info(f"失败透传复用已回源字幕 {len(fb) / 1024:.1f}KB（免二次回源）")
+                return 200, self._clip_ass(fb, ticks), {"content-type": ct, "Cache-Control": "no-cache"}
             return await self._passthrough_uri(original_uri, headers, method, req_body)
 
-        if key and self._cache:
-            await self._cache.set(key, body)
+        if key and self._cache and is_leader:
+            await self._cache.set(key, body)  # 仅 single-flight leader 写盘（轻微-9）
 
         return 200, self._clip_ass(body, ticks), self._ass_headers()
 
@@ -758,7 +779,8 @@ class FontInAssProxy(_PluginBase):
 
     def _srt_cfg_ver(self) -> str:
         cfg = self._config or {}
-        return f"{cfg.get('srt_default_font')}|{cfg.get('srt_font_size')}|{cfg.get('srt_primary_colour')}"
+        return (f"{cfg.get('srt_default_font')}|{cfg.get('srt_font_size')}|"
+                f"{cfg.get('srt_primary_colour')}|{cfg.get('srt_to_ass_enabled', True)}")
 
     async def _build_ass(self, headers: Dict[str, str], original_uri: str,
                          full_uri: str, is_srt_fmt: bool) -> Optional[bytes]:
@@ -776,10 +798,12 @@ class FontInAssProxy(_PluginBase):
         # 剥离客户端 Range/If-Range：字幕必须取完整内容，否则 Emby 返回 206 片段
         up_headers = {k: v for k, v in headers.items()
                       if k.lower() not in ("range", "if-range")}
-        status, raw, _ = await self._upstream.fetch(full_uri, up_headers)
+        status, raw, raw_headers = await self._upstream.fetch(full_uri, up_headers)
         if status != 200 or not raw:
             _app_logger.warning(f"字幕回源失败 status={status}（透传原始）: {original_uri}")
             return None
+        # 记录这次已回源的字幕原始字节：后续处理失败可原样透传，避免二次回源（轻微-12）
+        self._fallback_raw = raw
 
         text = try_decode(raw)
         if text is None:
@@ -830,6 +854,7 @@ class FontInAssProxy(_PluginBase):
 
         def worker(item) -> Tuple[str, str, str]:
             name, w, it, charset = item
+            path = "?"; face = 0  # 异常时用兜底值，避免 dir() 探测
             try:
                 t_load = time.perf_counter()
                 resolved = self._resolve_font(name, w, it)
@@ -849,10 +874,9 @@ class FontInAssProxy(_PluginBase):
                 )
                 return name, miss, entry
             except Exception as e:
-                # 临时诊断：打印完整堆栈定位真实错误源（bad parameter 等）
                 import traceback
                 _app_logger.error(f"子集化 worker 异常 [{name}] chars={len(set(charset))} "
-                                  f"face={face if 'face' in dir() else '?'} path={path if 'path' in dir() else '?'}\n"
+                                  f"face={face} path={path}\n"
                                   f"{traceback.format_exc()}")
                 return name, f"error:{e}", ""
 
@@ -867,8 +891,6 @@ class FontInAssProxy(_PluginBase):
                 self._record_missing(name)
             elif status2.startswith("error"):
                 errors.append(f"子集化失败[{name}] {status2}")
-            elif status2 == "busy":
-                errors.append(f"并发占用[{name}]")
             elif status2:
                 errors.append(f"缺字形[{name}]({status2})")
             if entry:
@@ -899,20 +921,33 @@ class FontInAssProxy(_PluginBase):
         _app_logger.info("---------------- 打印 字幕处理完成 分隔线 ----------------")
         return ass_out
 
+    # 字体字节缓存：上限 256MB（严重-5），按总字节 LRU 淘汰
+    _FONT_CACHE_MAX_BYTES = 256 * 1024 * 1024
+
     def _resolve_font(self, name: str, weight: int, italic: bool) -> Optional[Tuple[str, int, bytes]]:
-        """匹配字体文件并读取（LRU 缓存字节）。"""
+        """匹配字体文件并读取（LRU 缓存字节，键含 mtime 防陈旧字节）。"""
         index = self._index
         if not index:
             return None
         hit = index.match(name, weight, italic)
+        replaced = False
         if hit is None:
             def_font = str((self._config or {}).get("srt_default_font") or "思源黑体 CN")
             if name != def_font:
                 hit = index.match(def_font, 400, False)
+                if hit is not None:
+                    replaced = True  # 原字体未匹配、用默认字体兜底（样式已悄悄改变）
         if hit is None:
             return None
+        if replaced:
+            self._record_missing(name)  # 如实记录「被替换」的字体（中等-6）
+            _app_logger.warning(f"字体未匹配 {name}，已用默认字体兜底替换")
         path, face = hit
-        lock_key = (path, face)
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            mtime = 0.0
+        lock_key = (path, face, mtime)
         with self._font_cache_lock:
             bits = self._font_cache.get(lock_key)
         if bits is None:
@@ -923,9 +958,14 @@ class FontInAssProxy(_PluginBase):
                 _app_logger.warning(f"读取字体失败: {path}")
                 return None
             with self._font_cache_lock:
+                if lock_key in self._font_cache:
+                    return path, face, bits
+                # 字节限容 LRU 淘汰
                 self._font_cache[lock_key] = bits
-                while len(self._font_cache) > 32:
-                    self._font_cache.popitem(last=False)
+                total = sum(len(v) for v in self._font_cache.values())
+                while total > self._FONT_CACHE_MAX_BYTES and self._font_cache:
+                    _, v = self._font_cache.popitem(last=False)
+                    total -= len(v)
         return path, face, bits
 
     def _record_missing(self, name: str) -> None:

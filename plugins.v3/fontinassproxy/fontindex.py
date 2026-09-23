@@ -17,6 +17,8 @@ import re
 import sqlite3
 import threading
 import time
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
@@ -67,6 +69,8 @@ CREATE TABLE IF NOT EXISTS font_aliases (
 CREATE INDEX IF NOT EXISTS idx_alias ON font_aliases(alias);
 CREATE INDEX IF NOT EXISTS idx_alias_norm
     ON font_aliases(alias_norm COLLATE NOCASE);
+CREATE INDEX IF NOT EXISTS idx_font_id
+    ON font_aliases(font_id);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 """
 
@@ -394,16 +398,16 @@ def _alias_exact(q_norm: str, cand: Dict) -> bool:
     与 LIKE 包含不同：全等不会让「微软雅黑」吃掉「微软雅黑 UI」的查询。
     检查范围：内部名(family/subfamily/fullname/psname) + 全部别名 + 文件名字干。
     """
-    names = [
-        cand.get("family") or "", cand.get("subfamily") or "",
-        cand.get("fullname") or "", cand.get("psname") or "",
+    norms = [
+        normalize_name(cand.get("family") or ""),
+        normalize_name(cand.get("subfamily") or ""),
+        normalize_name(cand.get("fullname") or ""),
+        normalize_name(cand.get("psname") or ""),
     ]
-    names += [t for _k, _l, t in (cand.get("names") or [])]
-    names.append(os.path.splitext(os.path.basename(cand.get("path") or ""))[0])
-    for n in names:
-        if n and normalize_name(n) == q_norm:
-            return True
-    return False
+    norms += [an for _k, _l, _t, an in (cand.get("names") or []) if an]
+    norms.append(normalize_name(
+        os.path.splitext(os.path.basename(cand.get("path") or ""))[0]))
+    return q_norm in norms
 
 
 def _cjk_grams(name: str) -> Set[str]:
@@ -439,19 +443,22 @@ def score_font(query_name: str, query_weight: int, query_italic: bool,
         font.get("family") or "", font.get("subfamily") or "",
         font.get("fullname") or "", font.get("psname") or "",
     ]
-    for kind, lang, text in font.get("names") or []:
+    # 性能-2：aliases_norm 直接用库里现成的 alias_norm（文件名字干也已在
+    # replace_path 时作为 kind=filename 别名入库），不再每候选跑正则归一化。
+    aliases_norm = [normalize_name(a) for a in aliases]
+    for kind, lang, text, anorm in font.get("names") or []:
         aliases.append(text)
+        aliases_norm.append(anorm or normalize_name(text))
 
     base = 0.0
     # 1) 内部名（最高优先级；先测内部名，避免「微软雅黑.ttf」顶掉内部名更精确的
     #    「Microsoft YaHei UI」——精确匹配不能输给部分匹配）
-    for alias in aliases:
-        if not alias:
+    for alias_norm in aliases_norm:
+        if not alias_norm:
             continue
-        alias_norm = normalize_name(alias)
         if alias_norm == query_norm:
             base = max(base, 0.95)
-        elif alias_norm and (alias_norm in query_norm or query_norm in alias_norm):
+        elif alias_norm in query_norm or query_norm in alias_norm:
             base = max(base, 0.75)
 
     # 2) 文件名（降为兜底：仅当内部名未命中时才可能主导）
@@ -579,53 +586,76 @@ class _FontDB:
                 "SELECT mtime, size FROM fonts WHERE path=? LIMIT 1", (path,)
             ).fetchone()
 
+    @staticmethod
+    def _replace_one(cur, path: str, faces: List[Dict]) -> None:
+        """替换单个 path 的全部 face（调用方持锁/事务内执行）。
+
+        性能-3：先按 path 取旧 id 列表，按 id 删别名，再删 fonts 行——
+        避免 NOT IN (SELECT id FROM fonts) 的全表孤儿清理。
+        """
+        old_ids = [r[0] for r in cur.execute(
+            "SELECT id FROM fonts WHERE path=?", (path,)).fetchall()]
+        for oid in old_ids:
+            cur.execute("DELETE FROM font_aliases WHERE font_id=?", (oid,))
+        cur.execute("DELETE FROM fonts WHERE path=?", (path,))
+        for face in faces:
+            cur.execute(
+                "INSERT INTO fonts(path, face_index, family, subfamily, fullname, "
+                "psname, weight, italic, mtime, size, indexed_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (face["path"], face["face_index"], face["family"],
+                 face["subfamily"], face["fullname"], face["psname"],
+                 face["weight"], face["italic"], face["mtime"], face["size"],
+                 time.time()),
+            )
+            font_id = cur.lastrowid
+            seen = set()
+            for kind, lang, text in face.get("names") or []:
+                t = text.strip()
+                if not t or (kind, lang, t) in seen:
+                    continue
+                seen.add((kind, lang, t))
+                cur.execute(
+                    "INSERT INTO font_aliases(font_id, alias, alias_norm, kind, lang) "
+                    "VALUES(?,?,?,?,?)",
+                    (font_id, t, normalize_name(t), kind, lang),
+                )
+            # 基础别名：family/fullname/psname + 文件名字干（kind=filename，优先级最高）
+            for alias, kind in ((face["family"], "family"),
+                                (face["fullname"], "fullname"),
+                                (face["psname"], "psname"),
+                                (os.path.splitext(os.path.basename(face["path"]))[0],
+                                 "filename")):
+                if alias:
+                    cur.execute(
+                        "INSERT INTO font_aliases(font_id, alias, alias_norm, kind, lang) "
+                        "VALUES(?,?,?,?,?)",
+                        (font_id, alias, normalize_name(alias), kind, "en"),
+                    )
+
     def replace_path(self, path: str, faces: List[Dict]):
         """删除 path 全部 face 并重新插入（增量更新单文件）。"""
         with self._lock:
             cur = self.conn.cursor()
-            cur.execute("DELETE FROM fonts WHERE path=?", (path,))
-            for face in faces:
-                cur.execute(
-                    "INSERT INTO fonts(path, face_index, family, subfamily, fullname, "
-                    "psname, weight, italic, mtime, size, indexed_at) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                    (face["path"], face["face_index"], face["family"],
-                     face["subfamily"], face["fullname"], face["psname"],
-                     face["weight"], face["italic"], face["mtime"], face["size"],
-                     time.time()),
-                )
-                font_id = cur.lastrowid
-                seen = set()
-                for kind, lang, text in face.get("names") or []:
-                    t = text.strip()
-                    if not t or (kind, lang, t) in seen:
-                        continue
-                    seen.add((kind, lang, t))
-                    cur.execute(
-                        "INSERT INTO font_aliases(font_id, alias, alias_norm, kind, lang) "
-                        "VALUES(?,?,?,?,?)",
-                        (font_id, t, normalize_name(t), kind, lang),
-                    )
-                # 基础别名：family/fullname/psname + 文件名字干（kind=filename，优先级最高）
-                for alias, kind in ((face["family"], "family"),
-                                    (face["fullname"], "fullname"),
-                                    (face["psname"], "psname"),
-                                    (os.path.splitext(os.path.basename(face["path"]))[0],
-                                     "filename")):
-                    if alias:
-                        cur.execute(
-                            "INSERT INTO font_aliases(font_id, alias, alias_norm, kind, lang) "
-                            "VALUES(?,?,?,?,?)",
-                            (font_id, alias, normalize_name(alias), kind, "en"),
-                        )
-            cur.execute("DELETE FROM font_aliases WHERE font_id NOT IN (SELECT id FROM fonts)")
+            self._replace_one(cur, path, faces)
+            self.conn.commit()
+
+    def replace_paths_batch(self, items: List[Tuple[str, List[Dict]]]) -> None:
+        """批量替换（性能-4）：一批文件共享一个事务提交。items=[(path, faces), ...]"""
+        with self._lock:
+            cur = self.conn.cursor()
+            for path, faces in items:
+                self._replace_one(cur, path, faces)
             self.conn.commit()
 
     def remove_path(self, path: str):
         with self._lock:
             cur = self.conn.cursor()
+            old_ids = [r[0] for r in cur.execute(
+                "SELECT id FROM fonts WHERE path=?", (path,)).fetchall()]
+            for oid in old_ids:
+                cur.execute("DELETE FROM font_aliases WHERE font_id=?", (oid,))
             cur.execute("DELETE FROM fonts WHERE path=?", (path,))
-            cur.execute("DELETE FROM font_aliases WHERE font_id NOT IN (SELECT id FROM fonts)")
             self.conn.commit()
 
     def font_count(self) -> int:
@@ -645,7 +675,8 @@ class _FontDB:
             rows = self.conn.execute(
                 "SELECT f.id, f.path, f.face_index, f.family, f.subfamily, "
                 "f.fullname, f.psname, f.weight, f.italic, "
-                "GROUP_CONCAT(a.alias, char(1)) "
+                "GROUP_CONCAT(a.alias, char(1)), "
+                "GROUP_CONCAT(a.alias_norm, char(1)) "
                 "FROM fonts f JOIN font_aliases a ON a.font_id = f.id "
                 "WHERE a.alias_norm LIKE ? COLLATE NOCASE "
                 "GROUP BY f.id "
@@ -675,7 +706,8 @@ class _FontDB:
         sql = (
             "SELECT f.id, f.path, f.face_index, f.family, f.subfamily, "
             "f.fullname, f.psname, f.weight, f.italic, "
-            "GROUP_CONCAT(a.alias, char(1)), (" + hits_expr + ") AS hits "
+            "GROUP_CONCAT(a.alias, char(1)), "
+            "GROUP_CONCAT(a.alias_norm, char(1)), (" + hits_expr + ") AS hits "
             "FROM fonts f JOIN font_aliases a ON a.font_id = f.id "
             f"WHERE {where_or} "
             "GROUP BY f.id "
@@ -688,14 +720,20 @@ class _FontDB:
 
     @staticmethod
     def _row_to_cand(r) -> Dict:
-        # r: 前 9 列同 fonts 表，r[9] 为该字体全部别名（\x01 分隔），r[10] 为 hits（宽松查询有）
-        aliases = []
+        # r: 前 9 列同 fonts 表；r[9] 全部别名原文、r[10] 对应 alias_norm（\x01 分隔）；
+        # r[11] 为 hits（仅宽松查询有）
+        names = []
+        norm_parts = str(r[10]).split("\x01") if len(r) > 10 and r[10] else []
         if len(r) > 9 and r[9]:
-            aliases = [("", "", t) for t in str(r[9]).split("\x01") if t]
+            for i, t in enumerate(str(r[9]).split("\x01")):
+                if not t:
+                    continue
+                an = norm_parts[i] if i < len(norm_parts) else ""
+                names.append(("", "", t, an))
         return {
             "id": r[0], "path": r[1], "face_index": r[2], "family": r[3],
             "subfamily": r[4], "fullname": r[5], "psname": r[6],
-            "weight": r[7], "italic": r[8], "names": aliases,
+            "weight": r[7], "italic": r[8], "names": names,
         }
 
     def close(self):
@@ -723,8 +761,14 @@ class FontIndex:
         # 变更报告回调（插件主类传入 MP logger，让索引日志进入插件日志文件）
         self._report = report
         # 目录变更统计（供插件定时消费通知用户）
-        self._changes = {"added": 0, "removed": 0}
+        self._changes = {"added": 0, "removed": 0, "modified": 0}
         self._changes_lock = threading.Lock()
+        # 性能-2：match 结果进程内 LRU（字幕字体名重复率极高），随 index_version 失效
+        self._match_cache: "OrderedDict" = OrderedDict()
+        self._match_cache_lock = threading.Lock()
+        self._match_vsn = -1
+        _MATCH_CACHE_MAX = 1024
+        self._match_cache_max = _MATCH_CACHE_MAX
 
     def _log(self, msg: str) -> None:
         if self._report:
@@ -736,20 +780,24 @@ class FontIndex:
         logger.info(msg)
 
     # -- 变更统计（供 UI/通知消费） --
-    def note_changes(self, added: int = 0, removed: int = 0) -> None:
-        if added or removed:
+    def note_changes(self, added: int = 0, removed: int = 0,
+                     modified: int = 0) -> None:
+        if added or removed or modified:
             with self._changes_lock:
                 self._changes["added"] += added
                 self._changes["removed"] += removed
+                self._changes["modified"] += modified
 
-    def drain_changes(self) -> Tuple[int, int]:
-        """取出并清零累计变更数，返回 (added, removed)。"""
+    def drain_changes(self) -> Tuple[int, int, int]:
+        """取出并清零累计变更数，返回 (added, removed, modified)。"""
         with self._changes_lock:
             added = self._changes["added"]
             removed = self._changes["removed"]
+            modified = self._changes["modified"]
             self._changes["added"] = 0
             self._changes["removed"] = 0
-        return added, removed
+            self._changes["modified"] = 0
+        return added, removed, modified
 
     # -- 生命周期 --
     def start(self):
@@ -772,16 +820,16 @@ class FontIndex:
                     self.owner = owner
 
                 def on_created(self, event):
-                    self.owner._handle_event_path(event.src_path)
+                    self.owner._handle_event_path(event.src_path, "added")
 
                 def on_deleted(self, event):
-                    self.owner._handle_event_path(event.src_path)
+                    self.owner._handle_event_path(event.src_path, "removed")
 
                 def on_modified(self, event):
-                    self.owner._handle_event_path(event.src_path)
+                    self.owner._handle_event_path(event.src_path, "modified")
 
                 def on_moved(self, event):
-                    self.owner._handle_event_path(event.dest_path)
+                    self.owner._handle_event_path(event.dest_path, "added")
 
             handler = _Handler(self)
             try:
@@ -832,6 +880,7 @@ class FontIndex:
         changed = 0
         added = 0
         removed = 0
+        modified = 0
         known = self.db.known_paths()
         current: Set[str] = set()
         for d in self.font_dirs:
@@ -845,17 +894,32 @@ class FontIndex:
             self.db.remove_path(path)
             changed += 1
             removed += 1
-        # 新增/变更
-        for path in current:
-            if not self._needs_reindex(path, known):
-                continue
-            if self.db.replace_path(path, parse_font_file(path)):
-                changed += 1
-                added += 1
+        # 新增/变更：解析放线程池（性能-4），SQLite 写入仍单线程但攒批提交
+        need = [p for p in current if self._needs_reindex(p, known)]
+        if need:
+            workers = min(8, max(4, os.cpu_count() or 4))
+            batch: List[Tuple[str, List[Dict]]] = []
+            with ThreadPoolExecutor(max_workers=workers,
+                                    thread_name_prefix="fias-scan") as pool:
+                for path, faces in zip(need, pool.map(parse_font_file, need)):
+                    if not faces:
+                        continue
+                    batch.append((path, faces))
+                    changed += 1
+                    if path not in known:
+                        added += 1
+                    else:
+                        modified += 1
+                    if len(batch) >= 300:      # 攒批提交（性能-4）
+                        self.db.replace_paths_batch(batch)
+                        batch = []
+            if batch:
+                self.db.replace_paths_batch(batch)
         if changed:
             self.db.bump_version()
-        self.note_changes(added=added, removed=removed)
-        self._log(f"字体索引全量扫描完成：新增 {added} 个，删除 {removed} 个，当前 {self.db.font_count()} face")
+        self.note_changes(added=added, removed=removed, modified=modified)
+        self._log(f"字体索引全量扫描完成：新增 {added} 个，修改 {modified} 个，删除 {removed} 个，"
+                  f"当前 {self.db.font_count()} face")
         return changed
 
     def _needs_reindex(self, path: str, known: Set[str]) -> bool:
@@ -881,23 +945,40 @@ class FontIndex:
         changed = 0
         added = 0
         removed = 0
+        modified = 0
         for path in known - current:
             self.db.remove_path(path)
             changed += 1
             removed += 1
-        for path in current:
-            if self._needs_reindex(path, known):
-                if self.db.replace_path(path, parse_font_file(path)):
-                    changed += 1
-                    added += 1
+        need = [p for p in current if self._needs_reindex(p, known)]
+        batch: List[Tuple[str, List[Dict]]] = []
+        for path in need:
+            faces = parse_font_file(path)
+            if not faces:
+                continue
+            batch.append((path, faces))
+            changed += 1
+            if path not in known:
+                added += 1
+            else:
+                modified += 1
+            if len(batch) >= 300:
+                self.db.replace_paths_batch(batch)
+                batch = []
+        if batch:
+            self.db.replace_paths_batch(batch)
         if changed:
             self.db.bump_version()
-        self.note_changes(added=added, removed=removed)
+        self.note_changes(added=added, removed=removed, modified=modified)
         if changed:
-            self._log(f"字体目录增量扫描：新增 {added} 个，删除 {removed} 个，当前 {self.db.font_count()} face")
+            self._log(f"字体目录增量扫描：新增 {added} 个，修改 {modified} 个，删除 {removed} 个，"
+                      f"当前 {self.db.font_count()} face")
 
-    def _handle_event_path(self, src_path: str):
-        """watchdog 事件：单个文件增量处理（在 Observer 线程执行）。"""
+    def _handle_event_path(self, src_path: str, event_type: str = "added"):
+        """watchdog 事件：单个文件增量处理（在 Observer 线程执行）。
+
+        轻微-6：modified 事件计入「修改」而非「新增」，统计口径不失真。
+        """
         if not src_path or not src_path.lower().endswith(FONT_EXTENSIONS):
             return
         try:
@@ -906,8 +987,12 @@ class FontIndex:
                 if os.path.isdir(src_path):
                     return
                 self.db.replace_path(src_path, parse_font_file(src_path))
-                self.note_changes(added=1)
-                self._log(f"字体目录变更：新增 {os.path.basename(src_path)}")
+                if event_type == "modified":
+                    self.note_changes(modified=1)
+                    self._log(f"字体目录变更：修改 {os.path.basename(src_path)}")
+                else:
+                    self.note_changes(added=1)
+                    self._log(f"字体目录变更：新增 {os.path.basename(src_path)}")
             else:
                 self.db.remove_path(src_path)
                 self.note_changes(removed=1)
@@ -938,9 +1023,25 @@ class FontIndex:
         if not q:
             return None
 
+        # 性能-2：进程内 LRU——字幕字体名重复率极高，命中直接返回
+        cache_key = (q, weight, italic)
+        with self._match_cache_lock:
+            vsn = self.db.index_version()
+            if vsn != self._match_vsn:
+                self._match_cache.clear()
+                self._match_vsn = vsn
+            hit = self._match_cache.get(cache_key)
+            if hit is not None:
+                self._match_cache.move_to_end(cache_key)
+                return hit[0] if hit[0] is not None else None
+
         # 候选池：连续 LIKE + 宽松 gram 候选合并去重（原来是互斥的，会漏召回）
-        cands = self.db.query_candidates(q)
-        loose = self.db.query_candidates_loose(font_name)
+        # 中等-4：重建(drop)瞬间缺表会抛 OperationalError，防御性返回 None（走透传）
+        try:
+            cands = self.db.query_candidates(q)
+            loose = self.db.query_candidates_loose(font_name)
+        except sqlite3.OperationalError:
+            return None
         if loose:
             seen = {c["id"] for c in cands}
             cands = cands + [c for c in loose if c["id"] not in seen]
@@ -964,16 +1065,29 @@ class FontIndex:
             if sc > best_score:
                 best_score = sc
                 best = row
-        if best is None or best_score < MATCH_THRESHOLD:
-            return None
-        return best["path"], best["face_index"]
+        result: Optional[Tuple[str, int]] = None
+        if best is not None and best_score >= MATCH_THRESHOLD:
+            result = (best["path"], best["face_index"])
+        with self._match_cache_lock:
+            self._match_cache[cache_key] = (result,)
+            self._match_cache.move_to_end(cache_key)
+            if len(self._match_cache) > self._match_cache_max:
+                self._match_cache.popitem(last=False)
+        return result
 
     def rebuild(self) -> int:
-        """显式重建（同步，供命令调用）。"""
-        self.db._drop_all()
-        self.db._create_tables()
-        n = self._full_scan()
-        self._ready = True
+        """显式重建（同步，供命令调用）。
+
+        中等-4：重建期间把 _ready 置 False，让并发请求直接走透传，避免
+        查到正在重插的残缺数据；drop 与 recreate 之间的缺表窗口也有防御。
+        """
+        self._ready = False
+        try:
+            self.db._drop_all()
+            self.db._create_tables()
+            n = self._full_scan()
+        finally:
+            self._ready = True
         return n
 
     def close(self):

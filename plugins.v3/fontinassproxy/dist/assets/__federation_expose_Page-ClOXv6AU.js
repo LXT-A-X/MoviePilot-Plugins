@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import _sfc_main$2, { a as apiModule } from './__federation_expose_Config-q3V4nzvq.js';
+import _sfc_main$2, { a as apiModule } from './__federation_expose_Config-Dz0ukcW0.js';
 
 const _export_sfc = (sfc, props) => {
   const target = sfc.__vccOpts || sfc;
@@ -602,7 +602,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const Status = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-7cca8b46"]]);
+const Status = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-acd5d26c"]]);
 
 const {createTextVNode:_createTextVNode,resolveComponent:_resolveComponent,withCtx:_withCtx,createVNode:_createVNode,createElementVNode:_createElementVNode,renderList:_renderList,Fragment:_Fragment,openBlock:_openBlock,createElementBlock:_createElementBlock,toDisplayString:_toDisplayString,createBlock:_createBlock,createCommentVNode:_createCommentVNode,resolveDynamicComponent:_resolveDynamicComponent,KeepAlive:_KeepAlive,createSlots:_createSlots} = await importShared('vue');
 
@@ -671,8 +671,7 @@ async function initConfig() {
   try {
     const data = await apiModule.get(props.api, '/config');
     if (data && typeof data === 'object') {
-      const { dirs, ...cfg } = data;
-      pluginConfig.value = { ...pluginConfig.value, ...cfg };
+      pluginConfig.value = { ...pluginConfig.value, ...data };
     }
   } catch (e) {
     // 读取失败保持初始配置
@@ -945,6 +944,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-6adbe0b1"]]);
+const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-52a8c5c8"]]);
 
 export { Page as default };

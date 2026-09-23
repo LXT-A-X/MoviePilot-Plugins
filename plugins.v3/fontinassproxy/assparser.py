@@ -131,7 +131,9 @@ def analyse_text(font_key: FontKey, text: str,
                     i += 1
                 if i < n and text[i] == "\\":
                     text_state = 1
-                # 若遇 '}' / 行尾则回到普通态（不消费该字符，循环继续处理）
+                elif i < n and text[i] == "}":
+                    i += 1   # 中等-3：无反转义的 {注释} 块，'}' 同样不入字符集
+                # 若抵到行尾则循环自然结束
                 continue
             elif draw_mod:
                 # 绘图模式：普通字符与转义都不入集
@@ -225,7 +227,7 @@ def analyse_text(font_key: FontKey, text: str,
 # 主解析
 # --------------------------------------------------------------------------
 
-def parse_ass(ass_text: str, collect_dialogues: bool = True) -> AssParseResult:
+def parse_ass(ass_text: str, collect_dialogues: bool = False) -> AssParseResult:
     """解析整个 ASS 文本，返回样式表与字符集映射。"""
     result = AssParseResult()
     state = 0  # 0=头部 1=等待 Styles Format 2=Style 行 3=等待 Events Format 4=Dialogue

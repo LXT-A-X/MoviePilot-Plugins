@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """字幕字体代理 — Emby 回源层。
 
-- 从请求头 ``X-Original-URI``（若客户端提供）或原始 URL 重建上游地址（保留全部 query 参数）。
+- 从内置反代收到的原始相对路径重建上游地址（保留全部 query 参数）。
 - ``Accept-Encoding: identity``，避免拿到 gzip 再解压。
 - 编码识别：BOM -> 声明/探测 -> UTF-8 兜底。
 - 提供 ``to_full_uri``：把 ``/Subtitles/{index}/{StartPositionTicks}/Stream.*``
@@ -20,6 +20,18 @@ import httpx
 logger = logging.getLogger("FontInAssProxy")
 
 _TICKS_RE = re.compile(r"(/Subtitles/\d+/)\d+(/Stream[^?]*)", re.IGNORECASE)
+
+
+def _printable_ratio(data: bytes) -> float:
+    """可打印字节（含常见控制符）占比，用于过滤 gb18030 误解码的乱码内容。"""
+    if not data:
+        return 0.0
+    n = ok = 0
+    for b in data:
+        n += 1
+        if b in (9, 10, 13) or 0x20 <= b <= 0x7E:
+            ok += 1
+    return ok / n
 
 
 def to_full_uri(original_uri: str) -> str:
@@ -81,11 +93,17 @@ def try_decode(raw: bytes) -> Optional[str]:
             return raw.decode("utf-16-be")
         except UnicodeDecodeError:
             pass
-    for enc in ("utf-8", "gb18030"):
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    # 轻微-2：gb18030 几乎能解任意字节序列，损坏/二进制内容也会"成功"解出乱码，
+    # 先做可打印率校验，不达标再走 charset_normalizer。
+    if _printable_ratio(raw) >= 0.9:
         try:
-            return raw.decode(enc)
+            return raw.decode("gb18030")
         except UnicodeDecodeError:
-            continue
+            pass
     # 最后探测
     try:
         from charset_normalizer import from_bytes
@@ -156,8 +174,30 @@ class UpstreamClient:
         """
         url = rebuild_url(self.base_url, original_uri, self.api_key)
         headers = self._filter_headers(client_headers)
-        req = self._client.build_request(method, url, headers=headers)
+        # 严重-2：视频/音频长连接（暂停播放时客户端停止拉取）沿用 30s 读超时会被掐断。
+        # 流式透传单独放宽读超时（read=None），连接/写入/池超时仍保留 10s 兜底。
+        req = self._client.build_request(
+            method, url, headers=headers,
+            timeout=httpx.Timeout(10.0, read=None),
+        )
         return await self._client.send(req, stream=True, follow_redirects=False)
+
+    async def open_ws(self, original_uri: str,
+                        client_headers: Optional[Dict[str, str]] = None):
+        """打开上游 WebSocket 连接（Emby Web 会话同步/遥控透传，中等-7）。
+
+        需要 websockets 库；宿主缺失时抛 ImportError，由调用方优雅降级。
+        """
+        import websockets
+        url = rebuild_url(self.base_url, original_uri, self.api_key)
+        url = url.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
+        headers = self._filter_headers(client_headers)
+        for hop in ("connection", "upgrade", "sec-websocket-key",
+                    "sec-websocket-version", "sec-websocket-extensions",
+                    "sec-websocket-protocol", "accept-encoding"):
+            headers.pop(hop, None)
+        return await websockets.connect(url, extra_headers=headers,
+                                        ping_interval=None)
 
     async def aclose(self):
         try:

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import threading
 import json
 import logging
 import os
@@ -40,8 +41,10 @@ class SubtitleCache:
             self.cache_dir = cache_dir
 
         self._mem: "OrderedDict[str, bytes]" = OrderedDict()
-        self._mem_size = mem_size
-        self._lock = asyncio.Lock()
+        self._mem_size = mem_size          # 条数上限（保留兼容）
+        self._mem_bytes = mem_size * 1024 * 1024  # 字节上限：默认 256MB 改为按条估算
+        self._mem_bytes_now = 0
+        self._lock = threading.Lock()      # 纯内存临界区：threading.Lock 跨事件循环安全
 
     # -- key ------------------------------------------------------------------
     @staticmethod
@@ -51,23 +54,32 @@ class SubtitleCache:
         return hashlib.md5(raw.encode("utf-8", "ignore")).hexdigest()
 
     # -- 内存 -----------------------------------------------------------------
-    async def mem_get(self, key: str) -> Optional[bytes]:
-        async with self._lock:
+    def mem_get(self, key: str) -> Optional[bytes]:
+        with self._lock:
             val = self._mem.get(key)
             if val is not None:
                 self._mem.move_to_end(key)  # LRU 刷新
                 return val
             if key in self._mem:
+                self._mem_bytes_now -= len(self._mem[key])
                 del self._mem[key]
             return None
 
-    async def mem_set(self, key: str, data: bytes):
-        async with self._lock:
+    def mem_set(self, key: str, data: bytes):
+        with self._lock:
             if key in self._mem:
+                self._mem_bytes_now -= len(self._mem[key])
                 self._mem.move_to_end(key)
+            else:
+                self._mem_bytes_now += len(data)
             self._mem[key] = data
-            while len(self._mem) > self._mem_size:
-                self._mem.popitem(last=False)
+            # LRU 淘汰：同时按条数与字节上限
+            while (len(self._mem) > self._mem_size
+                   or self._mem_bytes_now > self._mem_bytes):
+                if not self._mem:
+                    break
+                _k, _v = self._mem.popitem(last=False)
+                self._mem_bytes_now -= len(_v)
 
     # -- 磁盘 -----------------------------------------------------------------
     def _disk_path(self, key: str) -> str:
@@ -109,22 +121,23 @@ class SubtitleCache:
 
     # -- 统一接口 -------------------------------------------------------------
     async def get(self, key: str) -> Optional[bytes]:
-        data = await self.mem_get(key)
+        data = self.mem_get(key)
         if data is not None:
             return data
         data = await asyncio.to_thread(self.disk_get, key)
         if data is not None:
-            await self.mem_set(key, data)
+            self.mem_set(key, data)
         return data
 
     async def set(self, key: str, data: bytes):
-        await self.mem_set(key, data)
+        self.mem_set(key, data)
         await asyncio.to_thread(self.disk_set, key, data)
 
     async def clear(self) -> int:
         """清空内存与磁盘缓存，返回删除的文件数。"""
-        async with self._lock:
+        with self._lock:
             self._mem.clear()
+            self._mem_bytes_now = 0
         removed = 0
         for fname in os.listdir(self.cache_dir):
             if fname.endswith(".ass"):
@@ -157,7 +170,8 @@ class SubtitleCache:
         return removed
 
     def stats(self) -> Dict[str, Any]:
-        mem_bytes = sum(len(v) for v in self._mem.values())
+        with self._lock:
+            mem_bytes = sum(len(v) for v in list(self._mem.values()))
         try:
             disk_files = [f for f in os.listdir(self.cache_dir) if f.endswith(".ass")]
         except OSError:
@@ -175,14 +189,16 @@ class SingleFlight:
 
     def __init__(self):
         self._tasks: Dict[str, asyncio.Future] = {}
-        self._mu = asyncio.Lock()
+        self._mu = threading.Lock()   # 纯内存临界区：threading.Lock 跨事件循环安全
 
-    async def run(self, key: str, func: Callable[[], Awaitable[Any]]) -> Awaitable[Any]:
-        async with self._mu:
+    async def run(self, key: str, func: Callable[[], Awaitable[Any]]) -> Tuple:
+        """返回 ``(result, is_leader)``：is_leader 为 True 表示本次真正执行了 func
+        （等待者拿到的 False），便于调用方只在 leader 侧写缓存（轻微-9）。"""
+        with self._mu:
             fut = self._tasks.get(key)
             if fut is not None and not fut.done():
-                # 已有在处理：等待该结果
-                return await asyncio.shield(fut)
+                # 已有在处理：等待该结果（非 leader）
+                return await asyncio.shield(fut), False
             new_fut = asyncio.get_event_loop().create_future()
             self._tasks[key] = new_fut
 
@@ -190,13 +206,13 @@ class SingleFlight:
             result = await func()
             if not new_fut.done():
                 new_fut.set_result(result)
-            return result
+            return result, True
         except BaseException as exc:
             if not new_fut.done():
                 new_fut.set_exception(exc)
             raise
         finally:
-            async with self._mu:
+            with self._mu:
                 if self._tasks.get(key) is new_fut:
                     self._tasks.pop(key, None)
 

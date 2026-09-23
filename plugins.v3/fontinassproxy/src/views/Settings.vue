@@ -18,6 +18,7 @@ const DEFAULTS = {
   srt_default_font: '思源黑体 CN',
   srt_font_size: 20,
   srt_primary_colour: '&H00FFFFFF',
+  srt_to_ass_enabled: true,
   cache_enabled: true,
   cache_ttl_hours: 24,
   max_concurrent_subset: 4,
@@ -64,7 +65,7 @@ async function save() {
     <v-row dense>
       <v-col cols="12">
         <v-switch v-model="cfg.enabled" label="启用插件"
-                  hint="关闭时字幕请求原样透传（返回 502）" persistent-hint />
+                  hint="关闭后反代端口与处理链路全部停止，请勿在客户端仍指向反代端口时关闭" persistent-hint />
       </v-col>
       <v-col cols="12" md="6">
         <v-text-field v-model="cfg.emby_url" label="Emby/Jellyfin 地址"
@@ -88,6 +89,10 @@ async function save() {
       <v-col cols="12" md="4">
         <v-text-field v-model="cfg.srt_primary_colour" label="SRT 转 ASS 主色（BGR）"
                       hint="十六进制，如 &H00FFFFFF" persistent-hint density="comfortable" />
+      </v-col>
+      <v-col cols="12" md="8">
+        <v-switch v-model="cfg.srt_to_ass_enabled" label="SRT 转 ASS"
+                  hint="开启：SRT 字幕转成 ASS 并注入字体；关闭：SRT 字幕原样透传，不做字体处理" persistent-hint />
       </v-col>
       <v-col cols="12" md="4">
         <v-switch v-model="cfg.cache_enabled" label="处理结果缓存" hint="内存 + 磁盘双层" persistent-hint />

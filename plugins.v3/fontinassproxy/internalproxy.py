@@ -3,7 +3,10 @@
 
 由插件在独立端口（默认 8097）上直接反向代理 Emby：
 - 字幕路径（/Videos/.../Subtitles/.../Stream.*）交给插件处理链路；
-- 其余请求全部透传 Emby。
+- 视频/音频大流量路径（/Videos/.../stream.*、/Audios/.../universal 等）流式透传；
+- WebSocket 路径（/embywebsocket、/socket）透传上游，保住 Emby/Jellyfin Web 端
+  的会话同步与远程控制（中等-7）；
+- 其余请求（Web/登录/API）全部缓冲透传 Emby。
 
 形态参考 mediawarp（插件内起独立端口 + 后台线程启动），但为纯 Python 实现，
 复用 MoviePilot 自带的 uvicorn/starlette，无需外部二进制。
@@ -11,12 +14,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import socket
 import threading
-from typing import Any, Awaitable, Callable, Dict, Tuple
+import time
+from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 
-from starlette.responses import Response
 from fastapi import FastAPI, Request
+from starlette.responses import Response
+from starlette.websockets import WebSocket
 
 logger = logging.getLogger("FontInAssProxy")
 
@@ -30,13 +37,37 @@ SubtitleCheck = Callable[[str], bool]
 StreamCheck = Callable[[str, str], bool]
 
 
+def _port_in_use(port: int) -> bool:
+    """探测端口是否仍被占用（bind 测试，带 SO_REUSEADDR 避免 TIME_WAIT 误判）。"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind(("0.0.0.0", port))
+            return False
+        except OSError:
+            return True
+        finally:
+            s.close()
+    except Exception:
+        return True
+
+
+class _WSClose(Exception):
+    """哨兵：任一方通道关闭即终止 WS 透传。"""
+
+
 class InternalProxy:
     """独立端口反向代理服务。启动/停止与插件生命周期绑定。
 
     分发规则：
     - 字幕路径 -> handler（插件处理链路，缓冲返回）；
     - 视频/音频流路径 -> 流式透传 Emby（边收边发，不阻塞起播）；
+    - WebSocket 路径 -> 透传上游（Emby Web 会话同步/遥控，中等-7）；
     - 其余（Web/登录/API）-> 缓冲处理链路（原样转发方法+请求体）。
+
+    重启竞态（严重-4）：stop() 设 should_exit 并 join 后，再等待端口真正释放；
+    start() 若绑定失败（旧实例未退出等）做有限次退避重试，避免反代彻底下线。
     """
 
     def __init__(self, port: int, handler: ProxyHandler,
@@ -49,11 +80,43 @@ class InternalProxy:
         self._stream_check = stream_check
         self._streamer = streamer
         self._server = None
-        self._thread: threading.Thread | None = None
+        self._thread: Optional[threading.Thread] = None
         self._app = self._build_app()
 
     def _build_app(self) -> FastAPI:
         app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+
+        # 清空默认路由冲突：WS 与 HTTP 共用 /{path:path} 通配，协议不同分层
+        @app.websocket("/{path:path}")
+        async def _ws_gateway(websocket: WebSocket, path: str):
+            """Emby/Jellyfin Web 客户端依赖 /embywebsocket、/socket 做会话同步与
+            远程控制（中等-7）。这里把 WS 升级请求透传到上游，尽力恢复这些功能；
+            宿主缺 websockets 库时优雅拒绝（Web 端仅实时会话降级，不影响播放/字幕）。"""
+            query = websocket.url.query
+            original_uri = websocket.url.path + (f"?{query}" if query else "")
+            headers = {k: v for k, v in websocket.headers.items()}
+            try:
+                await websocket.accept()
+            except Exception:
+                return
+            if not self._streamer:
+                try:
+                    await websocket.close(code=1011)
+                except Exception:
+                    pass
+                return
+            upstream_ws = None
+            try:
+                upstream_ws = await self._streamer.open_ws(original_uri, headers)
+                await self._ws_pump_loop(websocket, upstream_ws)
+            except Exception as e:
+                logger.warning(f"WebSocket 透传异常 {original_uri}: {e}")
+            finally:
+                if upstream_ws:
+                    try:
+                        await upstream_ws.close()
+                    except Exception:
+                        pass
 
         @app.api_route("/{path:path}",
                        methods=["GET", "HEAD", "OPTIONS", "POST", "PUT", "DELETE", "PATCH"])
@@ -76,8 +139,7 @@ class InternalProxy:
                 return Response(content=resp_body, status_code=status, headers=resp_headers)
 
             # 视频/音频流：流式透传，边收边发
-            if self._stream_check and self._stream_check(original_uri, method) \
-                    and self._streamer:
+            if self._stream_check and self._stream_check(original_uri, method)                     and self._streamer:
                 return await self._stream_passthrough(original_uri, headers, method)
 
             # 其余（Web/登录/API）：缓冲处理链路（POST 登录等必须原样转发方法+请求体）
@@ -92,6 +154,43 @@ class InternalProxy:
             return Response(content=resp_body, status_code=status, headers=resp_headers)
 
         return app
+
+    async def _ws_pump_loop(self, down: WebSocket, up) -> None:
+        """双向泵：任一方向结束即取消另一方向并退出。"""
+        down_task = asyncio.create_task(self._ws_pump_down_up(down, up))
+        up_task = asyncio.create_task(self._ws_pump_up_down(down, up))
+        done, pending = await asyncio.wait(
+            {down_task, up_task}, return_when=asyncio.FIRST_COMPLETED)
+        for t in pending:
+            t.cancel()
+        # 有异常则抛出（首个完成任务的异常优先）
+        for t in done:
+            exc = t.exception()
+            if exc and not isinstance(exc, _WSClose):
+                raise exc
+
+    @staticmethod
+    async def _ws_pump_down_up(down: WebSocket, up) -> None:
+        """客户端 WS -> 上游。"""
+        while True:
+            data = await down.receive()
+            if data["type"] == "websocket.disconnect":
+                raise _WSClose
+            if data["type"] == "websocket.receive":
+                if data.get("text") is not None:
+                    await up.send(data["text"])
+                elif data.get("bytes") is not None:
+                    await up.send(data["bytes"])
+
+    @staticmethod
+    async def _ws_pump_up_down(down: WebSocket, up) -> None:
+        """上游 WS -> 客户端。"""
+        while True:
+            msg = await up.recv()
+            if isinstance(msg, str):
+                await down.send_text(msg)
+            else:
+                await down.send_bytes(msg)
 
     async def _stream_passthrough(self, original_uri: str,
                                   headers: Dict[str, str],
@@ -140,7 +239,10 @@ class InternalProxy:
         return StreamingResponse(gen(), status_code=status, headers=resp_headers)
 
     def start(self) -> bool:
-        """后台线程启动 uvicorn（在独立线程内跑自己的事件循环，与 MP 主循环隔离）。"""
+        """后台线程启动 uvicorn（在独立线程内跑自己的事件循环，与 MP 主循环隔离）。
+
+        严重-4 修复：绑定前等旧实例释放端口（最多 12s）；绑定失败退避重试 4 次。
+        """
         if self._thread and self._thread.is_alive():
             return True
         try:
@@ -148,39 +250,70 @@ class InternalProxy:
         except Exception as e:
             logger.error(f"内置反代无法启动（uvicorn 不可用）: {e}")
             return False
-        config = uvicorn.Config(
-            self._app,
-            host="0.0.0.0",
-            port=self.port,
-            log_level="warning",
-            access_log=False,
-            lifespan="off",
-        )
-        server = uvicorn.Server(config)
-        self._server = server
-        self._thread = threading.Thread(target=server.run, daemon=True,
-                                        name="FontInAssProxy-internal-proxy")
-        self._thread.start()
-        # 等待端口就绪（最多 5 秒）
-        import time
-        deadline = time.time() + 5
-        while time.time() < deadline:
+        # 等待旧实例完全释放端口，再开始绑定（优雅退出可能因长连接迟迟不完成）
+        deadline = time.time() + 12
+        while _port_in_use(self.port) and time.time() < deadline:
+            time.sleep(0.2)
+        max_attempts = 4
+        for attempt in range(max_attempts):
+            config = uvicorn.Config(
+                self._app,
+                host="0.0.0.0",
+                port=self.port,
+                log_level="warning",
+                access_log=False,
+                lifespan="off",
+            )
+            server = uvicorn.Server(config)
+            self._server = server
+            self._thread = threading.Thread(target=server.run, daemon=True,
+                                            name="FontInAssProxy-internal-proxy")
+            self._thread.start()
+            # 等待端口就绪（最多 5 秒）
+            wait_deadline = time.time() + 5
+            while time.time() < wait_deadline:
+                if server.started:
+                    break
+                if server.should_exit:
+                    break
+                time.sleep(0.05)
             if server.started:
-                break
-            time.sleep(0.05)
-        if not server.started and not server.should_exit:
-            logger.error(f"内置反代端口 {self.port} 启动超时")
-            return False
-        logger.info(f"内置反代已监听 0.0.0.0:{self.port}")
-        return True
+                logger.info(f"内置反代已监听 0.0.0.0:{self.port}")
+                return True
+            # 启动失败：清掉本次线程残留，退避后重试
+            try:
+                server.should_exit = True
+                if self._thread and self._thread.is_alive():
+                    self._thread.join(timeout=1)
+            except Exception:
+                pass
+            self._server = None
+            self._thread = None
+            time.sleep(0.5 * (attempt + 1))  # 退避：0.5s / 1s / 1.5s
+        logger.error(f"内置反代端口 {self.port} 启动失败（重试 {max_attempts} 次仍无法监听）")
+        return False
 
     def stop(self) -> None:
-        try:
-            if self._server:
-                self._server.should_exit = True
-                if self._thread and self._thread.is_alive():
-                    self._thread.join(timeout=3)
-        except Exception:
-            pass
+        """停止服务。设置 should_exit 并 join，再等端口真正释放（严重-4）。
+
+        若存在正在播放的长连接，uvicorn 优雅退出会一直等待；这里 join 超时后
+        不再依赖线程结束，而是轮询端口占用，让 start() 能安全绑定同一端口。
+        """
+        server, thread = self._server, self._thread
         self._server = None
         self._thread = None
+        try:
+            if server:
+                server.should_exit = True
+                if thread and thread.is_alive():
+                    thread.join(timeout=3)
+        except Exception:
+            pass
+        # 等待端口真正释放（长连接可能让优雅退出迟迟不完成）
+        if server:
+            try:
+                deadline = time.time() + 12
+                while _port_in_use(self.port) and time.time() < deadline:
+                    time.sleep(0.2)
+            except Exception:
+                pass

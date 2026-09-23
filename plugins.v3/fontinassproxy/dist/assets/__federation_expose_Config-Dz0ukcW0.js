@@ -62,6 +62,7 @@ const DEFAULTS = {
   srt_default_font: '思源黑体 CN',
   srt_font_size: 20,
   srt_primary_colour: '&H00FFFFFF',
+  srt_to_ass_enabled: true,
   cache_enabled: true,
   cache_ttl_hours: 24,
   max_concurrent_subset: 4,
@@ -123,7 +124,7 @@ return (_ctx, _cache) => {
                 modelValue: cfg.value.enabled,
                 "onUpdate:modelValue": _cache[0] || (_cache[0] = $event => ((cfg.value.enabled) = $event)),
                 label: "启用插件",
-                hint: "关闭时字幕请求原样透传（返回 502）",
+                hint: "关闭后反代端口与处理链路全部停止，请勿在客户端仍指向反代端口时关闭",
                 "persistent-hint": ""
               }, null, 8, ["modelValue"])
             ]),
@@ -225,12 +226,27 @@ return (_ctx, _cache) => {
           }),
           _createVNode(_component_v_col, {
             cols: "12",
+            md: "8"
+          }, {
+            default: _withCtx(() => [
+              _createVNode(_component_v_switch, {
+                modelValue: cfg.value.srt_to_ass_enabled,
+                "onUpdate:modelValue": _cache[7] || (_cache[7] = $event => ((cfg.value.srt_to_ass_enabled) = $event)),
+                label: "SRT 转 ASS",
+                hint: "开启：SRT 字幕转成 ASS 并注入字体；关闭：SRT 字幕原样透传，不做字体处理",
+                "persistent-hint": ""
+              }, null, 8, ["modelValue"])
+            ]),
+            _: 1
+          }),
+          _createVNode(_component_v_col, {
+            cols: "12",
             md: "4"
           }, {
             default: _withCtx(() => [
               _createVNode(_component_v_switch, {
                 modelValue: cfg.value.cache_enabled,
-                "onUpdate:modelValue": _cache[7] || (_cache[7] = $event => ((cfg.value.cache_enabled) = $event)),
+                "onUpdate:modelValue": _cache[8] || (_cache[8] = $event => ((cfg.value.cache_enabled) = $event)),
                 label: "处理结果缓存",
                 hint: "内存 + 磁盘双层",
                 "persistent-hint": ""
@@ -245,7 +261,7 @@ return (_ctx, _cache) => {
             default: _withCtx(() => [
               _createVNode(_component_v_text_field, {
                 modelValue: cfg.value.cache_ttl_hours,
-                "onUpdate:modelValue": _cache[8] || (_cache[8] = $event => ((cfg.value.cache_ttl_hours) = $event)),
+                "onUpdate:modelValue": _cache[9] || (_cache[9] = $event => ((cfg.value.cache_ttl_hours) = $event)),
                 label: "缓存有效期（小时）",
                 type: "number",
                 hint: "磁盘缓存保留时长，默认 24（1 天）；每 4 小时清理一次",
@@ -262,7 +278,7 @@ return (_ctx, _cache) => {
             default: _withCtx(() => [
               _createVNode(_component_v_text_field, {
                 modelValue: cfg.value.max_concurrent_subset,
-                "onUpdate:modelValue": _cache[9] || (_cache[9] = $event => ((cfg.value.max_concurrent_subset) = $event)),
+                "onUpdate:modelValue": _cache[10] || (_cache[10] = $event => ((cfg.value.max_concurrent_subset) = $event)),
                 label: "子集化并发上限",
                 type: "number",
                 hint: "保护 MP 主进程，超限请求降级透传",
@@ -276,7 +292,7 @@ return (_ctx, _cache) => {
             default: _withCtx(() => [
               _createVNode(_component_v_switch, {
                 modelValue: cfg.value.passthrough_on_error,
-                "onUpdate:modelValue": _cache[10] || (_cache[10] = $event => ((cfg.value.passthrough_on_error) = $event)),
+                "onUpdate:modelValue": _cache[11] || (_cache[11] = $event => ((cfg.value.passthrough_on_error) = $event)),
                 label: "处理失败时返回原始字幕",
                 hint: "关闭时失败返回 500",
                 "persistent-hint": ""
@@ -291,7 +307,7 @@ return (_ctx, _cache) => {
             default: _withCtx(() => [
               _createVNode(_component_v_switch, {
                 modelValue: cfg.value.internal_proxy_enabled,
-                "onUpdate:modelValue": _cache[11] || (_cache[11] = $event => ((cfg.value.internal_proxy_enabled) = $event)),
+                "onUpdate:modelValue": _cache[12] || (_cache[12] = $event => ((cfg.value.internal_proxy_enabled) = $event)),
                 label: "启用内置反代端口",
                 hint: "客户端直接访问本端口；需要在 MP 容器映射该端口",
                 "persistent-hint": ""
@@ -306,7 +322,7 @@ return (_ctx, _cache) => {
             default: _withCtx(() => [
               _createVNode(_component_v_text_field, {
                 modelValue: cfg.value.internal_proxy_port,
-                "onUpdate:modelValue": _cache[12] || (_cache[12] = $event => ((cfg.value.internal_proxy_port) = $event)),
+                "onUpdate:modelValue": _cache[13] || (_cache[13] = $event => ((cfg.value.internal_proxy_port) = $event)),
                 label: "内置反代端口",
                 type: "number",
                 hint: "如 8097，MP 容器需映射（ports 加 8097:8097）",
@@ -320,7 +336,7 @@ return (_ctx, _cache) => {
             default: _withCtx(() => [
               _createVNode(_component_v_switch, {
                 modelValue: cfg.value.notify_enabled,
-                "onUpdate:modelValue": _cache[13] || (_cache[13] = $event => ((cfg.value.notify_enabled) = $event)),
+                "onUpdate:modelValue": _cache[14] || (_cache[14] = $event => ((cfg.value.notify_enabled) = $event)),
                 label: "启用通知",
                 hint: "新字体入库 / 缺失字体 / 处理错误时发送消息通知（默认开启，关闭则静默）",
                 "persistent-hint": ""
@@ -341,7 +357,7 @@ return (_ctx, _cache) => {
             loading: saving.value,
             onClick: save
           }, {
-            default: _withCtx(() => [...(_cache[14] || (_cache[14] = [
+            default: _withCtx(() => [...(_cache[15] || (_cache[15] = [
               _createTextVNode("保存配置", -1)
             ]))]),
             _: 1

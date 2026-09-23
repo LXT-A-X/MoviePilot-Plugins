@@ -45,8 +45,7 @@ async function initConfig() {
   try {
     const data = await apiModule.get(props.api, '/config')
     if (data && typeof data === 'object') {
-      const { dirs, ...cfg } = data
-      pluginConfig.value = { ...pluginConfig.value, ...cfg }
+      pluginConfig.value = { ...pluginConfig.value, ...data }
     }
   } catch (e) {
     // 读取失败保持初始配置
