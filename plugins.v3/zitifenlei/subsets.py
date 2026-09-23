@@ -27,6 +27,56 @@ _OUT_SUFFIX = ".assfonts.ass"
 
 _LOGGER = logging.getLogger("ZitifenleiFile")
 
+# Q11 修复：二进制探测结果签名缓存。_binary_ok 每次真实 spawn 子进程验证，
+# 而 get_binary 被 api_subset_index / loadStatus 轮询等多个入口反复调用——
+# 按二进制文件 (mtime_ns, size) 签名缓存探测结论，签名未变直接复用，不再每 30 秒起一次子进程。
+# 自愈（_repair_binary）覆盖文件后 mtime/size 变化 → 签名自然失效自动重探。
+_BINARY_OK_CACHE: Dict[Tuple[str, int, int], bool] = {}
+
+
+def _binary_ok(path: Path) -> bool:
+    """校验 assfonts 是否真正可执行（带签名缓存，Q11 修复）。
+
+    只查 ELF 头还不够——MP 备份恢复的坏文件可能头部正常但内容残缺，
+    执行时才抛 Exec format error；故再叠加实际执行探测：
+    Exec format error 会在 subprocess 启动进程时以 OSError 抛出，
+    能走到 exec 即认为二进制可用（退出码/输出无关紧要）。
+    """
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4)
+        if head != _EXPECTED_ELF_MAGIC:
+            return False
+    except OSError:
+        return False
+    try:
+        st = path.stat()
+        sig = (str(path), st.st_mtime_ns, st.st_size)
+        cached = _BINARY_OK_CACHE.get(sig)
+        if cached is not None:
+            return cached
+    except Exception:
+        sig = None  # stat 失败：不缓存，直接执行探测
+    try:
+        subprocess.run(
+            [str(path), "--probe-exec"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+        )
+        ok = True
+    except OSError:
+        ok = False
+    except subprocess.TimeoutExpired:
+        ok = True
+    except Exception:
+        ok = True
+    if sig is not None:
+        _BINARY_OK_CACHE[sig] = ok
+        if len(_BINARY_OK_CACHE) > 16:  # 防泄漏：自愈重建/重装后旧签名条目清理
+            _BINARY_OK_CACHE.clear()
+    return ok
+
 # assfonts 二进制自动修复下载源（合约：插件仓库 main 分支下的 Linux x86_64 构建）
 _ASSFONTS_REPO_URLS = (
     "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/plugins.v2/zitifenlei/bin/assfonts",

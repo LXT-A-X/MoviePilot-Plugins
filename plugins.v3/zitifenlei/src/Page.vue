@@ -1,5 +1,5 @@
 <script setup>
-import { computed, inject, onActivated, onMounted, ref, watch, getCurrentInstance } from 'vue'
+import { computed, inject, onActivated, onMounted, ref, getCurrentInstance } from 'vue'
 import apiModule from './api/fontManager.js'
 import Dashboard from './views/Dashboard.vue'
 import FontLibrary from './views/FontLibrary.vue'
@@ -118,11 +118,12 @@ function handleAction(payload) {
   emit('action', payload)
 }
 
-// 内部 Tab 切到哪个视图都递推一次刷新键：即使宿主 keep-alive 不传播 onActivated，
-// keep-alive 缓存中的仪表盘/字体库也会通过 watch(refreshKey) 拿最新数据
-watch(() => active.value, () => {
-  refreshKey.value++
-})
+// Q14 修复：删除 watch(active) 的全量 refreshKey 广播——切 Tab 时各视图
+// 自身 keep-alive 的 onActivated 钩子已负责重拉数据 + 恢复轮询，
+// 不再让所有缓存视图（含不可见的）并发拉全量接口。
+// refreshKey 仅保留给"子页数据操作"（handleAction）与"宿主重新进入插件"
+// （onActivated）两条低频、真需要跨页同步的信号。
+// 内部 Tab 切换不再推进刷新键：切回视图由该视图 onActivated 自查自刷
 
 // 宿主详情页为共享 Dialog（keep-alive 缓存）：重新进入插件时强制各视图刷新，
 // 确保「重新识别厂商」「外部删除字体文件」等变化在再次打开时立即生效

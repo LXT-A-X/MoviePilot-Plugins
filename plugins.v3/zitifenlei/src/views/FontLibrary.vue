@@ -1,5 +1,5 @@
 <script setup>
-import { computed, watch, onActivated, onMounted, onUnmounted, ref } from 'vue'
+import { computed, watch, onActivated, onDeactivated, onMounted, onUnmounted, ref } from 'vue'
 import apiModule from '../api/fontManager.js'
 
 const props = defineProps({
@@ -325,8 +325,13 @@ function onListClick(e) {
 }
 
 // ===== 右栏详情：选中 + 加载真实字体大样 =====
+// 预览请求序号守卫：base64 字体数据可达数 MB、下载耗时数秒，
+// 快速连点不同字体时只应用最后选中字体的响应，避免迟到的旧响应
+// 覆盖新选中导致预览张冠李戴（Q9 修复）
+let previewReqSeq = 0
 async function selectFont(font) {
   if (!font) return
+  const seq = ++previewReqSeq
   selectedId.value = font.id
   disposePreviewFont()
   previewFont.value = null
@@ -334,17 +339,19 @@ async function selectFont(font) {
   faceError.value = ''
   try {
     const res = await apiModule.get(props.api, '/fonts/preview', { id: font.id })
+    if (seq !== previewReqSeq) return
     const data = res?.data || ''
     if (!data) {
       faceError.value = '该字体文件不存在或无法读取'
       return
     }
     const face = await loadPreviewFace(data)
+    if (seq !== previewReqSeq) return
     previewFont.value = face
   } catch (e) {
-    faceError.value = friendlyPreviewError(e)
+    if (seq === previewReqSeq) faceError.value = friendlyPreviewError(e)
   } finally {
-    faceLoading.value = false
+    if (seq === previewReqSeq) faceLoading.value = false
   }
 }
 
@@ -586,11 +593,39 @@ function refreshData() {
   loadVendors()
 }
 
+// Q15 修复：轮询路径的轻量变更检查——先查 /fonts/tree_meta 签名，
+// 字体库无变化（无新增/删除/更新）则跳过全量重拉 /fonts/tree（万级字体 JSON 传输+树重建）
+let lastTreeSig = ''
+let lastTreeSigAt = 0
+async function refreshDataLight() {
+  loadPending()  // 待确认量小，保持准实时
+  try {
+    const meta = await apiModule.get(props.api, '/fonts/tree_meta')
+    const sig = (meta && meta.signature) || ''
+    const now = Date.now()
+    // 首次进入（无签名）强制全量；后续仅当签名变化或距上次全量超过 5 分钟（兜底）才重拉
+    if (sig && sig !== lastTreeSig) {
+      lastTreeSig = sig
+      lastTreeSigAt = now
+      loadFonts()
+      loadVendors()
+    } else if (now - lastTreeSigAt > 5 * 60 * 1000) {
+      lastTreeSig = sig
+      lastTreeSigAt = now
+      loadFonts()
+      loadVendors()
+    }
+  } catch (e) {
+    // 签名接口异常：降级为全量刷新，保证功能可用
+    refreshData()
+  }
+}
+
 // 30 秒轮询兜底：目录监控/入库自动归档写入新字体后，页面停留不动也能自动显示
 let pollTimer = null
 function startPolling() {
   stopPolling()
-  pollTimer = setInterval(refreshData, 30000)
+  pollTimer = setInterval(refreshDataLight, 30000)
 }
 function stopPolling() {
   if (pollTimer) {
@@ -599,11 +634,26 @@ function stopPolling() {
   }
 }
 
+// 全量加载后同步签名基准：后续轮询仅在签名变化时重拉（Q15 修复配合）
+async function syncTreeSig() {
+  try {
+    const meta = await apiModule.get(props.api, '/fonts/tree_meta')
+    const sig = (meta && meta.signature) || ''
+    if (sig) {
+      lastTreeSig = sig
+      lastTreeSigAt = Date.now()
+    }
+  } catch (e) {
+    // 忽略：签名拉不到时轮询按 5 分钟兜底全量
+  }
+}
+
 onMounted(async () => {
   refreshCollectFlag()
   await loadFonts()
   loadPending()
   loadVendors()
+  syncTreeSig()
   startPolling()
 })
 
@@ -614,6 +664,14 @@ onActivated(async () => {
   await loadFonts()
   loadPending()
   loadVendors()
+  syncTreeSig()
+  startPolling()
+})
+
+// 切走视图（进入 keep-alive 缓存）时停止轮询，避免后台不可见视图
+// 每 30 秒仍打接口（Q1 修复）
+onDeactivated(() => {
+  stopPolling()
 })
 
 // 兄弟页完成数据变更（如仪表盘「重新识别厂商」→ Page 递推 refreshKey）：

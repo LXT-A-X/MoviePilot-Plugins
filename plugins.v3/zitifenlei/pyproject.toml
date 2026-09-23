@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "moviepilot-zitifenlei"
-version = "3.0.0"
+version = "3.0.1"
 description = "字体归档整理 + ASS 字幕字体检查 + 子集化（MoviePilot V3）"
 readme = "使用手册.md"
 requires-python = ">=3.10"

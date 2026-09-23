@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onActivated, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue'
 import apiModule from '../api/fontManager.js'
 
 const props = defineProps({
@@ -22,6 +22,16 @@ const depsDialog = ref(false)
 const depsLoading = ref(false)
 
 let refreshTimer = null
+function startPolling() {
+  stopPolling()
+  refreshTimer = setInterval(loadLogs, 30000)
+}
+function stopPolling() {
+  if (refreshTimer) {
+    clearInterval(refreshTimer)
+    refreshTimer = null
+  }
+}
 
 async function loadDeps() {
   depsLoading.value = true
@@ -82,7 +92,7 @@ onMounted(() => {
   loadConfig()
   loadLogs()
   loadDeps()
-  refreshTimer = setInterval(loadLogs, 30000)
+  startPolling()
 })
 
 // 从其他 Tab 直接切回仪表盘（keep-alive 缓存场景）时重拉统计/厂商分布/日志：
@@ -93,10 +103,17 @@ onActivated(() => {
   loadConfig()
   loadLogs()
   loadDeps()
+  startPolling()
+})
+
+// 切走视图（进入 keep-alive 缓存）时停止日志轮询，避免后台不可见视图
+// 每 30 秒仍打接口（Q1 修复）
+onDeactivated(() => {
+  stopPolling()
 })
 
 onUnmounted(() => {
-  if (refreshTimer) clearInterval(refreshTimer)
+  stopPolling()
 })
 
 // 兄弟页完成数据变更（如字体库删除字体→ Page 递推 refreshKey）：重拉统计与厂商分布

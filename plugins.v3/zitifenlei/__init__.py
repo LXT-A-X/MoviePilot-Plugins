@@ -259,7 +259,7 @@ class Zitifenlei(_PluginBase):
     plugin_name = "字体分类管家"
     plugin_desc = "字体归档整理与 ASS 字幕字体检查插件：扫描/上传字体到字体库，检查字幕缺失字体。"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/zitifenlei.png"
-    plugin_version = "3.0.0"
+    plugin_version = "3.0.1"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X/MoviePilot-Plugins"
     plugin_config_prefix = "zitifenlei_"
@@ -322,6 +322,92 @@ class Zitifenlei(_PluginBase):
         # 自动归档后的 assfonts 索引重建：脏标记 + 延迟聚合定时器（防批量归档反复重建）
         self._index_dirty = False
         self._index_rebuild_timer: Optional[threading.Timer] = None
+        # ── 轮询接口瘦身缓存（Q2/Q3/Q4/Q5 修复）─────────────────
+        # subsetted 判定缓存：file_path -> (mtime_ns, size, 是否内嵌)。
+        # 检查列表/缺失聚合按文件 mtime+size 签名命中直接复用，不再每次读整个文件；
+        # size 上限 500 条，超出清空重建（低频接口，重建一次不贵）
+        self._ass_subset_cache: Dict[str, Tuple] = {}
+        self._ass_subset_cache_limit = 500
+        # /missing/summary 聚合 TTL 缓存：cache_key -> (计算时间戳, 结果)，
+        # 60 秒内直接返回上次结果；字体库/字幕记录变更时由 _prune_stale_records/
+        # 检查写入路径主动失效（见 _invalidate_missing_agg）
+        self._missing_agg_cache: Optional[Tuple[str, float, Any]] = None
+        self._missing_agg_ttl = 60
+        # /stats 待整理计数缓存：input_dir -> (目录签名, 上次统计时间, 结果)，
+        # 目录 mtime 未变且 30 秒内直接复用，避免每 30 秒全量 rglob
+        self._pending_income_cache: Optional[Tuple[str, float, int]] = None
+        # 批量归档判重索引：dest_dir -> {(base_lower, suffix_lower)} 已存在集合。
+        # 首次归档某厂商目录时一次 rglob 建集合，批内后续归档 O(1) 判重，
+        # 消除 O(N²)：万级字体库批量投 1000 个字体不再每次全目录遍历
+        self._dest_name_index: Dict[str, set] = {}
+        self._dest_name_index_limit = 64  # 厂商目录数上限，超出清空重建
+        # _prune_stale_records 低频化闸门：记录上次执行时间，5 分钟内不重复全表 stat
+        self._last_prune_ts = 0.0
+
+    def _ass_is_subsetted(self, fp: str) -> bool:
+        """判定 ASS 是否已内嵌字体，带 (mtime_ns, size) 签名缓存（Q2/Q3 修复）。
+
+        检查页列表 / 缺失聚合都按文件实时判定 subsetted（与字体库删减即时同步），
+        但轮询路径每次 read_bytes 读整个字幕文件成本过高。这里用 stat 签名缓存：
+        文件未变化直接复用上次判定结果，只读一次 stat；文件变化才重新读字节判定。
+        """
+        try:
+            if not fp:
+                return False
+            p = Path(fp)
+            st = p.stat()
+            sig = (st.st_mtime_ns, st.st_size)
+            entry = self._ass_subset_cache.get(fp)
+            if entry and entry[0] == sig:
+                return entry[1]
+            subsetted = has_embedded_fonts(p.read_bytes())
+            if self._ass_subset_cache_limit and len(self._ass_subset_cache) >= self._ass_subset_cache_limit:
+                self._ass_subset_cache.clear()
+            self._ass_subset_cache[fp] = (sig, subsetted)
+            return subsetted
+        except Exception:
+            return False
+
+    def _invalidate_missing_agg(self) -> None:
+        """字体库/字幕记录变更后失效缺失聚合缓存（Q3 修复配合）"""
+        self._missing_agg_cache = None
+
+    def _ass_missing_agg_cached(self) -> Dict[str, Dict[str, Any]]:
+        """_ass_missing_agg 的 TTL 缓存包装：60 秒内直接返回上次聚合结果，
+        记录变更（检查写入/清理失效记录）时由 _invalidate_missing_agg 主动失效。（Q3 修复）
+        """
+        if self._db is None:
+            return {}
+        cache = self._missing_agg_cache
+        if cache and (time.time() - cache[1]) < self._missing_agg_ttl:
+            return cache[2]
+        result = self._ass_missing_agg()
+        self._missing_agg_cache = (None, time.time(), result)
+        return result
+
+    def _dest_names_for(self, dest_dir: Path) -> Dict[Tuple[str, str], str]:
+        """目标厂商目录"已存在文件名"索引（Q5 修复）：首次访问该目录时一次 rglob
+        建立 {(base_lower, suffix_lower): 文件路径} 映射，批内后续判重 O(1)；
+        同时覆盖旧平铺布局（厂商/基础名.后缀）与新格式子目录（厂商/格式/基础名.后缀）。
+        容量上限 64 个目录，超出清空重建（缓存容量策略）。
+        """
+        key = str(dest_dir)
+        index = self._dest_name_index.get(key)
+        if index is None:
+            index = {}
+            try:
+                for c in dest_dir.rglob(f"*"):
+                    try:
+                        if c.is_file():
+                            index[(c.stem.lower(), c.suffix.lower())] = str(c)
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+            if self._dest_name_index_limit and len(self._dest_name_index) >= self._dest_name_index_limit:
+                self._dest_name_index.clear()
+            self._dest_name_index[key] = index
+        return index
 
     # ─── 生命周期 ────────────────────────────────────────
     def get_state(self) -> bool:
@@ -814,40 +900,46 @@ class Zitifenlei(_PluginBase):
                 _logger.debug("目录轮询异常跳过", exc_info=True)
 
     def _on_watch_event(self, path: str) -> None:
-        """单文件事件：字体 → 自动归档；字幕 → 自动检查"""
+        """单文件事件：字体 → 自动归档；字幕 → 自动检查
+
+        Q6 修复：锁内只做「去重表检查 + 标记」，磁盘 IO（字体复制/移动、字幕
+        全文件读取）全部移到锁外——批量投递时 watchdog 事件线程不再为等锁排队，
+        2 秒防抖窗口恢复意义；共享缓冲（_processed_recent/_notify_agg）访问仍各自加锁。
+        """
         if not self._enabled or self._db is None:
             return
         # 过滤 NAS 系统目录与回收站（参考实时软连接插件）：@eaDir / #recycle / 隐藏文件等
         if self._is_system_hidden_path(Path(path)):
             return
-        with self._lock:
-            try:
-                p = Path(path)
-                if not p.is_file():
-                    return
-                # 双观察者（Observer + PollingObserver）会对同一文件各触发一次：
-                # 同一源文件 60 秒内已处理过则跳过，避免重复归档 / 生成重复检查记录
-                key = str(p.resolve())
-                now = time.time()
+        try:
+            p = Path(path)
+            if not p.is_file():
+                return
+            # 双观察者（Observer + PollingObserver）会对同一文件各触发一次：
+            # 同一源文件 60 秒内已处理过则跳过，避免重复归档 / 生成重复检查记录
+            key = str(p.resolve())
+            now = time.time()
+            with self._lock:
                 last = self._processed_recent.get(key)
                 if last is not None and now - last < 60.0:
                     return
+                # 先标记再处理：后续同一文件的重复事件直接跳过（双观察者并发安全）
+                self._processed_recent[key] = now
+            try:
                 if is_font_file(p.name):
                     # 归档函数内部自带成功/失败日志，此处不再重复记录；
                     # 返回值：>0=已归档，-1=进入待确认（目录自动收集关闭），None=跳过
                     font_id = self._archive_font_file(p, source="auto")
-                    if font_id and font_id > 0:
-                        # 归档结果进通知聚合缓冲：同一批连续放入的文件合并成一条归类通知
-                        with self._lock:
+                    with self._lock:
+                        if font_id and font_id > 0:
+                            # 归档结果进通知聚合缓冲：同一批连续放入的文件合并成一条归类通知
                             self._notify_agg["fonts"].append(p.name)
-                        self._queue_agg_notify()
-                        # 归档成功自动重建 assfonts 索引（延迟聚合，防批量归档反复重建）
-                        self._schedule_index_rebuild()
-                    elif font_id == -1:
-                        # 只进待确认（未归档）：走独立「待确认」通知，不再误报「已自动归档」
-                        with self._lock:
+                            # 归档成功自动重建 assfonts 索引（延迟聚合，防批量归档反复重建）
+                            self._schedule_index_rebuild()
+                        elif font_id == -1:
+                            # 只进待确认（未归档）：走独立「待确认」通知，不再误报「已自动归档」
                             self._notify_agg["fonts_pending"].append(p.name)
-                        self._queue_agg_notify()
+                    self._queue_agg_notify()
                 elif is_ass_file(p.name):
                     subset_dir_cfg = self.get_resource_or_config("subset_dir") or ""
                     if subset_dir_cfg and _path_within(p, Path(subset_dir_cfg)):
@@ -855,7 +947,6 @@ class Zitifenlei(_PluginBase):
                         # 「目录自动收集」开 → 立即后台自动子集化；关 → 进子集化页「待处理」等手动
                         self._schedule_subset_watch(p)
                         self._db.add_log(f"子集监控: {p.name} → 已进入子集化流程", "info")
-                        self._processed_recent[key] = now
                         return
                     result = self._check_ass_file(p, source="auto")
                     if result:
@@ -864,8 +955,8 @@ class Zitifenlei(_PluginBase):
                             "warning" if result["missing_count"] else "info",
                         )
                         missing = result.get("missing_fonts") or []
-                        if missing:
-                            with self._lock:
+                        with self._lock:
+                            if missing:
                                 self._notify_agg["subs_missing"].append(
                                     {
                                         "name": p.name,
@@ -873,33 +964,31 @@ class Zitifenlei(_PluginBase):
                                         "fonts": missing,
                                     }
                                 )
-                            self._queue_agg_notify()
-                        elif result.get("subsetted"):
-                            # 已内嵌（子集化）字幕自带字体，不依赖字体库
-                            with self._lock:
+                            elif result.get("subsetted"):
+                                # 已内嵌（子集化）字幕自带字体，不依赖字体库
                                 self._notify_agg["subs_subset"].append(p.name)
-                            self._queue_agg_notify()
-                        elif result.get("status") != "pending":
-                            # 待检查状态（目录自动收集关闭时的登记）不通知「字体齐全」，避免误导
-                            with self._lock:
+                            elif result.get("status") != "pending":
+                                # 待检查状态（目录自动收集关闭时的登记）不通知「字体齐全」，避免误导
                                 self._notify_agg["subs_ok"].append(p.name)
-                            self._queue_agg_notify()
+                        self._queue_agg_notify()
                         # 子集化自动处理（设置 auto_subset 开启时）：跟随「目录自动收集」开关——
                         # 开 → 立即后台自动子集化；关 → 进子集化页「待处理」等手动
                         if self.get_resource_or_config("auto_subset"):
                             self._schedule_subset_watch(p)
-                # 标记已处理（含非字体/字幕文件，避免后续事件空转）
-                self._processed_recent[key] = now
-                # 限制增长：超过阈值时清理 5 分钟前的旧条目
-                if len(self._processed_recent) > 2000:
-                    expire = now - 300.0
-                    for k in [kk for kk, tt in self._processed_recent.items() if tt < expire]:
-                        self._processed_recent.pop(k, None)
             except Exception as err:
                 self._db.add_log(f"监控处理失败 {path}: {err}", "error")
             finally:
                 # 本次处理结束，移除防抖条目（RLock 可重入）
-                self._watch_timers.pop(path, None)
+                with self._lock:
+                    self._watch_timers.pop(path, None)
+                    # 限制增长：超过阈值时清理 5 分钟前的旧条目
+                    if len(self._processed_recent) > 2000:
+                        expire = now - 300.0
+                        for k in [kk for kk, tt in self._processed_recent.items() if tt < expire]:
+                            self._processed_recent.pop(k, None)
+        except Exception:
+            # 文件在 stat/resolve 阶段消失（瞬时文件/系统临时文件）——静默忽略
+            return
 
     def _queue_auto_pending(self, file_path: Path, source: str) -> Optional[int]:
         """监控到的字体进「待确认」列表（目录自动收集关闭时的行为，与手动上传一致）"""
@@ -995,7 +1084,16 @@ class Zitifenlei(_PluginBase):
                     pass
             # 按格式分子文件夹归档：字体库/厂商/格式/基础名.后缀（同字体不同格式共存，目录清晰）
             fmt_dir = dest_dir / _font_subdir_name(file_path.suffix)
-            existing = _dest_exists_recursive(dest_dir, base, file_path.suffix)
+            # Q5 修复：判重走"目标厂商目录已存在文件名"索引（_dest_names_for 首次
+            # 一次 rglob 建表，批内后续 O(1)），去除批量归档的 O(N²) 递归 rglob；
+            # 索引 key 同时覆盖旧平铺布局与新格式子目录（rglob 全目录收集）
+            name_index = self._dest_names_for(dest_dir)
+            try:
+                existing = name_index.get((base.lower(), file_path.suffix.lower()), None)
+            except Exception:
+                existing = None
+            if existing is not None:
+                existing = Path(existing)
             if existing:
                 # 字体库已存在同名同后缀字体（含旧平铺布局与格式子文件夹）：
                 # 跳过本次归档（不再生成 -2/-3 副本，保证轮询/兜底全量扫描存量文件时幂等）
@@ -1044,6 +1142,13 @@ class Zitifenlei(_PluginBase):
             # 记录源文件已处理（复制模式下源文件留存字体监控目录，「待整理」不再计入）
             self._db.mark_font_processed(str(file_path))
             self._db.add_log(f"自动归档: {dest.name}", "info")
+            # 归档成功：同步更新目录文件名索引，批内后续同名字体可直接判重跳过
+            try:
+                dkey = str(dest_dir)
+                if dkey in self._dest_name_index:
+                    self._dest_name_index[dkey].add((dest.stem.lower(), dest.suffix.lower()))
+            except Exception:
+                pass
             # 归档成功：标记 assfonts 索引需要重建（由调用方调度延迟聚合重建）
             self._index_dirty = True
             return font_id
@@ -2084,6 +2189,23 @@ class Zitifenlei(_PluginBase):
         )
 
     # ─── API：统计 ──────────────────────────────────────
+    def _input_dir_signature(self, input_dir: Path) -> str:
+        """监控目录内容签名：目录 mtime + 首层文件数——目录 mtime 变化通常意味着
+        有新文件写入/删除；对深层子目录变化不敏感（可接受），避免每次 stat 整个树。（Q4 修复）
+        """
+        try:
+            st = input_dir.stat()
+            sig = f"{st.st_mtime_ns}:{st.st_size}"
+            try:
+                with os.scandir(input_dir) as it:
+                    n = sum(1 for _ in it)
+                sig += f":{n}"
+            except Exception:
+                pass
+            return sig
+        except Exception:
+            return ""
+
     def _count_pending_incoming(self) -> int:
         """字体监控目录中尚未被收集的字体文件数（仪表盘「待整理」口径）
 
@@ -2093,12 +2215,20 @@ class Zitifenlei(_PluginBase):
         - 已被监控/全量检查处理过的源文件（_archive_font_file 归档或同名跳过时标记）。
 
         用户往监控目录放 N 个字体 → 未入库前显示 N，监控自动归档/全量检查处理后归零。
+
+        Q4 修复：加目录内容签名 + 30 秒 TTL 缓存——目录签名未变（无新写入）
+        且在 TTL 内直接复用上次计数，避免 30 秒轮询每次都全量 rglob。
         """
         try:
             input_dir = self.get_resource_or_config("input_dir") or ""
             if not input_dir or not Path(input_dir).is_dir():
                 return 0
             lib_dir = self.get_resource_or_config("lib_dir") or ""
+            # 目录签名缓存：签名相同且在 30 秒内直接返回缓存结果
+            sig = self._input_dir_signature(Path(input_dir))
+            cache = self._pending_income_cache
+            if cache and cache[0] == sig and (time.time() - cache[1]) < 30:
+                return cache[2]
             pending_paths: set = set()
             try:
                 for r in self._db.query(
@@ -2121,6 +2251,7 @@ class Zitifenlei(_PluginBase):
                 if resolved in processed or resolved in pending_paths:
                     continue
                 count += 1
+            self._pending_income_cache = (sig, time.time(), count)
             return count
         except Exception:
             return 0
@@ -2240,7 +2371,9 @@ class Zitifenlei(_PluginBase):
             except Exception:
                 pass
         try:
-            self._db.set_setting("enabled", self._enabled)
+            # Q18 修复：补 self._db 判空，与其他调用点防御风格一致
+            if self._db is not None:
+                self._db.set_setting("enabled", self._enabled)
             self._db.add_log("插件配置已更新", "info")
             self._start_watcher()
         except Exception as err:
@@ -2314,6 +2447,25 @@ class Zitifenlei(_PluginBase):
             })
         except Exception as err:
             return self._err(f"读取字体目录数据失败: {err}")
+
+    def api_font_tree_meta(self) -> Dict[str, Any]:
+        """字体库变更签名（Q15 修复）：轮询路径的轻量"有没有变化"检查——
+        只跑两次聚合 SQL（count + max(id)/max(updated_at)），避免轮询每次
+        全量返回上万条字体 JSON。前端轮询比对签名，无变化不重拉 /fonts/tree。
+        """
+        if not self._db_ok():
+            return self._ok({"total": 0, "signature": ""})
+        try:
+            row = self._db.query_one(
+                "SELECT COUNT(*) AS c, COALESCE(MAX(id),0) AS m, "
+                "COALESCE(MAX(updated_at),'') AS u FROM fonts"
+            )
+            c = row["c"] if row else 0
+            m = row["m"] if row else 0
+            u = row["u"] if row else ""
+            return self._ok({"total": c, "signature": f"{c}:{m}:{u}"})
+        except Exception as err:
+            return self._err(f"读取字体库签名失败: {err}")
 
     def api_font_delete(self, id: int = 0) -> Dict[str, Any]:
         """删除字体：删除数据库记录 + 磁盘上的字体文件（含清理空目录）"""
@@ -3162,7 +3314,16 @@ class Zitifenlei(_PluginBase):
         """ASS 检查记录列表（实时重算缺失/子集化，与字体库删减即时同步）"""
         if not self._db_ok():
             return self._ok({"list": [], "total": 0})
-        self._prune_stale_records()
+        # Q2 修复：_prune_stale_records 不再挂在每次列表请求上（全表 stat 昂贵），
+        # 改为 5 分钟上限的低频清理——下个周期前拉到被删除字幕的记录最多 5 分钟延迟，
+        # 对比原先每次轮询全表 stat 的代价可忽略
+        try:
+            now_ts = time.time()
+            if now_ts - self._last_prune_ts > 300:
+                self._prune_stale_records()
+                self._last_prune_ts = now_ts
+        except Exception:
+            pass
         try:
             data = self._db.query_ass(keyword=(search or "").strip(), page=page, limit=limit)
             families, match_source = self._lib_font_keys()
@@ -3182,9 +3343,9 @@ class Zitifenlei(_PluginBase):
                         continue
                     all_fonts = row.get("all_fonts") or []
                     fp = row.get("file_path") or ""
-                    subsetted = bool(
-                        fp and Path(fp).is_file() and has_embedded_fonts(Path(fp).read_bytes())
-                    )
+                    # Q2 修复：subsetted 判定走 (mtime_ns, size) 签名缓存，
+                    # 文件未变化仅 stat 一次，不再每行 read_bytes 整个 ASS 文件
+                    subsetted = self._ass_is_subsetted(fp)
                     missing_live: List[str] = []
                     seen_k: set = set()
                     for f in all_fonts:
@@ -3909,7 +4070,7 @@ class Zitifenlei(_PluginBase):
         try:
             check = [
                 {"name": v["name"], "count": v["count"]}
-                for v in sorted(self._ass_missing_agg().values(), key=lambda x: -x["count"])
+                for v in sorted(self._ass_missing_agg_cached().values(), key=lambda x: -x["count"])
             ]
             subset = self._subset_missing_agg()
             return self._ok(
@@ -4121,6 +4282,8 @@ class Zitifenlei(_PluginBase):
         """聚合全部已检查记录的缺失字体（实时按当前字体库重算）。
 
         返回 {归一化key: {"name": 展示名, "count": 出现次数}}；已被当前字体库收录的不计入。
+        Q3 修复：subsetted 判定走 (mtime_ns, size) 签名缓存（_ass_is_subsetted），
+        不再对每条字幕 read_bytes 整个文件；调用方走 _ass_missing_agg_cached TTL 缓存。
         """
         agg: Dict[str, Dict[str, Any]] = {}
         try:
@@ -4129,7 +4292,7 @@ class Zitifenlei(_PluginBase):
                 # 已内嵌（子集化）字幕自带字体，不参与缺失修复聚合
                 fp = r.get("file_path") or ""
                 try:
-                    if fp and Path(fp).is_file() and has_embedded_fonts(Path(fp).read_bytes()):
+                    if fp and self._ass_is_subsetted(fp):
                         continue
                 except Exception:
                     pass
@@ -4153,7 +4316,7 @@ class Zitifenlei(_PluginBase):
         """聚合缺失字体列表（自动检查 / 手动检查 / 历史记录汇总）"""
         if not self._db_ok():
             return self._ok({"list": [], "total": 0})
-        agg = self._ass_missing_agg()
+        agg = self._ass_missing_agg_cached()
         lst = [
             {"name": v["name"], "key": k, "count": v["count"]}
             for k, v in sorted(agg.items(), key=lambda kv: -kv[1]["count"])
@@ -4417,6 +4580,7 @@ class Zitifenlei(_PluginBase):
             {"path": "/db/clear", "endpoint": self.api_db_clear, "methods": ["DELETE"], "auth": "bear", "summary": "清空数据库"},
             {"path": "/fonts", "endpoint": self.api_fonts, "methods": ["GET"], "auth": "bear", "summary": "字体库列表"},
             {"path": "/fonts/tree", "endpoint": self.api_font_tree, "methods": ["GET"], "auth": "bear", "summary": "字体目录数据（前端构建目录树）"},
+            {"path": "/fonts/tree_meta", "endpoint": self.api_font_tree_meta, "methods": ["GET"], "auth": "bear", "summary": "字体库变更签名（轮询轻量检查用）"},
             {"path": "/fonts/delete", "endpoint": self.api_font_delete, "methods": ["DELETE"], "auth": "bear", "summary": "删除字体（记录+文件）"},
             {"path": "/fonts/recalc_vendor", "endpoint": self.api_recalc_vendor, "methods": ["POST"], "auth": "bear", "summary": "重新识别厂商（可不传 id 全量重算）"},
             {"path": "/fonts/pending", "endpoint": self.api_pending_list, "methods": ["GET"], "auth": "bear", "summary": "待确认字体列表"},

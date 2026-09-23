@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue'
 import apiModule from '../api/fontManager.js'
 
 const props = defineProps({
@@ -98,6 +98,37 @@ async function loadRecords(reset = false) {
     }
   } catch (e) {
     emit('notify', e.message || '读取子集化记录失败')
+  } finally {
+    loadingRecords.value = false
+  }
+}
+
+// Q7 修复：刷新列表但保持当前页码（替换当前页对应区间的数据）。
+// 与 loadRecords(reset=true) 的区别：不重置分页回第 1 页；
+// 与 loadRecords(false) 的区别：loadRecords(false) 是"追加下一页"语义，
+// 直接用于轮询会重复追加同一页数据。
+async function refreshCurrentPage() {
+  if (loadingRecords.value) return
+  loadingRecords.value = true
+  try {
+    const data = await apiModule.get(props.api, '/subset/records', {
+      status: filterStatus.value,
+      search: recordSearch.value,
+      page: recordPage.value,
+      limit: recordLimit,
+    })
+    const list = (data && data.list) || []
+    recordTotal.value = (data && data.total) || 0
+    if (typeof data?.retriable === 'number') retriableCount.value = data.retriable
+    // 用最新当前页数据替换 records 中 (recordPage-1)*limit 起的区间，
+    // 保留已加载的前面各页，不追加不重置
+    const idx = (recordPage.value - 1) * recordLimit
+    records.value = [...records.value.slice(0, idx), ...list]
+    if (records.value.length >= recordTotal.value || !list.length) {
+      recordReachedEnd.value = true
+    }
+  } catch (e) {
+    emit('notify', e.message || '刷新子集化记录失败')
   } finally {
     loadingRecords.value = false
   }
@@ -249,34 +280,44 @@ async function retryFailed() {
 }
 
 // 下载结果文件（base64 → blob）
+// Q10 修复：downloadRecord 返回明确状态（'ok'/'none'/'missing'/'error'/'busy'），
+// 不再静默 return，调用方（downloadAll / 单条按钮）可按状态准确统计。
 async function downloadRecord(r) {
-  if (downloadingId.value) return
+  if (downloadingId.value) return 'busy'
   if (!r.out_file) {
     emit('notify', '无输出文件', 'warning')
-    return
+    return 'none'
   }
   downloadingId.value = r.id
   try {
-    const res = await apiModule.get(props.api, '/subset/download', { id: r.id })
-    if (!res?.data) {
-      emit('notify', '结果文件不存在', 'warning')
-      return
-    }
-    const bytes = Uint8Array.from(atob(res.data), c => c.charCodeAt(0))
-    const blob = new Blob([bytes])
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = res.name || (r.file_name.replace(/\.ass$/i, '') + '.assfonts.ass')
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    URL.revokeObjectURL(url)
+    const st = await _doDownload(r)
+    if (st !== 'ok') emit('notify', st === 'missing' ? '结果文件不存在' : '无输出文件', 'warning')
+    return st
   } catch (e) {
     emit('notify', e.message || '下载失败')
+    return 'error'
   } finally {
     downloadingId.value = null
   }
+}
+
+// 内部下载执行：取 base64 → 触发浏览器下载。不占单槽 downloadingId，
+// 供「全部下载」并发池并行调用（Q19）。
+async function _doDownload(r) {
+  if (!r.out_file) return 'none'
+  const res = await apiModule.get(props.api, '/subset/download', { id: r.id })
+  if (!res?.data) return 'missing'
+  const bytes = Uint8Array.from(atob(res.data), c => c.charCodeAt(0))
+  const blob = new Blob([bytes])
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = res.name || (r.file_name.replace(/\.ass$/i, '') + '.assfonts.ass')
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
+  return 'ok'
 }
 
 // 可批量下载的记录：已加载的成功且带输出文件
@@ -284,14 +325,19 @@ const downloadableRecords = computed(() =>
   records.value.filter(r => r.status === 'success' && r.out_file)
 )
 
-// 全部下载：按当前筛选（状态下拉+名称搜索）拉取全部成功成品，串行逐个下载；
+// 全部下载：按当前筛选（状态下拉+名称搜索）拉取全部成功成品；
+// Q19 修复：限并发 3 的小并发池（文档建议 2~3 并发更快），替代串行逐个 await；
+// Q10 修复：按每个记录的返回状态准确统计成功/失败，不再把"被守卫跳过"计入成功。
 // 未选筛选则下载全部分页的成功成品（limit=0 后端返回当前筛选下全部记录，不限页）
 const downloadAllBusy = ref(false)
 async function downloadAll() {
   if (downloadAllBusy.value) return
+  // 有单个下载正在进行时直接拒绝，避免与并发池混跑
+  if (downloadingId.value) {
+    emit('notify', '有下载正在进行，请稍候', 'warning')
+    return
+  }
   downloadAllBusy.value = true
-  let ok = 0
-  let fail = 0
   try {
     const data = await apiModule.get(props.api, '/subset/records', {
       status: filterStatus.value,
@@ -304,17 +350,29 @@ async function downloadAll() {
       emit('notify', '当前筛选下没有可下载的成功成品', 'warning')
       return
     }
-    for (const r of targets) {
-      try {
-        await downloadRecord(r)
-        ok += 1
-      } catch (e) {
-        fail += 1
+    // 小并发池：最多 3 个并发下载
+    const stats = { ok: 0, fail: 0, missing: 0 }
+    let head = 0
+    const worker = async () => {
+      while (head < targets.length) {
+        const r = targets[head++]
+        try {
+          const st = await _doDownload(r)
+          if (st === 'ok') stats.ok += 1
+          else if (st === 'missing') stats.missing += 1
+          else stats.fail += 1
+        } catch (e) {
+          stats.fail += 1
+        }
       }
-      // 逐条下载间让出事件循环，浏览器同域批量下载逐步放行
-      await new Promise(res => setTimeout(res, 350))
     }
-    emit('notify', fail ? `已下载 ${ok} 个，${fail} 个失败` : `已下载 ${ok} 个结果文件`, ok ? 'success' : 'warning')
+    await Promise.all([worker(), worker(), worker()])
+    const failed = stats.fail + stats.missing
+    if (failed) {
+      emit('notify', `已下载 ${stats.ok} 个，${stats.fail} 个失败${stats.missing ? `，${stats.missing} 个文件缺失` : ''}`, stats.ok ? 'success' : 'warning')
+    } else {
+      emit('notify', `已下载 ${stats.ok} 个结果文件`, 'success')
+    }
   } catch (e) {
     emit('notify', e.message || '获取结果失败')
   } finally {
@@ -348,6 +406,18 @@ onMounted(() => {
   loadRecords()
   startPolling()
 })
+// keep-alive 缓存场景：切回时恢复轮询并重拉数据（Q1 修复；Q14 后切 Tab
+// 不再由 Page 广播刷新键，各视图自查自刷）
+onActivated(() => {
+  loadStatus()
+  loadPending()
+  refreshCurrentPage()
+  startPolling()
+})
+// 切走（进入 keep-alive 缓存）时停止轮询，避免后台不可见视图持续打接口（Q1 修复）
+onDeactivated(() => {
+  stopPolling()
+})
 onUnmounted(() => stopPolling())
 
 let pollTimer = null
@@ -355,7 +425,10 @@ function startPolling() {
   stopPolling()
   pollTimer = setInterval(() => {
     loadPending()
-    loadRecords(true)
+    // Q7 修复：轮询刷新保持当前页码（替换当前页区间），不再强制回第 1 页，
+    // 避免翻页浏览时每 30 秒被拉回首页；也避免 loadRecords(false) 的
+    // 追加语义在轮询里造成重复数据
+    refreshCurrentPage()
     loadStatus()
   }, 30000)
 }

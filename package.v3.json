@@ -1,14 +1,15 @@
-{
+﻿{
   "Zitifenlei": {
     "name": "字体分类管家",
     "description": "字体归档整理 + ASS 字幕字体检查 + 子集化插件：扫描/上传字体到字体库，按厂商自动归档，检查字幕缺失字体，用 assfonts 把字体子集化内嵌进字幕（支持 HDR 压暗）；目录监控与 MoviePilot 入库联动自动处理。",
     "labels": "字体,字幕,整理,ASS",
-    "version": "3.0.0",
+    "version": "3.0.1",
     "icon": "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/zitifenlei.png",
     "author": "LXT-A-X",
     "level": 1,
     "system_version": ">=3.0.0",
     "history": {
+      "v3.0.1": "v3.0.1 代码审查 19 项改进落地（严重 9 / 中等 6 / 轻微 4）：①前端 keep-alive 轮询治理——5 个视图补 onDeactivated 停轮询 + onActivated 恢复，切走 Tab 不再后台每 30 秒打接口；子集化页轮询保持当前页码不再强制回第 1 页；检查页/子集化列表请求加 seq 守卫丢弃过期响应，杜绝重复/错序；字体预览快速连点加 seq 守卫防张冠李戴；全部下载改限并发 3 的小并发池并按真实状态统计，不再误报成功。②Page 级刷新瘦身——切 Tab 不再广播 refreshKey 触发全部缓存视图并发全量拉取，改由各视图 onActivated 自查自刷。③后端轮询接口瘦身——/ass/list 与缺失聚合的 subsetted 判定改 (mtime_ns,size) 签名缓存（不再每行 read_bytes 整个字幕文件）、_prune_stale_records 改 5 分钟低频、缺失聚合加 60 秒 TTL 缓存、/stats 待整理计数加目录签名 + 30 秒缓存、新增 /fonts/tree_meta 轻量变更签名接口，字体库轮询无变化不再全量传输万级 JSON。④批量归档判重去 O(N²)——目标厂商目录已存在文件名索引首次 rglob 建表、批内 O(1)，归档成功即时回填。⑤监控事件锁内只做去重标记，磁盘 IO（复制/移动/读文件）移出全局锁，批量投递不再排队。⑥assfonts 二进制探测按 (mtime_ns,size) 签名缓存，不再每次轮询 spawn 子进程。⑦db.py 日志裁剪改低频（每 20 条一次 DELETE）、add_font 用 lastrowid 去掉回查、get_setting/set_setting 带类型前缀还原消除纯数字误转 int、sqlite 统一隔离级别（isolation_level=None + 手动事务）防 import_all 报嵌套事务。⑧set_setting 调用点补判空。",
       "v3.0.0": "V3 专用版：宿主导入迁移到稳定 SDK（app.sdk.config / app.sdk.logging / app.sdk.events）；依赖改用 pyproject.toml 声明；事件与 API 契约对齐 MoviePilot V3；功能与 V2 版 1.2.24 一致。"
     }
   },

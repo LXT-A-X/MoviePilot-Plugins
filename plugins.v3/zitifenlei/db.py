@@ -108,7 +108,10 @@ class FontDB:
 
     def _ensure_connected(self) -> None:
         if self._conn is None:
-            self._conn = sqlite3.connect(self._path, check_same_thread=False)
+            # Q17 修复：统一显式隔离级别（isolation_level=None + 手动 BEGIN/COMMIT），
+            # 避免 sqlite3 隐式事务与 import_all 手动 BEGIN 交错时报
+            # "cannot start a transaction within a transaction"（低频但原理性隐患）
+            self._conn = sqlite3.connect(self._path, check_same_thread=False, isolation_level=None)
             self._conn.row_factory = sqlite3.Row
             self._conn.execute("PRAGMA journal_mode=WAL")
             with self._lock:
@@ -158,14 +161,28 @@ class FontDB:
     def now() -> str:
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    def __init__(self, db_path: str | Path):
+        self._path = str(db_path)
+        self._lock = threading.RLock()
+        self._conn = None
+        # Q12 修复：日志裁剪计数器——每写入 N 条日志才执行一次 DELETE 裁剪，
+        # 避免每次 INSERT 都跟一条 NOT IN 子查询（日志密集场景 SQL 翻倍）
+        self._log_trim_counter = 0
+        self._log_trim_interval = 20  # 每 20 条裁剪一次（保留 200 条上限仍成立：峰值多 19 条）
+        self._ensure_connected()
+
     def add_log(self, message: str, level: str = "info") -> None:
         try:
             self.execute(
                 "INSERT INTO logs (time, level, message) VALUES (?, ?, ?)",
                 (self.now(), level, message),
             )
-            # 保留最近 200 条日志
-            self.execute("DELETE FROM logs WHERE id NOT IN (SELECT id FROM logs ORDER BY id DESC LIMIT 200)")
+            # Q12 修复：保留最近 200 条日志——裁剪低频化，每 _log_trim_interval 条
+            # 才执行一次 DELETE（原实现每次 INSERT 都跟一条 NOT IN 子查询，SQL 翻倍）
+            self._log_trim_counter += 1
+            if self._log_trim_counter >= self._log_trim_interval:
+                self._log_trim_counter = 0
+                self.execute("DELETE FROM logs WHERE id NOT IN (SELECT id FROM logs ORDER BY id DESC LIMIT 200)")
         except Exception:
             pass
         # 镜像到插件文件日志（logs/plugins/zitifenlei.log），保证 API/系统日志页可读；
@@ -182,31 +199,46 @@ class FontDB:
     # ============ 插件状态（键值存储，独立于 MP 配置） ============
 
     def get_setting(self, key: str, default: Any = None) -> Any:
-        """读取插件内部状态（存储为字符串，返回时尝试还原）"""
+        """读取插件内部状态（存储为字符串，带类型前缀标记还原）
+
+        Q16 修复：set_setting 写入时带类型前缀（b:/i:/s:），get_setting 按前缀还原，
+        解决老实现 isdigit() 把纯数字字符串（如档位 "80"）误转成 int 导致的类型不稳定；
+        兼容老数据：前缀缺失时按布尔/字符串启发还原（True/False），纯数字按原字符串返回。
+        """
         try:
             row = self.query_one("SELECT value FROM plugin_settings WHERE key = ?", (key,))
             if row is None:
                 return default
             val = row["value"]
+            if val.startswith("b:"):
+                return val[2:] == "1"
+            if val.startswith("i:"):
+                try:
+                    return int(val[2:])
+                except Exception:
+                    return val[2:]
+            if val.startswith("s:"):
+                return val[2:]
+            # 兼容旧数据：无前缀的布尔字面量
             if val == "True":
                 return True
             if val == "False":
                 return False
-            if val.isdigit():
-                return int(val)
             return val
         except Exception:
             return default
 
     def set_setting(self, key: str, value: Any) -> None:
-        """保存插件内部状态"""
+        """保存插件内部状态（Q16 修复：写入时带类型前缀，get_setting 据此还原类型）"""
         try:
             if value is True or value is False:
-                val = "True" if value else "False"
+                val = "b:1" if value else "b:0"
             elif value is None:
-                val = ""
+                val = "s:"
+            elif isinstance(value, int):
+                val = f"i:{value}"
             else:
-                val = str(value)
+                val = f"s:{value}"
             self.execute(
                 "INSERT INTO plugin_settings (key, value) VALUES (?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -238,26 +270,29 @@ class FontDB:
     # ============ fonts ============
 
     def add_font(self, item: Dict[str, Any]) -> int:
-        self.execute(
-            """INSERT INTO fonts (name, family, vendor, designer, file_name, file_size,
-               favorite, status, source, file_path, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)""",
-            (
-                item.get("name", ""),
-                item.get("family", ""),
-                item.get("vendor", "未知厂商"),
-                item.get("designer", ""),
-                item.get("file_name", ""),
-                item.get("file_size", 0),
-                item.get("status", "已归档"),
-                item.get("source", "manual"),
-                item.get("file_path", ""),
-                self.now(),
-                self.now(),
-            ),
-        )
-        row = self.query_one("SELECT id FROM fonts WHERE file_path = ? ORDER BY id DESC LIMIT 1", (item.get("file_path", ""),))
-        return row["id"] if row else 0
+        # Q13 修复：直接取 cursor.lastrowid 拿自增 id，省掉插入后的回查 SELECT
+        with self._lock:
+            self._ensure_connected()
+            cur = self._conn.execute(
+                """INSERT INTO fonts (name, family, vendor, designer, file_name, file_size,
+                   favorite, status, source, file_path, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)""",
+                (
+                    item.get("name", ""),
+                    item.get("family", ""),
+                    item.get("vendor", "未知厂商"),
+                    item.get("designer", ""),
+                    item.get("file_name", ""),
+                    item.get("file_size", 0),
+                    item.get("status", "已归档"),
+                    item.get("source", "manual"),
+                    item.get("file_path", ""),
+                    self.now(),
+                    self.now(),
+                ),
+            )
+            self._conn.commit()
+            return cur.lastrowid or 0
 
     def count_fonts_by_path(self, file_path: str) -> int:
         row = self.query_one("SELECT COUNT(*) AS c FROM fonts WHERE file_path = ?", (file_path,))

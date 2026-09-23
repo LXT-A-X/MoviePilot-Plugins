@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, onUnmounted, ref } from 'vue'
+import { onActivated, onDeactivated, onMounted, onUnmounted, ref } from 'vue'
 import apiModule from '../api/fontManager.js'
 
 const props = defineProps({
@@ -132,6 +132,17 @@ onMounted(() => {
   loadSummary()
   loadUploads()
   startPolling()
+})
+// keep-alive 缓存场景：切回时恢复轮询并重拉数据（Q1 修复；Q14 后切 Tab
+// 不再由 Page 广播刷新键，各视图自查自刷）
+onActivated(() => {
+  loadSummary()
+  loadUploads()
+  startPolling()
+})
+// 切走（进入 keep-alive 缓存）时停止轮询，避免后台不可见视图持续打接口（Q1 修复）
+onDeactivated(() => {
+  stopPolling()
 })
 onUnmounted(() => stopPolling())
 

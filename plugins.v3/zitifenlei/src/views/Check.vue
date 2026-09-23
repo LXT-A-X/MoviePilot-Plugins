@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue'
 import apiModule from '../api/fontManager.js'
 
 const props = defineProps({
@@ -47,6 +47,9 @@ const matchSourceText = computed(() => {
   return ''
 })
 
+// 列表请求序号守卫：30 秒轮询（重置到第 1 页）与「加载更多」互斥请求可能交错，
+// 只应用最后发起的请求的响应，丢弃过期响应，避免列表重复/错序（Q8 修复）
+let listReqSeq = 0
 async function loadRecords(reset = false) {
   if (loadingList.value) return
   if (reset) {
@@ -55,6 +58,7 @@ async function loadRecords(reset = false) {
     selectedId.value = null
   }
   if (reachedEnd.value) return
+  const seq = ++listReqSeq
   loadingList.value = true
   try {
     const data = await apiModule.get(props.api, '/ass/list', {
@@ -62,6 +66,7 @@ async function loadRecords(reset = false) {
       limit,
       search: search.value,
     })
+    if (seq !== listReqSeq) return
     const list = data.list || []
     total.value = data.total || 0
     matchSource.value = data.match_source || list[0]?.match_source || matchSource.value
@@ -71,9 +76,9 @@ async function loadRecords(reset = false) {
     }
     // 注意：不自动选中/不自动加载第一条——右侧只在点击左侧记录时显示
   } catch (e) {
-    emit('notify', e.message || '加载检查记录失败')
+    if (seq === listReqSeq) emit('notify', e.message || '加载检查记录失败')
   } finally {
-    loadingList.value = false
+    if (seq === listReqSeq) loadingList.value = false
   }
 }
 
@@ -231,6 +236,7 @@ function goFontSearch(name) {
 async function refreshRecordsSoft() {
   page.value = 1
   reachedEnd.value = false
+  const seq = ++listReqSeq
   loadingList.value = true
   try {
     const data = await apiModule.get(props.api, '/ass/list', {
@@ -238,6 +244,7 @@ async function refreshRecordsSoft() {
       limit,
       search: search.value,
     })
+    if (seq !== listReqSeq) return
     const list = data.list || []
     total.value = data.total || 0
     matchSource.value = data.match_source || list[0]?.match_source || matchSource.value
@@ -251,9 +258,9 @@ async function refreshRecordsSoft() {
       detailOpen.value = false
     }
   } catch (e) {
-    emit('notify', e.message || '刷新检查记录失败')
+    if (seq === listReqSeq) emit('notify', e.message || '刷新检查记录失败')
   } finally {
-    loadingList.value = false
+    if (seq === listReqSeq) loadingList.value = false
   }
 }
 
@@ -281,6 +288,19 @@ watch(() => props.refreshKey, () => {
 onMounted(async () => {
   await loadRecords(true)
   startPolling()
+})
+
+// keep-alive 缓存场景：切回本视图时恢复轮询（onDeactivated 已停掉），
+// 并重拉列表（Q14 后切 Tab 不再由 Page 广播刷新键，各视图自查自刷）
+onActivated(() => {
+  refreshRecordsSoft()
+  startPolling()
+})
+
+// 切走视图（进入 keep-alive 缓存）时立即停止轮询，避免后台不可见视图
+// 每 30 秒仍打接口（Q1 修复）
+onDeactivated(() => {
+  stopPolling()
 })
 
 onUnmounted(() => {
