@@ -137,7 +137,7 @@ class FontInAssProxy(_PluginBase):
     plugin_name = "字幕字体代理"
     plugin_desc = "反代 Emby/Jellyfin 字幕流，实时子集化并嵌入字体（[Fonts] 段），未装字体的设备也能正常显示特效字幕"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/fontinassproxy.jpg"
-    plugin_version = "3.0.1"
+    plugin_version = "3.0.2"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X/MoviePilot-Plugins"
     plugin_config_prefix = "fontinassproxy_"
@@ -366,10 +366,8 @@ class FontInAssProxy(_PluginBase):
     # ------------------------------------------------------------------ 命令与服务
     @staticmethod
     def get_command() -> List[Dict[str, Any]]:
-        return [
-            {"cmd": "/重建字体索引", "event": "plugin.action", "desc": "字幕字体代理：重建字体索引", "data": {"action": "rebuild_index"}, "category": "字幕字体代理"},
-            {"cmd": "/清理字幕缓存", "event": "plugin.action", "desc": "字幕字体代理：清空处理结果缓存", "data": {"action": "clear_cache"}, "category": "字幕字体代理"},
-        ]
+        # 不注册 Telegram 命令（命令需配套事件分发逻辑，当前不提供）
+        return []
 
     def get_service(self) -> List[Dict[str, Any]]:
         return [
