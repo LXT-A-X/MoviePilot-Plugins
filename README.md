@@ -34,7 +34,7 @@ MoviePilot 插件仓库，兼容 **V2 与 V3**，收录实用插件。
 3. 配置 Emby 地址与字体目录
 4. 可选：启用内置反代端口（免 nginx）
 
-**详细使用说明见 [字幕字体代理使用手册](/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v3/fontinassproxy/README.md)**
+**详细使用说明见 [字幕字体代理使用手册](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v3/fontinassproxy/README.md)**
 
 ---
 
@@ -72,7 +72,7 @@ MoviePilot 插件仓库，兼容 **V2 与 V3**，收录实用插件。
 * 该能力**不依赖 AI**：TMDB 查询不经 LLM，AI 总开关关闭时同样可用；
 * 若**不开启**，本插件只做「翻译 + 写回」，可与 personmeta 并存（中文名 / 简介 / 头像仍由 personmeta 负责）。
 
-**详细使用说明见 [Emby 演职人员中文化使用手册](/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v3/embypeoplelocalize/README.md)**
+**详细使用说明见 [Emby 演职人员中文化使用手册](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v3/embypeoplelocalize/README.md)**
 
 ---
 
@@ -94,7 +94,7 @@ MoviePilot 插件仓库，兼容 **V2 与 V3**，收录实用插件。
 
 1. 在 MoviePilot 插件市场添加本仓库地址
 2. 搜索 "字体分类管家" 并安装（V2 1.2.24 / V3 3.0.2）
-3. 在插件「设置」页配置字体库目录与监控目录（详见[使用手册](/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v2/zitifenlei/%E4%BD%BF%E7%94%A8%E6%89%8B%E5%86%8C.md)）
+3. 在插件「设置」页配置字体库目录与监控目录（详见[使用手册](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v2/zitifenlei/%E4%BD%BF%E7%94%A8%E6%89%8B%E5%86%8C.md)）
 4. 启用插件
 
-**详细使用说明见 [字体分类管家使用手册](/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v2/zitifenlei/%E4%BD%BF%E7%94%A8%E6%89%8B%E5%86%8C.md)**
+**详细使用说明见 [字体分类管家使用手册](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v2/zitifenlei/%E4%BD%BF%E7%94%A8%E6%89%8B%E5%86%8C.md)**

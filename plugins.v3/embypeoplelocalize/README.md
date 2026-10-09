@@ -957,7 +957,7 @@
 
 本插件已**缝合官方「演职人员刮削」**的能力：在设置页打开「人名池 → **拉取时用 TMDB 刮削补译**」后，会按条目的 TMDB ID 取**中文别名**（繁体在拉取环节即繁转简）→ 演员中文名入池并随同步流程统一写回 Emby，同时把**中文简介与头像**即时写回 Emby（简介含锁定）。开启后可停用 personmeta 插件；该能力不依赖 AI（TMDB 查询不经 LLM），AI 总开关关闭时同样可用。
 
-**详细使用说明见 [Emby 演职人员中文化使用手册](/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v3/embypeoplelocalize/README.md)**
+**详细使用说明见 [Emby 演职人员中文化使用手册](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v3/embypeoplelocalize/README.md)**
 ```
 
 ---
