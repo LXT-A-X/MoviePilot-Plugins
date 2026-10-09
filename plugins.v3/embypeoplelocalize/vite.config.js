@@ -1,0 +1,73 @@
+import { defineConfig } from 'vite'
+import vue from '@vitejs/plugin-vue'
+import federation from '@originjs/vite-plugin-federation'
+import { rmSync } from 'node:fs'
+
+function removeUnreachableSharedAssets() {
+  return {
+    name: 'remove-unreachable-shared-assets',
+    closeBundle() {
+      rmSync(new URL('./dist/assets/__federation_shared_vuetify', import.meta.url), {
+        recursive: true,
+        force: true,
+      })
+    },
+  }
+}
+
+export default defineConfig({
+  plugins: [
+    vue(),
+    federation({
+      name: 'EmbyPeopleLocalize',
+      filename: 'remoteEntry.js',
+      exposes: {
+        './Page': './src/Page.vue',
+        './Config': './src/Config.vue',
+        './Dashboard': './src/Dashboard.vue',
+      },
+      shared: {
+        vue: { requiredVersion: false, generate: false },
+        vuetify: { requiredVersion: false, generate: false, singleton: true },
+        'vuetify/styles': { requiredVersion: false, generate: false, singleton: true },
+      },
+      format: 'esm',
+    }),
+    removeUnreachableSharedAssets(),
+  ],
+  build: {
+    target: 'esnext',
+    minify: false,
+    cssCodeSplit: true,
+  },
+  css: {
+    postcss: {
+      plugins: [
+        {
+          postcssPlugin: 'internal:charset-removal',
+          AtRule: {
+            charset: atRule => atRule.remove(),
+          },
+        },
+        {
+          postcssPlugin: 'vuetify-filter',
+          Root(root) {
+            root.walkRules(rule => {
+              const selector = rule.selector
+              if (!selector) return
+              const targetsVuetify = selector.includes('.v-') || selector.includes('.mdi-')
+              const isOwnOverride = selector.includes('.epl-')
+              if (targetsVuetify && !isOwnOverride) {
+                rule.remove()
+              }
+            })
+          },
+        },
+      ],
+    },
+  },
+  server: {
+    port: 5007,
+    cors: true,
+  },
+})

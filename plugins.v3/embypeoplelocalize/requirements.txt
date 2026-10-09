@@ -1,0 +1,13 @@
+# v4.6.21(P3-15/§九): 锁定兼容范围（下限）—— httpx 需 >=0.26（代码用 proxy= 参数）；
+# httpx[socks] 与 PySocks 支撑 socks5 代理（P2-10）；openai SDK 用 OpenAI 客户端 + chat.completions.create。
+# v4.6.31(SEC-002): 追加经验证的上限（大版本锁），避免破坏性大版本升级在宿主环境静默失效。
+# v4.6.36(依赖修复): openai 上限放宽到 <3.0 —— 宿主主程序已锁 openai~=2.41.1(2.x)，插件原
+#   <2.0 与主程序冲突导致 UV 预检「拒绝安装」；已核对代码仅用 v1/v2 共有稳定 API
+#   （OpenAI(...) / chat.completions.create(max_tokens=,extra_body=) / .choices[0].message / close()），
+#   与 openai 2.41.1 源码兼容，故放开至 2.x。精确「已验证区间」见 constraints.txt，
+#   CI 以 `pip install -c constraints.txt -r requirements.txt` 安装并跑编译 + 测试 + 前端构建。
+requests>=2.28.0,<3.0
+httpx[socks]>=0.26.0,<1.0
+PySocks>=1.7.1,<2.0
+zhconv>=1.4.3,<2.0
+openai>=1.6.0,<3.0

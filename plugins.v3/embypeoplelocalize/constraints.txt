@@ -1,0 +1,15 @@
+# SEC-002：本文件是「已验证兼容区间」的机器可读锁。
+# CI 用 `pip install -c constraints.txt -r requirements.txt` 复现依赖组合，再跑编译 + 测试 + 前端构建。
+# 区间依据「代码实际 API 用法」+「上游破坏性大版本」确定：
+#   - requests   : 2.x 稳定；3.0 为破坏性大版本 → <3.0
+#   - httpx      : 代码使用代理参数（0.27 起 proxy=）；1.0 为破坏性大版本 → >=0.26.0,<1.0
+#   - PySocks    : 1.x 稳定；2.0 未发布 → <2.0
+#   - zhconv     : 1.x 稳定；2.0 未发布 → <2.0
+#   - openai     : 代码用 OpenAI 客户端 + chat.completions.create；已核对 v2（含宿主 2.41.1）
+#                  仍保留 max_tokens/extra_body 与同构返回 → 与 v1 源码兼容，放开至 <3.0
+# 变更此区间必须同步更新 requirements.txt / pyproject.toml，并保证 CI 全绿。
+requests>=2.28.0,<3.0
+httpx>=0.26.0,<1.0
+PySocks>=1.7.1,<2.0
+zhconv>=1.4.3,<2.0
+openai>=1.6.0,<3.0

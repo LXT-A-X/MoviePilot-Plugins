@@ -1,0 +1,8 @@
+node_modules/
+__pycache__/
+.vite/
+*.pyc
+# v4.6.21(P3-16/§九): 发布包卫生 —— 审查临时目录与本地临时文件不入包
+_review_tmp/
+_review_tmp_*
+*.tmp
