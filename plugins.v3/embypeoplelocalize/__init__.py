@@ -100,7 +100,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
     plugin_name = "Emby 演职人员中文化"
     plugin_desc = "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回；拉取人名时可用 TMDB 刮削补中文名/简介/头像"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/embypeoplelocalize.png"
-    plugin_version = "4.6.105"
+    plugin_version = "4.6.106"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "embypeoplelocalize_"
@@ -2344,7 +2344,10 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                     try:
                         # v4.6.61：统一快照（唯一口径）—— 徽章 / 明细 / 日志完全同源；
                         # pool_gate=True：池按本次作业来源门控（与 worker 实际消费一致）
-                        _snap0 = self._tx_pending_snapshot(pool_gate=True, with_detail=True)
+                        # v4.6.106（LIB-013）：source_gate=True —— 库内同样按来源门控，
+                        # 否则「人名池 · 批量翻译」的进度分母会把库内人名/角色也算进来（数字对不上）。
+                        _snap0 = self._tx_pending_snapshot(pool_gate=True, source_gate=True,
+                                                           with_detail=True)
                         _pend = int(_snap0.get("total") or 0)
                         _job_id0 = str(getattr(self, "_tx_job_id", "") or "")
                         _scope0 = self._tx_scope()
@@ -2458,7 +2461,9 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                         # v4.6.61：结束统计必须**含库内人名 + 角色 + 池**（复位前按本轮范围取快照，
                         # 池按本次来源门控）—— 唯一口径，与徽章/明细完全同源
                         _job_scope = self._tx_scope()
-                        _snap2 = self._tx_pending_snapshot(_job_scope, pool_gate=True, with_detail=True)
+                        # v4.6.106（LIB-013）：收尾统计同样按来源门控（池作业不该把库内人头算进「剩余」）
+                        _snap2 = self._tx_pending_snapshot(_job_scope, pool_gate=True,
+                                                           source_gate=True, with_detail=True)
                         _job_id_txt = str(getattr(self, "_tx_job_id", "") or "")
                         # v4.6.61（P1-7）：写回状态独立统计 —— 翻译完成 ≠ 写回完成
                         _wb_st: dict = {}
@@ -3525,7 +3530,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
 
     def _tx_pending_snapshot(self, scope: str = "", item_id: str = "",
                              server_id: str = "", with_detail: bool = False,
-                             pool_gate: bool = False) -> dict:
+                             pool_gate: bool = False, source_gate: bool = False) -> dict:
         """唯一「待翻」快照（v4.6.61 · P1-2 统一口径）—— 徽章 / 明细 / 预估 /
         worker 日志 / 完成通知全部只读这一份，杜绝「日志剩 0 / 库页还有 3」的分裂。
 
@@ -3538,6 +3543,12 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         :param with_detail: 附带 items_list（按条目分组的待翻明细）
         :param pool_gate: True = 按本次作业来源门控池统计（worker 开始/结束用）；
                           False = 池始终计数（徽章/明细/预估用，与作业无关）
+        :param source_gate: True = 同样按本次作业来源门控**库内**统计（worker 开始/结束用）。
+                          v4.6.106（LIB-013）：此前只门控了池，库内 person/role 一律计入 →
+                          「人名池 · 批量翻译」（source=pool）的进度分母把库内 59 人名 + 1812 角色
+                          也算进去（用户实测「AI 翻译 4 / 1883，可池里明明只剩 12 个」），
+                          且作业永远无法翻完 → 收尾永远是 PARTIAL、数字对不上。
+                          徽章 / 明细 / 预估不传此参数（保持「无论什么作业、库页照常显示全部待翻」）。
         :return {"person","role","pool","items","total","person_scope","role_scope",
                  "items_scope","terms_scope","person_on","role_on","disabled",[items_list]}
         """
@@ -3545,8 +3556,10 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         _sc = str(scope or "").strip().lower()
         if _sc not in ("person", "role", "both"):
             _sc = self._tx_scope()
-        _with_person = _sc in ("person", "both")
-        _with_role = _sc in ("role", "both")
+        # v4.6.106（LIB-013）：按本次作业来源门控库内统计（与 worker 收词口径一致）
+        _src_lib = (not source_gate) or self._tx_source_allows("library")
+        _with_person = _sc in ("person", "both") and _src_lib
+        _with_role = _sc in ("role", "both") and _src_lib
         _out = {"person": 0, "role": 0, "pool": 0, "items": 0, "total": 0,
                 "person_scope": 0, "role_scope": 0, "items_scope": 0, "terms_scope": 0,
                 "person_on": True, "role_on": True, "disabled": []}
@@ -12492,8 +12505,36 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             logger.error(f"[DB] 读取库列表失败: {e}")
             return {"success": False, "message": str(e)}
 
+    def _aggregate_people_rows(self, people: List[dict]) -> List[dict]:
+        """把人物行按「原文名 + 类型 + 译文 + 角色译文」汇总 —— 库页右栏搜索结果用。
+        带出现次数（count）、剧名集合（series）、条目集合（item_ids）。
+        v4.6.106（LIB-012）：从 _api_db_people 抽出，供「全库搜索」与「条目内搜索」共用同一口径，
+        保证切范围只改「搜哪些行」，结果的呈现（N 处 / 剧名标签 / 逐处清单）完全一致。"""
+        rows: List[dict] = []
+        idx: Dict[str, int] = {}
+        for p in people or []:
+            k = f"{p.get('name_before')}|{p.get('type')}|{p.get('name_after')}|{p.get('role_after')}"
+            if k not in idx:
+                idx[k] = len(rows)
+                rows.append({"name_before": p.get("name_before"), "name_after": p.get("name_after"),
+                             "type": p.get("type"), "role_after": p.get("role_after"),
+                             "role_before": p.get("role_before"), "count": 0,
+                             "series": set(), "item_ids": set()})
+            r = rows[idx[k]]
+            r["count"] += 1
+            if p.get("series_name"):
+                r["series"].add(p["series_name"])
+            r["item_ids"].add(str(p.get("item_id") or ""))
+        for r in rows:
+            r["series"] = sorted(r["series"])[:5]
+            r["item_ids"] = sorted(x for x in r["item_ids"] if x)
+        return rows
+
     def _api_db_people(self, item_id: str = "", server_id: str = "", keyword: str = ""):
-        """库页右侧：某条目全部人物（翻译前/后）；v3.4.49 无 item_id 时按 keyword 全局搜索人物"""
+        """库页右侧：某条目全部人物（翻译前/后）。
+        v3.4.49：无 item_id 且带 keyword → 全库搜索人物。
+        v4.6.106（LIB-012）：带 item_id 且带 keyword → **只在该条目内**搜索（此前不识别 keyword，
+        前端搜索框又只发 keyword 不发 item_id，于是「在本条目的名单里筛人」实际扫了全库、串到别的剧）。"""
         try:
             db = getattr(self, "_people_db", None)
             if db is None:
@@ -12503,28 +12544,16 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 if not kw:
                     return {"success": True, "data": {"search": True, "item": None, "people": []}}
                 people = db.search_people(plugin_id=self.__class__.__name__, keyword=kw, limit=200)
-                # 后端去重：按（原文名,类型,译文,角色）聚合出出现次数/条目
-                rows = []
-                idx = {}
-                for p in people:
-                    k = f"{p.get('name_before')}|{p.get('type')}|{p.get('name_after')}|{p.get('role_after')}"
-                    if k not in idx:
-                        idx[k] = len(rows)
-                        rows.append({"name_before": p.get("name_before"), "name_after": p.get("name_after"),
-                                     "type": p.get("type"), "role_after": p.get("role_after"),
-                                     "role_before": p.get("role_before"), "count": 0,
-                                     "series": set(), "item_ids": set()})
-                    r = rows[idx[k]]
-                    r["count"] += 1
-                    if p.get("series_name"):
-                        r["series"].add(p["series_name"])
-                    r["item_ids"].add(str(p.get("item_id") or ""))
-                for r in rows:
-                    r["series"] = sorted(r["series"])[:5]
-                    r["item_ids"] = sorted(x for x in r["item_ids"] if x)
-                return {"success": True, "data": {"search": True, "item": None, "people": rows}}
+                return {"success": True, "data": {"search": True, "scoped": False, "item": None,
+                                                  "people": self._aggregate_people_rows(people)}}
             people = db.people_of_item(plugin_id=self.__class__.__name__,
                                        item_id=item_id, server_id=server_id)
+            # v4.6.106（LIB-012）：条目内搜索 —— 按关键词过滤（原文名 / 译文 / 角色 / 角色译文，不区分大小写）
+            _kw = (keyword or "").strip().lower()
+            if _kw:
+                people = [p for p in people
+                          if any(_kw in str(p.get(_f) or "").lower()
+                                 for _f in ("name_before", "name_after", "role_before", "role_after"))]
             meta = db.item_meta(plugin_id=self.__class__.__name__,
                                 item_id=item_id, server_id=server_id)
             poster_url = ""
@@ -12564,7 +12593,11 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 _ep["people"] = self._dedup_credit_rows(_ep.get("people") or [])
             return {"success": True, "data": {
                 "item": meta,
-                "people": people,
+                # v4.6.106（LIB-012）：条目内搜索时同样返回「汇总行」（N 处 / 剧名 / 条目集合），
+                # 与全库搜索完全同构 —— 前端只需切范围、不用改渲染。
+                "search": bool(_kw),
+                "scoped": bool(_kw),
+                "people": (self._aggregate_people_rows(people) if _kw else people),
                 "main_cast": _main_cast,
                 "episodes": _episodes,
             }}
@@ -14137,7 +14170,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             return {"success": False, "message": str(e)}
 
     def _api_person_occurrences(self, name_before: str = "", limit: int = 1000,
-                                server_id: str = ""):
+                                server_id: str = "", item_id: str = ""):
         try:
             db = getattr(self, "_people_db", None)
             if db is None:
@@ -14155,6 +14188,12 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 rows = db.rows_by_name(plugin_id=self.__class__.__name__,
                                        name_before=_nb, server_id="",
                                        limit=int(limit or 1000))
+            # v4.6.106（LIB-012）：库页「本条目」搜索模式下展开「N 处」时，出现清单也限定在该条目内
+            # （否则仍会把其他作品的同名出现列出来 —— 与搜索范围口径不一致）。
+            # 人名池页（/pool/occurrences）不传 item_id → 行为不变。
+            _iid = str(item_id or "").strip()
+            if _iid:
+                rows = [r for r in rows if str(r.get("item_id") or "") == _iid]
             return {"success": True, "data": rows, "count": len(rows)}
         except Exception as e:
             logger.error(f"[DB] 读取人物出现清单失败: {e}")

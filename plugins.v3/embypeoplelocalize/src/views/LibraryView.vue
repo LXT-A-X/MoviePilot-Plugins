@@ -538,6 +538,14 @@ async function loadLogo(item) {
 }
 
 const personSearch = ref('')
+// v4.6.106（LIB-012）：搜索范围 —— item=仅当前条目（默认，安全）/ all=全库搜索。
+// 用户实测：此前只发 keyword、不带条目身份，后端落到「全库搜索」分支，
+// 于是「在本剧名单里筛人」实际扫了全库、串到别的剧。现默认锁在当前条目，要全库时手动切。
+const personSearchScope = ref('item')
+const SEARCH_SCOPES = [
+  { title: '本条目', value: 'item' },
+  { title: '全库', value: 'all' },
+]
 const searchResults = ref([])
 const searchingPeople = ref(false)
 let personSearchTimer = null
@@ -546,10 +554,16 @@ let searchSeq = 0
 async function searchPeople() {
   const kw = (personSearch.value || '').trim()
   if (!kw) { searchResults.value = []; return }
+  if (personSearchScope.value !== 'all' && !selected.value) { searchResults.value = []; return }
   const seq = ++searchSeq
   searchingPeople.value = true
   try {
-    const data = await api.get(props.api, '/db/people', { keyword: kw })
+    // v4.6.106（LIB-012）：本条目范围带上 item_id / server_id → 后端只在该条目名单里筛；
+    // 全库范围保持旧行为（不带条目身份）。两种范围返回同构的「汇总行」，渲染完全一致。
+    const params = (personSearchScope.value === 'all')
+      ? { keyword: kw }
+      : { keyword: kw, item_id: selected.value?.item_id || '', server_id: selected.value?.server_id || '' }
+    const data = await api.get(props.api, '/db/people', params)
     if (seq !== searchSeq) return   // 快速输入时只有最后一次结果生效（LIB-004）
     searchResults.value = data?.people || []
   } catch (e) { if (seq === searchSeq) searchResults.value = [] }
@@ -558,6 +572,11 @@ async function searchPeople() {
 function onPersonSearchInput() {
   clearTimeout(personSearchTimer)
   personSearchTimer = setTimeout(searchPeople, 350)
+}
+// v4.6.106（LIB-012）：切换搜索范围立即重搜（关键词非空时），否则结果与所选范围对不上
+function onSearchScopeChange() {
+  if (searchMode.value) searchPeople()
+  else searchResults.value = []
 }
 function clearPersonSearch() { personSearch.value = ''; searchResults.value = [] }
 function openGlobalEdit(row) {
@@ -591,7 +610,12 @@ async function toggleOcc(row) {
   occRows.value = []
   occLoading.value = true
   try {
-    occRows.value = (await api.get(props.api, '/db/person_occurrences', { name_before: key })) || []
+    // v4.6.106（LIB-012）：「本条目」范围下出现清单同样限定在该条目内（与搜索范围同口径）
+    const _p = (personSearchScope.value === 'all')
+      ? { name_before: key }
+      : { name_before: key, item_id: selected.value?.item_id || '',
+          server_id: selected.value?.server_id || '' }
+    occRows.value = (await api.get(props.api, '/db/person_occurrences', _p)) || []
   } catch (e) { notify((e && e.message) || '读取出现清单失败', 'error') } finally { occLoading.value = false }
 }
 function occLabel(r) {
@@ -1299,18 +1323,31 @@ onBeforeUnmount(() => {
             </div>
           </div>
           <div v-if="selected" class="epl-sidebar pa-2">
-            <v-text-field v-model="personSearch" placeholder="🔍 搜索人物（原文名 / 译文 / 角色）…" density="compact"
-                          variant="outlined" hide-details clearable prepend-inner-icon="mdi-account-search-outline"
-                          @update:model-value="onPersonSearchInput" @click:clear="clearPersonSearch"></v-text-field>
+            <!-- v4.6.106（LIB-012）：搜索范围下拉 —— 默认「本条目」（只在本条目名单里筛），
+                 需要跨作品找同名人物时切「全库」（结果区会明确标注「含其他作品」）。 -->
+            <div class="d-flex align-center" style="gap:6px">
+              <v-text-field v-model="personSearch" placeholder="🔍 搜索人物（原文名 / 译文 / 角色）…" density="compact"
+                            variant="outlined" hide-details clearable prepend-inner-icon="mdi-account-search-outline"
+                            class="flex-grow-1" style="min-width:0"
+                            @update:model-value="onPersonSearchInput" @click:clear="clearPersonSearch"></v-text-field>
+              <v-select v-model="personSearchScope" :items="SEARCH_SCOPES" item-title="title" item-value="value"
+                        density="compact" variant="outlined" hide-details style="max-width:104px;flex:0 0 auto"
+                        @update:model-value="onSearchScopeChange"></v-select>
+            </div>
           </div>
           <v-divider style="opacity:.3"></v-divider>
           <v-card-text class="pa-0 epl-col-body">
             <template v-if="searchMode">
               <div v-if="searchingPeople" class="epl-empty pa-6"><v-progress-circular indeterminate size="22" color="primary"></v-progress-circular> 搜索中…</div>
-              <div v-else-if="!searchResults.length" class="epl-empty pa-6">未找到匹配人物（换个关键词试试）</div>
+              <div v-else-if="!searchResults.length" class="epl-empty pa-6">
+                <template v-if="personSearchScope === 'all'">全库未找到匹配人物（换个关键词试试）</template>
+                <template v-else>本条目未找到匹配人物（换个关键词，或把搜索范围切到「全库」）</template>
+              </div>
               <template v-else>
                 <div class="pa-3 pb-1 epl-search-title">
                   <v-icon size="15" class="mr-1">mdi-account-search-outline</v-icon>人物搜索结果：{{ searchResults.length }} 个名字
+                  <v-chip v-if="personSearchScope === 'all'" size="x-small" color="warning" variant="tonal" class="ml-1">全库 · 含其他作品</v-chip>
+                  <v-chip v-else size="x-small" variant="tonal" class="ml-1">仅本条目</v-chip>
                 </div>
                 <v-list density="compact" class="pa-0" nav>
                   <template v-for="(row, i) in searchResults" :key="i">
@@ -1351,7 +1388,11 @@ onBeforeUnmount(() => {
                   </div>
                   </template>
                 </v-list>
-                <div class="text-caption epl-person-search-hint">按「原文名」汇总；点「N 处 ▾」展开出现清单可逐处编辑；铅笔（汇总行）= 全库同名改（弹窗里确认数量）；出现清单里的铅笔可选「仅这一处 / 该剧所有集 / 全库同名」。</div>
+                <div class="text-caption epl-person-search-hint">
+                  <template v-if="personSearchScope === 'all'">当前范围「全库」：结果可能来自其他作品；</template>
+                  <template v-else>当前范围「本条目」：只在本条目的名单里筛，「N 处」也只数本条目内的出现；</template>
+                  按「原文名」汇总；点「N 处 ▾」展开出现清单可逐处编辑；铅笔（汇总行）= 全库同名改（弹窗里确认数量）；出现清单里的铅笔可选「仅这一处 / 该剧所有集 / 全库同名」。
+                </div>
               </template>
             </template>
             <template v-else>
