@@ -100,7 +100,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
     plugin_name = "Emby 演职人员中文化"
     plugin_desc = "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回；拉取人名时可用 TMDB 刮削补中文名/简介/头像"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/embypeoplelocalize.png"
-    plugin_version = "4.6.106"
+    plugin_version = "4.6.107"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "embypeoplelocalize_"
@@ -3095,14 +3095,21 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             # （B 应得到「守门人」）。角色只认「同剧角色记忆」（role_memory，已在上一阶段
             # 命中并从 _occs 中移除）；这里不读全局池 → 不同作品同名角色绝不可能串译。
             _hit = None if _k == "role" else (pool_lu or {}).get((_k, _t))
-            if _hit and str(_hit[0] or "").strip() and str(_hit[0]).strip() != _t:
+            # v4.6.107（LIB-014）：池命中也要过「有效译文」关 —— 历史脏数据里可能有含假名的
+            # name_zh（早期把 TMDB 日文别名当中文名写入），直接当命中会永远清不掉「待翻译」。
+            if _hit and self._zhconv_final_ok(_t, _hit[0]):
                 _bucket["hits"][_oid] = (str(_hit[0]).strip(), str(_hit[1] or "pool"))
                 continue
             try:
                 _z = self._zhconv_convert(_t)
             except Exception:
                 _z = _t
-            if _z and _z != _t:
+            # v4.6.107（LIB-014）：繁转简必须产出**有效中文名**才算命中，否则放行给 LLM。
+            # 「雛坂ひかる」这类汉字 + 假名的名字，zhconv 只把汉字换掉（→「雏坂ひかる」），
+            # 假名还在 → 池/库的「有效译文」判定（db._SQL_ZH_VALID，排除含假名）不认，
+            # 行永远停在「待翻译」→ 每轮重复繁转简、永远收敛不了（用户实测 9 条池待翻
+            # 卡在「繁转简 2 条 / 剩余 4 条」死循环，且这些词条**从未被送去 LLM**）。
+            if self._zhconv_final_ok(_t, _z):
                 _bucket["hits"][_oid] = (_z, "zhconv")
                 continue
             _llm_occs.append(o)
@@ -4083,7 +4090,13 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                     _sid = str(x.get("server_id") or "")
                     _pid_x = str(x.get("emby_person_id") or "")
                     _idz = self._pool_identity_zh(_sid, _pid_x, _t)
-                    _hit = _idz or _p_zh.get(_t)
+                    # v4.6.107（LIB-014）：只回写**有效译文**（≠ 原文且不含假名），否则
+                    # 写进去也没用（池仍判「待翻译」，下一轮照旧），优先用本轮新译文。
+                    _hit = None
+                    for _cand in (_p_zh.get(_t), _idz):
+                        if _cand and self._zhconv_final_ok(_t, _cand[0]):
+                            _hit = _cand
+                            break
                     if not _hit:
                         continue
                     nm.set_pool_zh(plugin_id=pid,
@@ -7062,6 +7075,32 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             return r if r != text else text
         except Exception:
             return text
+
+    def _zhconv_final_ok(self, text: str, conv: str) -> bool:
+        """繁转简 / 池命中的结果能否**直接当作最终译文**（v4.6.107 · LIB-014）。
+
+        与库/池自己的「有效译文」判定（`db._SQL_ZH_VALID`）保持**同一口径**：
+        译文必须 ≠ 原文，**且不得残留假名**。
+
+        为什么必须卡这一道：像「雛坂ひかる」「紗倉のり子」「廣原ふう」这类
+        **汉字 + 假名**的日文名，`zhconv` 只会把汉字部分转掉
+        （→「雏坂ひかる」/「纱仓のり子」/「广原ふう」），假名原封不动。
+        此前只要 `zhconv(t) != t` 就当命中并计入完成，于是：
+          · 词条被标成「已处理」，**永远不会送去 LLM**（所以日志里 LLM 恒为 0 条）；
+          · 而池/库的「有效译文」判定排除含假名的 name_zh → 行永远停在「🔴 待翻译」；
+          · 下一轮又被收进来，再次「繁转简命中」……
+        用户实测正是：9 条池待翻卡在「本轮 2 条 · 繁转简 2 条 · 剩余 4 条」死循环，
+        永远收敛不了。现在这类词条一律放行给 LLM，由模型给出真正的中文名
+        （如「雏坂光」），写回后池行才真正脱离「待翻译」。
+        """
+        _t = str(text or "").strip()
+        _z = str(conv or "").strip()
+        if not _t or not _z or _z == _t:
+            return False
+        try:
+            return not _is_kana_text(_z)
+        except Exception:
+            return False
 
     def _api_nfo_test(self, data: Optional[dict] = None):
         try:
