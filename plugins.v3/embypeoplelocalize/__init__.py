@@ -100,7 +100,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
     plugin_name = "Emby 演职人员中文化"
     plugin_desc = "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回；拉取人名时可用 TMDB 刮削补中文名/简介/头像"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/embypeoplelocalize.png"
-    plugin_version = "4.6.101"
+    plugin_version = "4.6.102"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "embypeoplelocalize_"
@@ -2269,6 +2269,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 self._llm_reload_if_idle()
                 if bool(getattr(self, "_tx_skip_clear", False)):
                     _skip.clear()
+                    self._tx_noop_terms = set()   # v4.6.102：与失败跳过同生命周期（改设置/终止即清）
                     self._tx_skip_clear = False
                 # 库内全部翻译（手动）进行中 → 让位（避免同一批词条两条 LLM 路径重复翻）
                 if self._task_running("translate"):
@@ -2807,6 +2808,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         """
         out_llm: Dict[str, str] = {}
         out_llm_zhc: set = set()   # v4.6.70（P0-1）：LLM 返回被 zhconv 纠正为简体的 occ_id
+        out_noop: Dict[str, str] = {}   # v4.6.102（P0·缺陷3）：模型如实返回原文 = 无需翻译
         failed: List[str] = []
         deferred: List[str] = []
         _dedup = {"in": 0, "uniq": 0}   # v4.6.75（规范 §四-3/§十-3）：输入条数 → 去重后唯一条数
@@ -2815,7 +2817,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             """统一收口返回（v4.6.70）—— 附带 llm_zhc（LLM 输出被简体化的 occ_id）。
             v4.6.75：附带 dedup（本批「输入 N 条 → 去重后唯一 M 条」，供日志/通知自证聚合）。"""
             return {"llm": out_llm, "failed": failed, "deferred": deferred,
-                    "llm_zhc": sorted(out_llm_zhc),
+                    "llm_zhc": sorted(out_llm_zhc), "noop": out_noop,
                     "dedup_in": int(_dedup["in"]), "dedup_uniq": int(_dedup["uniq"])}
 
         _pending: List[dict] = list(occs or [])
@@ -2866,11 +2868,15 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             deferred.extend(_txt.keys())
             return _ret()
         _size = min(max(1, int(getattr(self, "_tx_batch", 0) or self.TX_BATCH)), max(1, len(_pending)))
-        _partial_round = 0   # 部分返回的缩批重试计数（每轮最多 1 次，防死循环）
+        # v4.6.102（P0·缺陷2）：缩批重试计数改为**每批独立**（在 while 内重置）——
+        # 此前定义在此处（while 之外），整个 job 只共享 1 次重试机会：第一批用掉后
+        # 其余批次的缺失项全部直接记失败（实测 14936 条的 job 因此大面积假失败、
+        # 失败词条又回队首 → 毒丸闭环）。
         _batch_no = 0
         _batch_total = max(1, (len(_pending) + max(1, _size) - 1) // max(1, _size))
         _job_id_txt = str(getattr(self, "_tx_job_id", "") or "")
         while _pending:
+            _partial_round = 0   # v4.6.102：每批独立（见上）
             _chunk = _pending[:_size]
             _batch_no += 1
             _ids = [str(o.get("occ_id")) for o in _chunk]
@@ -2900,7 +2906,27 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                         if _v2 and _v2 != _v:
                             _v = _v2
                             out_llm_zhc.add(_id)
-                    if _id in _txt and _v and _v != _txt.get(_id):
+                    if _id in _txt and _v:
+                        _src_text = str(_txt.get(_id) or "")
+                        if _v == _src_text:
+                            # v4.6.102（P0·缺陷3）：**模型如实返回原文 = 无需翻译**（"M"、"Blofeld"
+                            # 这类单字母名 / 专有名词）。此前被 `_v != _txt[_id]` 判为「未返回」→
+                            # 触发缩批重试 → 二次仍缺 → 记失败 → 回队首 → 每轮开局就撞（毒丸）。
+                            # 现在计入「已返回」并单独归入 noop 桶：不再缩批、不再记失败，
+                            # 同时登记进本会话「无需翻译」集合，后续轮次不再重复送 LLM。
+                            out_noop[_id] = _v
+                            _got.add(_id)
+                            try:
+                                self._tx_noop_terms_set().add(_src_text)
+                                self._failed_terms.discard(_src_text)
+                                self._failed_terms_detail.pop(_src_text, None)
+                            except Exception:
+                                pass
+                            for _al in (_alias.get(_id) or []):
+                                if _al in _txt:
+                                    out_noop[_al] = _v
+                                    _got.add(_al)
+                            continue
                         out_llm[_id] = _v
                         _got.add(_id)
                         # v4.6.70：扇出到「同文本的其它 occurrence」（批内去重后的补齐）
@@ -2918,17 +2944,20 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                         self._tx_job_note_batch(_batch_no, _ids, set(_got), _chunk)
                     except Exception:
                         pass
-                # 部分返回只确认「已返回」的 occurrence —— 缺失项缩批重试一次，仍缺才记失败
+                # v4.6.102（P0·缺陷1）：部分返回**只重试缺失项，绝不改动批大小**。
+                # 旧逻辑 `_size = min(_size, len(_missing))` + `self._tx_batch = _size`
+                # 会在「29/30 部分返回」时把批大小钉死为 1（min(30,1)=1），且 _tx_batch 是
+                # 实例属性、job 之间从不重置 → 直到下次插件重启才恢复。实测 781 次请求里
+                # 66% 的批大小是 1（吞吐 0.143 条/秒 vs 30 条的 1.97 条/秒，差 13.8 倍）。
                 _rest = _pending[_size:]
                 _missing = [_i for _i in _ids if _i not in _got]
                 if _missing and _partial_round < 1:
                     _partial_round += 1
                     _miss_occs = [o for o in _chunk if str(o.get("occ_id")) in _missing]
                     logger.warning(f"[LLM] 本批仅返回 {len(_got)}/{len(_chunk)} 条，"
-                                   f"缺失 {len(_missing)} 条 → 缩批重试一次")
-                    _size = max(self.TX_BATCH_MIN, min(_size, len(_missing)))
-                    self._tx_batch = _size
-                    _pending = _miss_occs + _rest
+                                   f"缺失 {len(_missing)} 条 → 仅重试缺失项（批大小保持 {_size} 不变）")
+                    # 关键修复：缺失项排到队尾（毒丸不再永远堵在队首），_size/self._tx_batch 均不动
+                    _pending = _rest + _miss_occs
                     continue
                 if _missing:
                     for _i in _missing:
@@ -2939,9 +2968,11 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                             self._failed_terms_detail[str(_t0)] = "模型返回缺项（缩批重试后仍未返回）"
                     logger.warning(f"[LLM] 本批缺失 {len(_missing)} 条，已记失败待重试（词条仍留在库中）")
                 _pending = _rest
-                # 缩批恢复：成功后逐步放大（上限 = 设置页「单批最多翻译条数」）
+                # 批大小恢复：本批「无缺失」即向上爬升（上限 = 设置页「单批最多翻译条数」）。
+                # v4.6.102：去掉旧的 `len(_pending) >= _size` 条件 —— 缩批路径下 _pending 已被
+                # 改写，该条件在最后一批恒为假，导致批大小永远爬不回去。
                 _cap = max(1, int(getattr(self, "_tx_batch_max", 0) or self.TX_BATCH))
-                if _size < _cap and len(_pending) >= _size:
+                if _size < _cap and not _missing:
                     _size = min(_cap, max(_size + 1, _size * 2))
                     self._tx_batch = _size
             except InterruptedError:
@@ -3007,7 +3038,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         返回 {"person": {hits,llm,failed,deferred}, "role": {...}}（各字典键 = occ_id）。"""
         def _mk():
             # v4.6.70（P0-1）：llm_zhc = 本桶里「LLM 输出被强制简体化」的 occ_id（独立统计）
-            return {"hits": {}, "llm": {}, "llm_zhc": set(), "failed": [], "deferred": []}
+            # v4.6.102（P0·缺陷3）：noop = 模型如实返回原文（无需翻译）的 occ_id
+            return {"hits": {}, "llm": {}, "llm_zhc": set(), "noop": {}, "failed": [], "deferred": []}
         _out = {"person": _mk(), "role": _mk(), "dedup_in": 0, "dedup_uniq": 0}
         _llm_occs: List[dict] = []
         for o in (occs or []):
@@ -3049,6 +3081,11 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             _b = _bk(_i)
             if _b is not None:
                 _b["llm"][str(_i)] = _z
+        # v4.6.102（P0·缺陷3）：模型如实返回原文（无需翻译）→ 归入所属桶的 noop
+        for _i, _z in (_r.get("noop") or {}).items():
+            _b = _bk(_i)
+            if _b is not None:
+                _b["noop"][str(_i)] = _z
         # v4.6.70（P0-1）：LLM 输出被简体化的 occ_id 记进所属桶（独立统计，不影响 llm 计数）
         for _i in (_r.get("llm_zhc") or []):
             _b = _bk(_i)
@@ -3132,6 +3169,26 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         两者是同一个剧级身份）；人名池无条目上下文时为空串（池内为全局人名）。
         """
         return str((o or {}).get("series_media_id") or (o or {}).get("item_id") or "")
+
+    def _tx_noop_terms_set(self) -> set:
+        """本会话「确认无需翻译」的词条集合（v4.6.102·P0 缺陷3）——
+        模型如实返回原文（"M"、"Blofeld" 这类单字母名 / 专有名词）者在此登记，
+        后续轮次不再重复送 LLM。生命周期与「失败跳过」一致：终止任务/改设置时清空。"""
+        _s = getattr(self, "_tx_noop_terms", None)
+        if _s is None:
+            _s = set()
+            self._tx_noop_terms = _s
+        return _s
+
+    @staticmethod
+    def _tx_untranslatable(text: str) -> bool:
+        """是否「无任何可译内容」（单字符 / 纯数字符号，如 "M"）——
+        送 LLM 必然原样返回（实测毒丸之一），直接登记为无需翻译：
+        省掉一次 AI 请求 + 一次缩批重试，也不占单批名额。"""
+        _t = str(text or "").strip()
+        if len(_t) <= 1:
+            return True
+        return not any(_ch.isalpha() for _ch in _t)
 
     @staticmethod
     def _tx_pick_batch(occs: list, n: int) -> list:
@@ -3704,6 +3761,15 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                     continue
                 if self._skip_no_translate(_t):
                     continue
+                if not _only_terms:
+                    # v4.6.102（P0·缺陷3）：本会话已确认「无需翻译」→ 不再重发（省一次请求）；
+                    # 「无任何可译内容」（如 "M"）直接登记，不占单批名额、不触缩批重试。
+                    # 手动单选重翻（_only_terms 非空）时放行，保证人工重翻不被拦。
+                    if _t in self._tx_noop_terms_set():
+                        continue
+                    if self._tx_untranslatable(_t):
+                        self._tx_noop_terms_set().add(_t)
+                        continue
                 if _o.get("kind") == "role":
                     if not (_take_role and self._tx_role_type_enabled(_o.get("person_type"))):
                         continue
@@ -3743,10 +3809,14 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                     # 类型开关（v4.6.48：人数上限 0/留空 = 不限，故不再参与"翻不翻"判定）
                     return any(self._tx_type_enabled(_t) for _t in _ts)
                 _pl = nm.list_pool(plugin_id=pid, status="pending", size=200) or {}
+                _noop_now = self._tx_noop_terms_set()
                 pool_rows = [x for x in (_pl.get("items") or [])
                              if str(x.get("name_original") or "").strip()
                              and (not _only_terms or str(x.get("name_original") or "").strip() in _only_terms)
                              and _pool_type_ok(x)
+                             # v4.6.102（P0·缺陷3）：本会话已确认「无需翻译」的池行不再重发
+                             and (bool(_only_terms)
+                                  or str(x.get("name_original") or "").strip() not in _noop_now)
                              and int(skip.get(str(x.get("name_original") or ""), 0) or 0) < self.TX_SKIP_AFTER]
         except Exception as e:
             logger.warning(f"[Translate] 读取人名池待翻失败: {e}")
@@ -3811,14 +3881,15 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         # 分批模式：per_title（同作品分组，各组带作品名）/ global（一次聚合；因已 occurrence 化，
         # 每条自带 title/item_id，跨作品同名也不会串译）
         _batching = str(getattr(self, "_translate_batching", "per_title") or "per_title").strip().lower()
-        _nr = {"hits": {}, "llm": {}, "llm_zhc": set(), "failed": [], "deferred": []}
-        _rr = {"hits": {}, "llm": {}, "llm_zhc": set(), "failed": [], "deferred": []}
+        _nr = {"hits": {}, "llm": {}, "llm_zhc": set(), "noop": {}, "failed": [], "deferred": []}
+        _rr = {"hits": {}, "llm": {}, "llm_zhc": set(), "noop": {}, "failed": [], "deferred": []}
         # v4.6.75（规范 §四-3/§十-3）：本轮「送 LLM 输入 → 去重后唯一」累计（按作品分组时累加）
         _dedup_agg = {"in": 0, "uniq": 0}
 
         def _merge(_dst, _src):
             _dst["hits"].update(_src.get("hits") or {})
             _dst["llm"].update(_src.get("llm") or {})
+            _dst["noop"].update(_src.get("noop") or {})   # v4.6.102（P0·缺陷3）
             try:
                 _dst["llm_zhc"] |= set(_src.get("llm_zhc") or ())
             except Exception:
@@ -3857,6 +3928,20 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         _p_zh: Dict[str, tuple] = {}
         _done_ids: set = set()
         _done_kind = {"person": 0, "role": 0}   # v4.6.70（P0-2）：完成数按第一/二排拆分
+        # v4.6.102（P0·缺陷3）：「模型如实返回原文 = 无需翻译」——计入完成（不写库：
+        # 译文 == 原文，写库会被「已翻译 = 译文≠原文」口径判为未翻，纯属污染），
+        # 词条已由 _tx_llm_chunks 登记进本会话「无需翻译」集合，后续轮次不再重发。
+        _noop_n = 0
+        for _bk2, _is_role2 in ((_nr, False), (_rr, True)):
+            for _i in (_bk2.get("noop") or {}):
+                if str(_i) not in _occ_by_id:
+                    continue
+                _done_ids.add(str(_i))
+                _done_kind["role" if _is_role2 else "person"] += 1
+                _noop_n += 1
+        if _noop_n:
+            logger.info(f"[Translate] 本轮 {_noop_n} 条判定「无需翻译」（模型如实返回原文，"
+                        f"已计入完成、本会话不再重发）")
         for _bk, _is_role in ((_nr, False), (_rr, True)):
             _zh_map: Dict[str, str] = {}
             _src_map: Dict[str, str] = {}

@@ -7,7 +7,7 @@ MoviePilot 插件仓库，兼容 **V2 与 V3**，收录实用插件。
 | 插件 | 说明 | V2 | V3 |
 | --- | --- | --- | --- |
 | [字幕字体代理](#字幕字体代理-fontinassproxy) | 反代 Emby/Jellyfin 字幕流，实时子集化并嵌入字体 | \- | ✅ 3.1.2 |
-| [Emby 演职人员中文化](#emby-演职人员中文化-embypeoplelocalize) | 大模型翻译 Emby 人名为中文 | ✅ 1.3.11 | ✅ 4.6.101 |
+| [Emby 演职人员中文化](#emby-演职人员中文化-embypeoplelocalize) | 大模型翻译 Emby 人名为中文 | ✅ 1.3.11 | ✅ 4.6.102 |
 | [字体分类管家](#字体分类管家-zitifenlei) | 字体归档整理 + ASS 字幕检查 + 子集化 | ✅ 1.2.24 | ✅ 3.0.2 |
 
 > V2 插件位于 `plugins.v2/`，适用于 MoviePilot V2；V3 专属版位于 `plugins.v3/`（依赖稳定 SDK），适用于 MoviePilot V3，安装时请选择匹配你 MoviePilot 主版本的版本。
@@ -60,7 +60,7 @@ MoviePilot 插件仓库，兼容 **V2 与 V3**，收录实用插件。
 **安装方式：**
 
 1. 在 MoviePilot 插件市场添加本仓库地址
-2. 搜索 "Emby 演职人员中文化" 并安装（V3 版为 4.6.101）
+2. 搜索 "Emby 演职人员中文化" 并安装（V3 版为 4.6.102）
 3. 在插件「设置」页配置 LLM（或使用 MoviePilot 系统 LLM 配置）与要处理的媒体库，点「测试连接」验证
 4. 仪表盘点「NFO 扫描」跑一次，或打开「Webhook 入库后自动翻译」
 
