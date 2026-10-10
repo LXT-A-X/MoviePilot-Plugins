@@ -3519,10 +3519,18 @@ _SQL_IS_ZH = f"((name_original GLOB '*[一-鿿]*' AND NOT {_SQL_HAS_KANA}))"
 _SQL_ZH_HAS_KANA = "(name_zh GLOB '*[ぁ-ゟ]*' OR name_zh GLOB '*[゠-ヿ]*')"
 _SQL_ZH_VALID = (f"(name_zh IS NOT NULL AND name_zh<>'' AND name_zh<>name_original "
                  f"AND NOT {_SQL_ZH_HAS_KANA})")
-_SQL_NO_CHANGE = f"(NOT {_SQL_ZH_VALID} AND {_SQL_IS_ZH})"
+# v4.6.109（LIB-017）：「模型判定原样保留（如实返回原文）」的**持久标记** ——
+# source='noop' 且还没有译文的行：目标名 = 原文（与「原文已是中文」同样处置），
+# 不再计入「待翻译」，也不会在下一个任务里被重新发给模型。
+# 此前这个结论只活在「本轮 / 本会话」（_tx_noop_terms），池行因此永远停在
+# 「🔴 待翻译」，且每次重启插件都会把同一批名字重发一遍、再原样返回（白烧 token）。
+_SQL_NOOP_MARK = "(COALESCE(source,'')='noop' AND (name_zh IS NULL OR name_zh=''))"
+_SQL_NO_CHANGE = f"(NOT {_SQL_ZH_VALID} AND ({_SQL_IS_ZH} OR {_SQL_NOOP_MARK}))"
 _SQL_TARGET = (f"(CASE WHEN {_SQL_ZH_VALID} THEN name_zh "
-               f"WHEN {_SQL_IS_ZH} THEN name_original ELSE '' END)")
-_SQL_TRANS_PENDING = f"(NOT {_SQL_ZH_VALID} AND NOT {_SQL_IS_ZH})"
+               f"WHEN {_SQL_IS_ZH} THEN name_original "
+               f"WHEN {_SQL_NOOP_MARK} THEN name_original ELSE '' END)")
+_SQL_TRANS_PENDING = (f"(NOT {_SQL_ZH_VALID} AND NOT {_SQL_IS_ZH} "
+                      f"AND NOT {_SQL_NOOP_MARK})")
 _SQL_CUR_UNKNOWN = "(name_current IS NULL OR name_current='')"
 _SQL_SYNCED = f"({_SQL_TARGET}<>'' AND name_current<>'' AND name_current={_SQL_TARGET})"
 # v4.6.93（口径修正）：同步维度只在「有东西可同步」时算待同步 ——
@@ -3545,6 +3553,10 @@ def pool_target_name(rec: dict) -> str:
     if zh and zh != orig and not _is_kana_text(zh):
         return zh
     if _is_chinese_text(orig):
+        return orig
+    # v4.6.109（LIB-017）：模型已判定「原样保留」（如实返回原文）→ 目标名就是原文，
+    # 于是池里显示「无需操作」而不是永远「🔴 待翻译」（与 _SQL_NOOP_MARK 同口径）。
+    if str((rec or {}).get("source") or "").strip().lower() == "noop":
         return orig
     return ""
 
@@ -4209,6 +4221,39 @@ class NameMapDb:
             return bool(n)
         except Exception as e:
             logger.warning(f"[NameMap] set_pool_zh 失败: {e}")
+            return False
+
+    def set_pool_noop(self, *, plugin_id: str, server_id: str = "", emby_person_id: str = "",
+                      name_original: str = "", db: Optional[Any] = None) -> bool:
+        """把池行标记为「模型已判定原样保留（如实返回原文）」（v4.6.109 · LIB-017）。
+
+        用途：模型对某些名字（纯假名日文名 / 罗马音 / 拉丁名）原样返回 ——
+        此前结论只留在「本轮 / 本会话」，池行永远停在「🔴 待翻译」，
+        且每次重启插件都会把它们再发一遍 LLM（再原样返回，白烧 token）。
+        标记后：`source='noop'` → 该行不再计入「待翻译」、池里显示「无需操作」、
+        下个任务也不会再收它（与 `_SQL_NOOP_MARK` / `pool_target_name` 同一口径）。
+
+        安全约束：**只在该行还没有任何译文时打标**（WHERE name_zh 为空）——
+        绝不覆盖已有译文或人工结果；之后若真的拿到译文，`set_pool_zh` 会把 source 改回，
+        标记自然失效。
+        """
+        _orig = str(name_original or "").strip()
+        if not _orig:
+            return False
+        _pid_x = str(emby_person_id or "").strip()
+        try:
+            if _pid_x:
+                where = "plugin_id=? AND server_id=? AND emby_person_id=?"
+                params: list = [plugin_id, server_id, _pid_x]
+            else:
+                where = "plugin_id=? AND server_id=? AND name_original=?"
+                params = [plugin_id, server_id, _orig]
+            n = _x(f"UPDATE name_map SET source='noop', translation_status='no_change', "
+                   f"updated_at=? WHERE {where} AND name_type='person' "
+                   f"AND (name_zh IS NULL OR name_zh='')", (_now(), *params))
+            return bool(n)
+        except Exception as e:
+            logger.warning(f"[NameMap] set_pool_noop 失败: {e}")
             return False
 
     def list_pool(self, *, plugin_id: str, keyword: str = "", status: str = "",

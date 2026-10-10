@@ -100,7 +100,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
     plugin_name = "Emby 演职人员中文化"
     plugin_desc = "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回；拉取人名时可用 TMDB 刮削补中文名/简介/头像"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/embypeoplelocalize.png"
-    plugin_version = "4.6.108"
+    plugin_version = "4.6.109"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "embypeoplelocalize_"
@@ -1187,6 +1187,14 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 _dead[("credits", _key)] = time.time()
             except Exception:
                 pass
+            # v4.6.109：**带上 ID 记一行** —— 宿主 tmdbapi.py 那条
+            # "The resource you requested could not be found." 不含任何 ID，
+            # 无法判断是哪个条目/哪个 ID 在 404（也分不清是不是本插件发的）。
+            # 这行紧跟在它旁边，直接把 id + 类型 + 结论写清楚，便于定位与排查。
+            _ttl_h = float(getattr(self, "_TMDB_DEAD_TTL", 21600.0) or 21600.0) / 3600.0
+            logger.info(f"[TMDB] 演职员表为空：id={_iid}（{'tv' if _is_tv else 'movie'}）"
+                        f"—— 该 ID 无效（TMDB 返回 404）或该条目确实没有演职员；"
+                        f"已负缓存 {_ttl_h:.0f} 小时，期间不再重打")
         return _map
 
     def _pool_fetch_worker(self, data: Optional[dict] = None):
@@ -4041,16 +4049,21 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         # 译文 == 原文，写库会被「已翻译 = 译文≠原文」口径判为未翻，纯属污染），
         # 词条已由 _tx_llm_chunks 登记进本会话「无需翻译」集合，后续轮次不再重发。
         _noop_n = 0
+        _noop_pool: List[tuple] = []   # v4.6.109（LIB-017）：池行里被判定「无需翻译」的 (server_id, 原文名)
         for _bk2, _is_role2 in ((_nr, False), (_rr, True)):
             for _i in (_bk2.get("noop") or {}):
-                if str(_i) not in _occ_by_id:
+                _o2 = _occ_by_id.get(str(_i))
+                if _o2 is None:
                     continue
                 _done_ids.add(str(_i))
                 _done_kind["role" if _is_role2 else "person"] += 1
                 _noop_n += 1
+                if not _is_role2 and not _o2.get("item_id"):
+                    # 池行（无条目身份）—— 需要把「无需翻译」这个结论**持久化到池里**
+                    _noop_pool.append((str(_o2.get("server_id") or ""), str(_o2.get("text") or "")))
         if _noop_n:
-            logger.info(f"[Translate] 本轮 {_noop_n} 条判定「无需翻译」（模型如实返回原文，"
-                        f"已计入完成、本会话不再重发）")
+            logger.info(f"[Translate] 本轮 {_noop_n} 条判定「无需翻译」（模型如实返回原文）；"
+                        f"池行将标记为「无需操作」，不再重复发给模型")
         for _bk, _is_role in ((_nr, False), (_rr, True)):
             _zh_map: Dict[str, str] = {}
             _src_map: Dict[str, str] = {}
@@ -4132,6 +4145,15 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                                    server_id=_sid,
                                    emby_person_id=_pid_x,
                                    name_original=_t, name_zh=_hit[0], source=_hit[1])
+                # v4.6.109（LIB-017）：模型判定「无需翻译」（如实返回原文）的池行 → 落持久标记。
+                # 这样它们不再计入「待翻译」（显示「无需操作」），也不会在下一个任务/重启后
+                # 被重新发给模型（此前每重启一次就白烧一批 token，还永远报「剩余 N 条」）。
+                # set_pool_noop 内部带 `WHERE name_zh=''` —— 绝不覆盖已有译文。
+                for _sid_n, _t_n in _noop_pool:
+                    if not _t_n:
+                        continue
+                    nm.set_pool_noop(plugin_id=pid, server_id=_sid_n,
+                                     emby_person_id="", name_original=_t_n)
         except Exception as e:
             logger.warning(f"[Translate] 写回人名池失败: {e}")
         # v4.6.70（报告第二十四/二十六/二十七节）：写「同剧角色翻译记忆」——
@@ -8030,7 +8052,13 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
 
     def _load_config(self, config: dict):
         self._enabled = constants.safe_bool(config.get(constants.CFG_ENABLED), False)
-        self._prompt_template = str(config.get(constants.CFG_PROMPT_TEMPLATE) or constants.DEFAULT_PROMPT)
+        # v4.6.109（LIB-017）：旧版默认提示词写着「无法确认或无需翻译时保留原文」——
+        # 模型据此把纯假名/罗马音人名**原样返回**，池里永远停在「待翻译」。
+        # 若用户**从未改过**（与旧默认逐字相同）就自动升到新版；用户自己写过的模板一律不动。
+        _pt = str(config.get(constants.CFG_PROMPT_TEMPLATE) or "").strip()
+        if (not _pt) or _pt == constants.DEFAULT_PROMPT_LEGACY.strip():
+            _pt = constants.DEFAULT_PROMPT
+        self._prompt_template = _pt
         self._translate_all = constants.safe_bool(config.get(constants.CFG_TRANSLATE_ALL), False)
         self._translate_role = constants.safe_bool(config.get(constants.CFG_TRANSLATE_ROLE), True)
         self._translate_actor = constants.safe_bool(config.get(constants.CFG_TRANSLATE_ACTOR), True)
