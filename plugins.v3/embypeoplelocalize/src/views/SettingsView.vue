@@ -113,20 +113,47 @@ const libError = ref('')
 const checkAllBusy = ref(false)
 const pathCheck = ref({})   // key = `${server_id}:${lib_id}` → 预检结果（/nfo/path/check）
 
+// v4.6.115：mappings 现在有两级 —— 服务器级（只有 server_id）与路径级（含 lib_id + idx）
+function _isPathLevel(m) {
+  return !!(m && (String(m.lib_id || '').trim() || (m.idx !== undefined && m.idx !== null)))
+}
 function mappingOf(serverId) {
   const arr = config.value.nfo_path_mappings
   if (!Array.isArray(arr)) return null
-  return arr.find(m => m && m.server_id === serverId) || null
+  return arr.find(m => m && m.server_id === serverId && !_isPathLevel(m)) || null
 }
 function setMapping(serverId, key, val) {
   const arr = Array.isArray(config.value.nfo_path_mappings) ? [...config.value.nfo_path_mappings] : []
-  let m = arr.find(x => x && x.server_id === serverId)
+  let m = arr.find(x => x && x.server_id === serverId && !_isPathLevel(x))
   if (!m) { m = { server_id: serverId, from: '', to: '' }; arr.push(m) }
   m[key] = val == null ? '' : val
   config.value.nfo_path_mappings = arr
 }
 function clearMapping(serverId) {
-  const arr = (config.value.nfo_path_mappings || []).filter(m => !(m && m.server_id === serverId))
+  const arr = (config.value.nfo_path_mappings || []).filter(m => !(m && m.server_id === serverId && !_isPathLevel(m)))
+  config.value.nfo_path_mappings = arr
+}
+// 路径级覆盖（lib_id + idx）
+function pathMappingOf(serverId, libId, idx) {
+  const arr = config.value.nfo_path_mappings
+  if (!Array.isArray(arr)) return null
+  return arr.find(m => m && m.server_id === serverId
+    && String(m.lib_id || '') === String(libId || '')
+    && m.idx !== undefined && m.idx !== null && Number(m.idx) === Number(idx)) || null
+}
+function setPathMapping(serverId, libId, idx, key, val) {
+  const arr = Array.isArray(config.value.nfo_path_mappings) ? [...config.value.nfo_path_mappings] : []
+  let m = arr.find(x => x && x.server_id === serverId
+    && String(x.lib_id || '') === String(libId || '')
+    && x.idx !== undefined && x.idx !== null && Number(x.idx) === Number(idx))
+  if (!m) { m = { server_id: serverId, lib_id: libId, idx: Number(idx), from: '', to: '' }; arr.push(m) }
+  m[key] = val == null ? '' : val
+  config.value.nfo_path_mappings = arr
+}
+function clearPathMapping(serverId, libId, idx) {
+  const arr = (config.value.nfo_path_mappings || []).filter(m => !(m && m.server_id === serverId
+    && String(m.lib_id || '') === String(libId || '')
+    && m.idx !== undefined && m.idx !== null && Number(m.idx) === Number(idx)))
   config.value.nfo_path_mappings = arr
 }
 const libGroups = computed(() => {
@@ -158,22 +185,76 @@ function toggleLibOpen(l) {
   const k = String(l.full_key || l.lib_id || '')
   libOpen.value = { ...libOpen.value, [k]: !libOpen.value[k] }
 }
-function checkOf(l) { return pathCheck.value[`${l.server_id}:${l.lib_id}`] }
-function libOk(l) {
-  const c = checkOf(l)
-  if (c && !c.loading && Object.prototype.hasOwnProperty.call(c, 'exists')) return !!(c.exists && c.is_dir && c.readable)
-  return !!(l.path_exists && l.path_readable && l.path_is_dir)
+// v4.6.115：一个库可挂多条 Locations —— 统一取「路径列表」（含 key/idx）
+function libPaths(l) {
+  const ps = l && l.paths
+  if (Array.isArray(ps) && ps.length) return ps
+  // 兼容旧结构 / 无路径库：无路径返回空数组（界面显示空）
+  if (l && (l.emby_path || l.path)) {
+    return [{ idx: 0, key: `${l.server_id || ''}:${l.lib_id || ''}:0`,
+              emby_path: l.emby_path || '', path: l.path || '',
+              exists: !!l.path_exists, readable: !!l.path_readable, is_dir: !!l.path_is_dir }]
+  }
+  return []
 }
-function libStatusText(l) {
-  const c = checkOf(l)
+function pathKey(l, p) { return String((p && p.key) || `${l.server_id || ''}:${l.lib_id || ''}:${(p && p.idx) || 0}`) }
+function checkOfPath(l, p) { return pathCheck.value[pathKey(l, p)] }
+function pathOk(l, p) {
+  const c = checkOfPath(l, p)
+  if (c && !c.loading && Object.prototype.hasOwnProperty.call(c, 'exists')) return !!(c.exists && c.is_dir && c.readable)
+  return !!(p && p.exists && p.readable && p.is_dir)
+}
+function pathStateText(l, p) {
+  const c = checkOfPath(l, p)
   if (c && c.loading) return '检测中…'
   if (c && c.message) return c.message
-  if (!l.path) return '未配置映射且无 Emby Path'
-  if (!l.path_exists) return '路径不存在'
-  if (!l.path_is_dir) return '不是目录'
-  if (!l.path_readable) return '无读取权限'
+  if (!p || !p.path) return '无路径'
+  if (!p.exists) return '路径不存在'
+  if (!p.is_dir) return '不是目录'
+  if (!p.readable) return '无读取权限'
   return '可访问'
 }
+// 库级 = 全部路径均可访问（无路径 → 空，不报错）
+function libOk(l) {
+  const ps = libPaths(l)
+  if (!ps.length) return null
+  return ps.every(p => pathOk(l, p))
+}
+const libPathSummary = (l) => {
+  const ps = libPaths(l)
+  if (!ps.length) return ''
+  const ok = ps.filter(p => pathOk(l, p)).length
+  return `${ok}/${ps.length} 个路径可访问`
+}
+// 展开/收起「路径级映射」编辑
+const pathMapOpen = ref({})
+function isPathMapOpen(l, p) { return !!pathMapOpen.value[pathKey(l, p)] }
+function togglePathMap(l, p) {
+  const k = pathKey(l, p)
+  pathMapOpen.value = { ...pathMapOpen.value, [k]: !pathMapOpen.value[k] }
+}
+function pathMapFrom(l, p) {
+  const m = pathMappingOf(l.server_id || '', l.lib_id || '', p.idx)
+  return (m && m.from) || ''
+}
+function pathMapTo(l, p) {
+  const m = pathMappingOf(l.server_id || '', l.lib_id || '', p.idx)
+  return (m && m.to) || ''
+}
+function hasPathMap(l, p) { return !!(pathMapFrom(l, p) || pathMapTo(l, p)) }
+
+// 「本次扫描根 = N 个可访问目录」汇总（只统计已勾选库）
+const scanRootSummary = computed(() => {
+  let okN = 0, badN = 0, noPath = 0, total = 0
+  for (const l of (libs.value || [])) {
+    if (!isLibSelected(l.full_key)) continue
+    const ps = libPaths(l)
+    if (!ps.length) { noPath++; continue }
+    total += ps.length
+    for (const p of ps) { if (pathOk(l, p)) okN++; else badN++ }
+  }
+  return { okN, badN, noPath, total }
+})
 
 async function loadLibs() {
   libBusy.value = true
@@ -196,11 +277,11 @@ async function loadLibs() {
   } finally { libBusy.value = false }
 }
 
-async function testLib(serverId, libId) {
-  const key = `${serverId}:${libId}`
+async function testPath(serverId, libId, idx) {
+  const key = `${serverId}:${libId}:${idx}`
   pathCheck.value = { ...pathCheck.value, [key]: { loading: true, message: '检测中…' } }
   try {
-    const r = await api.post(props.api, '/nfo/path/check', { server_id: serverId, lib_id: libId })
+    const r = await api.post(props.api, '/nfo/path/check', { server_id: serverId, lib_id: libId, idx })
     pathCheck.value = { ...pathCheck.value, [key]: r || {} }
     const ok = !!(r && r.exists && r.is_dir && r.readable)
     notify((r && r.message) || (ok ? '路径可访问' : '路径检查失败'), ok ? 'success' : 'error')
@@ -216,7 +297,10 @@ async function testAllPaths() {
   try {
     const r = await api.post(props.api, '/nfo/path/check_all')
     const map = {}
-    for (const row of (r?.rows || [])) map[`${row.server_id}:${row.lib_id}`] = row
+    for (const row of (r?.rows || [])) {
+      const k = row.key || `${row.server_id}:${row.lib_id}:${row.idx != null ? row.idx : 0}`
+      map[k] = row
+    }
     pathCheck.value = { ...pathCheck.value, ...map }
     const ok = r?.ok ?? 0, total = r?.total ?? 0
     notify(`路径检查完成：${ok}/${total} 可访问`, ok === total ? 'success' : 'error')
@@ -224,28 +308,33 @@ async function testAllPaths() {
 }
 
 const browseDlg = ref(false)
-const browse = ref({ server_id: '', lib_id: '', lib_name: '', root: '', path: '', relative: '', entries: [], loading: false, error: '', check: '' })
+const browse = ref({ server_id: '', lib_id: '', lib_name: '', idx: -1, root: '', path: '', relative: '', entries: [], loading: false, error: '', check: '' })
 async function browseLoad(path = '') {
   const b = browse.value
   b.loading = true; b.error = ''; b.check = ''
   try {
-    const r = await api.get(props.api, '/nfo/path/browse', { server_id: b.server_id, lib_id: b.lib_id, path })
+    const r = await api.get(props.api, '/nfo/path/browse', { server_id: b.server_id, lib_id: b.lib_id, path, idx: b.idx })
     b.root = r?.root || ''
     b.path = r?.path || ''
     b.relative = r?.relative || ''
     b.entries = Array.isArray(r?.entries) ? r.entries : []
   } catch (e) { b.error = (e && e.message) || '浏览失败'; b.entries = [] } finally { b.loading = false }
 }
-async function browseOpen(serverId, libId, libName) {
-  browse.value = { server_id: serverId, lib_id: libId, lib_name: libName || libId, root: '', path: '', relative: '', entries: [], loading: true, error: '', check: '' }
+async function browseOpen(serverId, libId, libName, idx = -1) {
+  browse.value = { server_id: serverId, lib_id: libId, lib_name: libName || libId, idx, root: '', path: '', relative: '', entries: [], loading: true, error: '', check: '' }
   browseDlg.value = true
   await browseLoad('')
 }
-function browseLib(g, l) { browseOpen(l.server_id || g.server_id, l.lib_id, l.lib_name) }
+function browseLib(g, l, p = null) {
+  const _idx = p && p.idx !== undefined && p.idx !== null ? p.idx : -1
+  browseOpen(l.server_id || g.server_id, l.lib_id, l.lib_name, _idx)
+}
+function browsePath(g, l, p) { browseLib(g, l, p) }
 function browseServer(g) {
   if (!g || !g.libs || !g.libs.length) return
   const pick = g.libs.find(l => isLibSelected(l.full_key)) || g.libs[0]
-  browseOpen(pick.server_id || g.server_id, pick.lib_id, pick.lib_name)
+  const _ps = libPaths(pick)
+  browseOpen(pick.server_id || g.server_id, pick.lib_id, pick.lib_name, _ps.length ? _ps[0].idx : -1)
 }
 function browseRefresh() { browseLoad(browse.value.path || '') }
 function browseUp() {
@@ -454,7 +543,7 @@ onMounted(() => {
               <v-icon start size="14">mdi-check-network-outline</v-icon>测试全部路径
             </v-btn>
           </div>
-          <div class="epl-switch-desc mb-2" style="opacity:.7">勾选要处理的媒体库；其映射后的本地目录自动作为扫描根目录（可多选，跨服务器独立配置映射）。点击下方 Emby / MP 路径可直接浏览该目录</div>
+          <div class="epl-switch-desc mb-2" style="opacity:.7">勾选要处理的媒体库；其<b>全部</b>映射后本地目录自动作为扫描根目录（有几条路径就显示几行，显示即扫描范围）。点击 Emby / MP 路径可直接浏览该目录；「映射」可为单条路径单独配置覆盖</div>
           <div v-if="!libGroups.length" class="epl-switch-desc mb-2">未获取到媒体库列表（请检查 Emby 配置后点「刷新」）</div>
           <div v-for="g in libGroups" :key="g.server_id" class="epl-server-group mb-2">
             <div class="epl-server-head">
@@ -478,35 +567,63 @@ onMounted(() => {
                      @click="toggleLibOpen(l)">
                   <v-icon size="16" class="epl-lib-caret">{{ isLibOpen(l) ? 'mdi-chevron-down' : 'mdi-chevron-right' }}</v-icon>
                   {{ l.lib_name }} <span class="epl-lib-type">{{ l.lib_type || '?' }}</span>
+                  <span v-if="libPaths(l).length > 1" class="epl-lib-pathcount">（{{ libPaths(l).length }} 个路径）</span>
                 </div>
                 <template v-if="isLibOpen(l)">
-                  <div class="epl-lib-path" :title="l.emby_path || ''">
-                    Emby
-                    <code class="epl-path-link" :class="{ 'epl-path-off': !l.emby_path }"
-                          :title="l.emby_path ? '点击浏览该路径' : 'Emby 未上报 Path'"
-                          @click="l.emby_path && browseLib(g, l)">{{ l.emby_path || '—' }}</code>
+                  <!-- v4.6.115：有几条路径就显示几行（显示即扫描范围）；无路径则显示空 -->
+                  <div v-if="!libPaths(l).length" class="epl-lib-path">
+                    <span class="epl-path-off">—</span>
                   </div>
-                  <div class="epl-lib-path" :title="l.path || ''">
-                    MP&nbsp;&nbsp;
-                    <code class="epl-path-link" :class="{ 'epl-path-off': !l.path }"
-                          :title="l.path ? '点击浏览该路径' : '该媒体库未解析到本机路径（检查路径映射）'"
-                          @click="l.path && browseLib(g, l)">{{ l.path || '—' }}</code>
-                  </div>
-                  <div class="epl-lib-actions">
-                    <v-btn size="x-small" variant="text" @click="testLib(l.server_id || g.server_id, l.lib_id)">测试</v-btn>
-                    <v-btn size="x-small" variant="text" @click="browseLib(g, l)">浏览</v-btn>
+                  <div v-for="p in libPaths(l)" :key="pathKey(l, p)" class="epl-lib-pathgroup">
+                    <div class="epl-lib-path" :title="p.emby_path || ''">
+                      Emby
+                      <code class="epl-path-link" :class="{ 'epl-path-off': !p.emby_path }"
+                            :title="p.emby_path ? '点击浏览该路径' : 'Emby 未上报 Path'"
+                            @click="p.emby_path && browsePath(g, l, p)">{{ p.emby_path || '—' }}</code>
+                    </div>
+                    <div class="epl-lib-path" :title="p.path || ''">
+                      MP&nbsp;&nbsp;
+                      <code class="epl-path-link" :class="{ 'epl-path-off': !p.path }"
+                            :title="p.path ? '点击浏览该路径' : '该路径未解析到本机目录（检查路径映射）'"
+                            @click="p.path && browsePath(g, l, p)">{{ p.path || '—' }}</code>
+                    </div>
+                    <div class="epl-lib-actions">
+                      <span class="epl-path-state" :class="{ 'epl-path-bad': p.path && !pathOk(l, p) }">{{ pathStateText(l, p) }}</span>
+                      <v-btn size="x-small" variant="text" @click="testPath(l.server_id || g.server_id, l.lib_id, p.idx)">测试</v-btn>
+                      <v-btn size="x-small" variant="text" @click="browsePath(g, l, p)">浏览</v-btn>
+                      <v-btn size="x-small" variant="text" :color="hasPathMap(l, p) ? 'primary' : undefined"
+                             :title="hasPathMap(l, p) ? '本条路径已单独配置映射' : '为这条路径单独配置映射（留空=跟随服务器默认）'"
+                             @click="togglePathMap(l, p)">
+                        映射<i v-if="hasPathMap(l, p)" style="font-style:normal">*</i>
+                        <v-icon end size="14">{{ isPathMapOpen(l, p) ? 'mdi-chevron-up' : 'mdi-chevron-down' }}</v-icon>
+                      </v-btn>
+                    </div>
+                    <div v-if="isPathMapOpen(l, p)" class="epl-map-inline">
+                      <v-text-field :model-value="pathMapFrom(l, p)" label="从（Emby）" density="compact" variant="outlined" hide-details
+                                    placeholder="/disk2/华语电影"
+                                    @update:model-value="v => setPathMapping(l.server_id || g.server_id, l.lib_id, p.idx, 'from', v)"></v-text-field>
+                      <v-text-field :model-value="pathMapTo(l, p)" label="到（MP 本机）" density="compact" variant="outlined" hide-details
+                                    placeholder="/mnt/d2/华语电影"
+                                    @update:model-value="v => setPathMapping(l.server_id || g.server_id, l.lib_id, p.idx, 'to', v)"></v-text-field>
+                      <v-btn size="x-small" variant="text" :disabled="!hasPathMap(l, p)"
+                             @click="clearPathMapping(l.server_id || g.server_id, l.lib_id, p.idx)">清除</v-btn>
+                    </div>
                   </div>
                 </template>
               </div>
-              <v-chip size="x-small" variant="tonal" :color="libOk(l) ? 'success' : 'error'" class="epl-lib-chip">
+              <v-chip v-if="libOk(l) === null" size="x-small" variant="tonal" color="grey" class="epl-lib-chip">无路径</v-chip>
+              <v-chip v-else size="x-small" variant="tonal" :color="libOk(l) ? 'success' : 'error'" class="epl-lib-chip">
                 {{ libOk(l) ? '✅ 可访问' : '❌ 不可访问' }}
               </v-chip>
             </div>
           </div>
+          <div v-if="scanRootSummary.total || scanRootSummary.noPath" class="epl-switch-desc mb-2" style="opacity:.85">
+            本次扫描根 = <b>{{ scanRootSummary.okN }}</b> 个可访问目录<template v-if="scanRootSummary.badN">（另有 {{ scanRootSummary.badN }} 个不可访问已跳过）</template><template v-if="scanRootSummary.noPath">；{{ scanRootSummary.noPath }} 个已选库未上报路径（不扫描）</template>
+          </div>
           <v-alert v-if="libError" type="warning" variant="tonal" density="compact" class="mb-2" style="font-size:12px">{{ libError }}</v-alert>
 
           <div class="epl-section-title mt-2 mb-1">路径映射（Emby Path → 本机 MP 路径）</div>
-          <div class="epl-switch-desc mb-2" style="opacity:.7">每台服务器各一行（MP 读到几台就显示几行）；未配置的服务器直接使用 Emby 原路径</div>
+          <div class="epl-switch-desc mb-2" style="opacity:.7">每台服务器各一行（MP 读到几台就显示几行）—— 服务器级默认映射，对该服务器<b>所有</b>库路径统一生效；个别路径需要不同映射时，在对应库的路径行点「映射」单独覆盖。未配置的服务器直接使用 Emby 原路径</div>
           <div v-for="g in libGroups" :key="'map-' + g.server_id" class="epl-map-row">
             <div class="epl-map-server">{{ g.server_name }}</div>
             <v-text-field :model-value="g.mappingFrom" label="从（Emby）" density="compact" variant="outlined" hide-details
@@ -1097,8 +1214,16 @@ onMounted(() => {
 .epl-lib-info { min-width: 0; flex: 1 1 auto; }
 .epl-lib-name { font-size: 13px; font-weight: 500; }
 .epl-lib-type { font-size: 11px; opacity: .6; margin-left: 6px; }
+.epl-lib-pathcount { font-size: 11px; opacity: .6; margin-left: 4px; }
 .epl-lib-path { font-size: 11px; opacity: .72; line-height: 1.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.epl-lib-actions { display: flex; gap: 4px; margin-top: 2px; }
+/* v4.6.115：一个库可挂多条路径 —— 每条路径一组（分隔线区分），逐条显示状态与操作 */
+.epl-lib-pathgroup { border-top: 1px dashed rgba(128,128,128,.25); padding-top: 3px; margin-top: 3px; }
+.epl-lib-pathgroup:first-of-type { border-top: 0; padding-top: 0; margin-top: 0; }
+.epl-lib-actions { display: flex; gap: 4px; margin-top: 2px; align-items: center; flex-wrap: wrap; }
+.epl-path-state { font-size: 11px; opacity: .8; }
+.epl-path-bad { color: #ff8a80; opacity: 1; }
+.epl-map-inline { display: flex; align-items: center; gap: 6px; margin: 3px 0 2px; flex-wrap: wrap; }
+.epl-map-inline > .v-text-field { flex: 1 1 140px; min-width: 120px; }
 .epl-ai-off { opacity: .45; }
 .epl-ai-off > * { pointer-events: none; }
 .epl-lib-path code, .epl-map-row code { font-size: 11px; opacity: .9; }

@@ -778,16 +778,47 @@ function isApiItem() {
 const writeBackLabel = () => isApiItem() ? '恢复到 Emby' : '写入'
 const writeBackTooltip = () => isApiItem()
   ? '把库中翻译后名单写回 Emby（API 模式）'
-  : '两排写入文件；第一排再写入服务器'
+  : '写入 nfo 文件（可选只写第一排 / 第二排 / 两排，默认两排）；第一排同时写入服务器'
 async function writeBackItem() {
   if (!selected.value) return
   await loadStatus()   // v4.6.70：单条写回同样过统一守卫
   if (!guard.check('写入（当前条目）')) return
+  // v4.6.115（用户需求）：与「翻译」一致 —— 先弹窗选本次写回哪一排
+  openWritebackDlg('item')
+}
+// v4.6.115：写回范围选择（与翻译弹窗同一套语义 / 同一套标签）
+const wbDlg = ref(false)
+const wbMode = ref('library')   // library=全部写回 / item=写入当前条目
+const wbScope = ref('both')     // both=两排都写（默认）/ person=仅第一排 / role=仅第二排
+const wbBusy = ref(false)
+const WB_SCOPE_LABEL = { both: '第一排人名 + 第二排角色', person: '仅第一排人名', role: '仅第二排角色' }
+const wbScopeLabel = computed(() => WB_SCOPE_LABEL[wbScope.value] || WB_SCOPE_LABEL.both)
+function openWritebackDlg(mode) {
+  wbMode.value = mode
+  wbScope.value = 'both'   // 默认两排都写
+  wbDlg.value = true
+}
+async function confirmWriteback() {
+  if (wbBusy.value) return
+  wbBusy.value = true
   try {
-    const r = await api.post(props.api, '/db/restore', { item_id: selected.value.item_id, server_id: selected.value.server_id || '' })
-    notify(r?.message || '写回完成', 'success')
-    selectItem(selected.value)
-  } catch (e) { notify((e && e.message) || '写回失败', 'error') }
+    const _scope = wbScope.value
+    let r
+    if (wbMode.value === 'item' && selected.value) {
+      r = await api.post(props.api, '/db/restore', {
+        item_id: selected.value.item_id,
+        server_id: selected.value.server_id || '',
+        target_scope: _scope,
+      })
+      notify(r?.message || '写回完成', r?.success === false ? 'error' : 'success')
+      if (selected.value) selectItem(selected.value)
+    } else {
+      r = await api.post(props.api, '/db/writeback_all', { target_scope: _scope })
+      notify(r?.message || '全部写回已启动（后台执行）', r?.success === false ? 'error' : 'success')
+    }
+    wbDlg.value = false
+    loadTxPreview(true)
+  } catch (e) { notify((e && e.message) || '写回失败', 'error') } finally { wbBusy.value = false }
 }
 async function retranslateItem() {
   if (!selected.value || retranslating.value) return
@@ -968,23 +999,11 @@ async function confirmTranslate() {
 }
 // 兼容旧引用（若有其它入口调用 translateAll，仍走弹窗）
 function translateAll() { openTranslateDlg() }
-const writebackBusy = ref(false)
 async function writebackAll() {
   await loadStatus()   // v4.6.70：写回期间禁止再发起（也禁止其它修改型操作）
   if (!guard.check('全部写回')) return
-  if (!await askConfirm({
-    title: '全部写回 nfo',
-    text: '把库中全部条目的已翻译名单批量写回 nfo 文件？',
-    detail: '不重新翻译，只落盘；.bak 备份按设置自动保留。',
-    okText: '写回',
-    color: 'warning',
-  })) return
-  writebackBusy.value = true
-  try {
-    const r = await api.post(props.api, '/db/writeback_all')
-    notify(r?.message || '全部写回已启动（后台执行）', 'success')
-    loadTxPreview(true)
-  } catch (e) { notify((e && e.message) || '启动失败', 'error') } finally { writebackBusy.value = false }
+  // v4.6.115（用户需求）：与「翻译」一致 —— 先弹窗选本次写回哪一排（默认两排）
+  openWritebackDlg('library')
 }
 
 const isNarrow = ref(false)
@@ -1167,9 +1186,9 @@ onBeforeUnmount(() => {
           </v-btn>
         </template>
       </v-tooltip>
-      <v-tooltip v-if="!autoWriteback" :text="dataOpBlockedHint || '把库中已翻译名单批量写回 nfo 文件（不重新翻译）'" location="top">
+      <v-tooltip v-if="!autoWriteback" :text="dataOpBlockedHint || '把库中已翻译名单批量写回 nfo 文件（不重新翻译）；可选本次写回哪一排（默认两排）'" location="top">
         <template #activator="{ props: tp }">
-          <v-btn size="small" color="success" variant="tonal" v-bind="tp" :loading="writebackBusy" :disabled="dataOpBlocked" @click="writebackAll">
+          <v-btn size="small" color="success" variant="tonal" v-bind="tp" :loading="wbBusy && wbMode === 'library'" :disabled="dataOpBlocked" @click="writebackAll">
             <v-icon start size="16">mdi-file-import-outline</v-icon>全部写回
           </v-btn>
         </template>
@@ -1207,7 +1226,9 @@ onBeforeUnmount(() => {
                     :color="!txPreview.loaded ? 'grey' : (txPreview.items_pending > 0 ? 'warning' : 'success')"
                     :prepend-icon="!txPreview.loaded ? 'mdi-progress-question' : (txPreview.items_pending > 0 ? 'mdi-alert-circle-outline' : 'mdi-check-circle-outline')">
               <span v-if="!txPreview.loaded">统计中…</span>
-              <template v-else-if="txPreview.items_pending > 0"><span class="epl-pending-prefix">有任务 · 待翻译 </span>{{ txPreview.items_pending }} 个</template>
+              <!-- v4.6.115：窄屏（竖屏手机）显示短前缀「待翻译 」—— 此前 ≤600px 直接把
+                   前缀整段 display:none，徽章只剩「16 个」，看不出这是待翻译 -->
+              <template v-else-if="txPreview.items_pending > 0"><span class="epl-pending-prefix">有任务 · 待翻译 </span><span class="epl-pending-prefix-short">待翻译 </span>{{ txPreview.items_pending }} 个</template>
               <span v-else>无待翻译</span>
             </v-chip>
           </template>
@@ -1709,6 +1730,43 @@ onBeforeUnmount(() => {
       </v-card>
     </v-dialog>
 
+    <!-- v4.6.115：写回范围弹窗（与翻译弹窗同一套「哪一排」语义）——「写入」与「全部写回」共用 -->
+    <v-dialog v-model="wbDlg" max-width="480">
+      <v-card>
+        <v-card-title class="text-subtitle-1 d-flex align-center">
+          <v-icon start size="18">mdi-content-save-move-outline</v-icon>
+          {{ wbMode === 'item' ? '写入当前条目' : '全部写回' }}
+          <v-spacer></v-spacer>
+          <v-btn icon size="small" variant="text" @click="wbDlg = false"><v-icon size="18">mdi-close</v-icon></v-btn>
+        </v-card-title>
+        <v-card-text>
+          <div class="epl-tx-label">写入哪一排</div>
+          <v-radio-group v-model="wbScope" density="compact" hide-details class="mb-2">
+            <v-radio value="both" label="第一排人名 + 第二排角色（默认）"></v-radio>
+            <v-radio value="person" label="仅第一排人名"></v-radio>
+            <v-radio value="role" label="仅第二排角色"></v-radio>
+          </v-radio-group>
+          <div class="epl-tx-current">
+            {{ wbMode === 'item'
+                ? '把当前条目库中已翻译名单写回它的 nfo 文件。'
+                : '把库中全部条目的已翻译名单批量写回 nfo 文件。' }}
+            不重新翻译，只落盘；.bak 备份按设置自动保留。
+          </div>
+          <div class="epl-tx-current" style="margin-top:4px">当前选择：{{ wbScopeLabel }}</div>
+          <div class="epl-tx-current" style="color:#ffb74d; white-space:normal; line-height:1.5; margin-top:4px">
+            注意：选择「仅第二排」时，第一排人名本次<b>不会</b>写入 nfo（严格按选择执行）。
+          </div>
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer></v-spacer>
+          <v-btn variant="text" @click="wbDlg = false">取消</v-btn>
+          <v-btn color="primary" variant="flat" :loading="wbBusy" @click="confirmWriteback">
+            {{ wbMode === 'item' ? '写入' : '开始写回' }}
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
     <v-dialog v-model="pendingDlg" max-width="640">
       <v-card>
         <v-card-title class="text-subtitle-1 d-flex align-center">
@@ -1761,6 +1819,8 @@ onBeforeUnmount(() => {
 .epl-topbar { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; padding-right: 52px; }
 .epl-total { opacity: 0.75; }
 .epl-pending-chip { cursor: pointer; }
+/* v4.6.115：窄屏短前缀默认隐藏（宽屏只用长前缀「有任务 · 待翻译 」） */
+.epl-pending-prefix-short { display: none; }
 .epl-topbar-right { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 .epl-card-bg { background: rgba(255,255,255,0.05) !important; border: 1px solid rgba(255,255,255,0.08) !important; }
 .epl-thumb { border-radius: 3px; overflow: hidden; flex-shrink: 0; object-fit: cover !important; }
@@ -1813,7 +1873,9 @@ onBeforeUnmount(() => {
   .epl-topbar .v-text-field { max-width: 100% !important; }
   .epl-topbar { gap: 6px; }
   .epl-topbar .epl-total { display: none; }
+  /* v4.6.115：窄屏不再把前缀整段藏掉，改成显示短前缀（此前徽章只剩「16 个」） */
   .epl-pending-prefix { display: none; }
+  .epl-pending-prefix-short { display: inline; }
 }
 .epl-cast-section { margin-bottom: 14px; }
 .epl-cast-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }

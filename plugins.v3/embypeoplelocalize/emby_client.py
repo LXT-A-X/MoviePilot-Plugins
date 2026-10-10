@@ -517,19 +517,22 @@ class EmbyClient:
             return None
 
     def get_libraries(self) -> List[Dict[str, Any]]:
-        """获取所有媒体库（Id/Name/Path），只读、无任何写回。
+        """获取所有媒体库（Id/Name/Path/Locations），只读、无任何写回。
 
         只取真实库路径：/Library/VirtualFolders 的 Locations（即 Emby 界面里
         展示的库路径，如 /media/示例库/动画电影）。不再使用 /Library/MediaFolders
         的虚拟 Path（旧库路径易失真）。供「媒体库选择」映射扫描根目录。
+
+        v4.6.115：**一个库可以挂多个 Locations**（Emby 端「添加文件夹」加多条）。
+        此前只取第一个（`next(...)`），导致同库其余路径既不在界面显示、也不进扫描范围。
+        现在返回全部 `Locations` 列表；`Path` 保留为第一个（兼容旧调用点）。
         """
         result = []
         try:
             data = self._get("/Library/VirtualFolders")
             items = data if isinstance(data, list) else (data or {}).get("Items", []) or []
             for item in items:
-                locs = item.get("Locations") or []
-                path = next((str(x).strip() for x in locs if str(x or "").strip()), "")
+                locs = [str(x).strip() for x in (item.get("Locations") or []) if str(x or "").strip()]
                 lib_id = str(item.get("ItemId") or item.get("Id") or "")
                 name = item.get("Name") or ""
                 if not lib_id:
@@ -538,7 +541,8 @@ class EmbyClient:
                     "Id": lib_id,
                     "Name": name,
                     "Type": item.get("CollectionType", "") or "unknown",
-                    "Path": path,
+                    "Path": locs[0] if locs else "",
+                    "Locations": locs,
                 })
         except Exception as e:
             logger.warning(f"[Libraries] VirtualFolders 获取库列表失败: {e}")

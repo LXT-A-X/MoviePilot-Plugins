@@ -122,7 +122,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
     plugin_name = "Emby 演职人员中文化"
     plugin_desc = "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回；拉取人名时可用 TMDB 刮削补中文名/简介/头像"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/embypeoplelocalize.png"
-    plugin_version = "4.6.114"
+    plugin_version = "4.6.115"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "embypeoplelocalize_"
@@ -6675,7 +6675,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         return ""
 
     def _write_nfo_once(self, item_id: str, server_id: str, nfo_path: str,
-                        people_records: Optional[list] = None, auto: bool = False) -> dict:
+                        people_records: Optional[list] = None, auto: bool = False,
+                        scope: str = "both") -> dict:
         """自动 / 手动写回的**唯一落盘入口**（清单 §七）。
 
         自动链路：_writeback_worker → _wb_process_item → _restore_item_to_nfo
@@ -6710,23 +6711,25 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 return {"success": False, "message": "库中该条目无人物记录",
                         "data": {"skip": True}}
             # 落盘实现：内部重新 parse 磁盘内容 → 合并最新译文 → apply → save（含外部改动保护）
-            return self._restore_nfo_from_db(item_id, nfo_path, people_records, auto=auto)
+            return self._restore_nfo_from_db(item_id, nfo_path, people_records, auto=auto, scope=scope)
         except Exception as e:
             logger.error(f"[Writeback] 落盘失败 {nfo_path}: {e}\n{traceback.format_exc()}")
             return {"success": False, "message": str(e)}
 
     def _restore_nfo_from_db(self, item_id: str, nfo_path: str, people_records: list,
-                             auto: bool = False) -> dict:
+                             auto: bool = False, scope: str = "both") -> dict:
         """文件级锁包装（v4.6.73 · 报告第十二节）—— 同一 nfo 的
         「重新读取磁盘 → apply → 原子写回」全程串行，防止两个线程
         （写回 worker / 手动全部写回 / 单条写入）同时写同一文件互相覆盖。
-        真正实现见 _restore_nfo_from_db_locked。"""
+        真正实现见 _restore_nfo_from_db_locked。
+        scope（v4.6.115）：本次写回哪一排 —— person=仅第一排 / role=仅第二排 / both=两排。"""
         from . import nfo as nfo_engine
         with nfo_engine.file_lock(nfo_path):
-            return self._restore_nfo_from_db_locked(item_id, nfo_path, people_records, auto=auto)
+            return self._restore_nfo_from_db_locked(item_id, nfo_path, people_records,
+                                                    auto=auto, scope=scope)
 
     def _restore_nfo_from_db_locked(self, item_id: str, nfo_path: str, people_records: list,
-                             auto: bool = False) -> dict:
+                             auto: bool = False, scope: str = "both") -> dict:
         """把库中已翻译名单写回 nfo 文件（本地模式「写入 nfo」）。
         用库里的 name_before→name_after / role_before→role_after 构造映射，
         apply 覆盖 nfo 中对应文本，不调 LLM、不动人名池。
@@ -6744,6 +6747,14 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             doc = nfo_engine.parse_nfo(nfo_path)
             if doc is None:
                 return {"success": False, "message": f"nfo 解析失败: {nfo_path}"}
+            # v4.6.115（用户需求）：本次写回哪一排 —— 与「翻译」的 target_scope 同一语义。
+            # person=只写第一排（人名）/ role=只写第二排（角色）/ both=两排都写（默认）。
+            # 未选中那排的映射保持为空 → apply() 自然不动那些文本。
+            _sc = str(scope or "both").strip().lower()
+            if _sc not in ("person", "role", "both"):
+                _sc = "both"
+            _want_person = _sc in ("person", "both")
+            _want_role = _sc in ("role", "both")
             person_map, role_map = {}, {}
             _recs_all = list(people_records or [])
             _recs_role = _recs_all
@@ -6766,17 +6777,19 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                         _recs_role = _hit
             except Exception:
                 pass
-            for rec in _recs_all:
-                nb = str(rec.get("name_before") or "").strip()
-                na = str(rec.get("name_after") or "").strip()
-                if nb and na and na != nb:
-                    person_map[nb] = na
-            for rec in _recs_role:
-                rb = str(rec.get("role_before") or "").strip()
-                ra = str(rec.get("role_after") or "").strip()
-                if rb and ra and ra != rb:
-                    role_map[rb] = ra
-            if people_records:
+            if _want_person:
+                for rec in _recs_all:
+                    nb = str(rec.get("name_before") or "").strip()
+                    na = str(rec.get("name_after") or "").strip()
+                    if nb and na and na != nb:
+                        person_map[nb] = na
+            if _want_role:
+                for rec in _recs_role:
+                    rb = str(rec.get("role_before") or "").strip()
+                    ra = str(rec.get("role_after") or "").strip()
+                    if rb and ra and ra != rb:
+                        role_map[rb] = ra
+            if people_records and _want_person:
                 try:
                     _need_nb = any(
                         (str(_rec.get("name_before") or "").strip()
@@ -6806,7 +6819,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 except Exception:
                     pass
             try:
-                if doc.root is not None:
+                if _want_role and doc.root is not None:
                     _cur_role = {}
                     for _a in doc.root.findall("actor"):
                         _ne = _a.find("name")
@@ -7074,26 +7087,65 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         return sid
 
     def _server_mapping(self, server_id: str) -> Tuple[str, str]:
-        """取指定服务器的路径映射 (from, to) —— 仅服务器级 mapping（全局旧映射已移除）。
-        未配置的服务器返回 ("", "")，即直接使用 Emby 原路径。"""
+        """取指定服务器的路径映射 (from, to) —— 服务器级 mapping（全局旧映射已移除）。
+        未配置的服务器返回 ("", "")，即直接使用 Emby 原路径。
+
+        注意：本函数只返回**服务器级**（不含 lib_id/idx）的映射；找「路径级覆盖」
+        请用 `_path_mapping_for()`。
+        """
         sid = str(server_id or "").strip()
         if sid:
             for m in (getattr(self, "_nfo_path_mappings", None) or []):
                 if not isinstance(m, dict):
                     continue
+                if str(m.get("lib_id") or "").strip() or m.get("idx") is not None:
+                    continue   # 路径级条目跳过（由 _path_mapping_for 处理）
                 if str(m.get("server_id") or "").strip() == sid:
                     _f = str(m.get("from") or "").strip()
                     if _f:
                         return _f, str(m.get("to") or "").strip()
         return ("", "")
 
-    def _resolve_library_path(self, server_id: str, raw_path: str) -> str:
+    def _path_mapping_for(self, server_id: str, lib_id: str = "",
+                          idx: Optional[int] = None) -> Tuple[str, str, bool]:
+        """取某条库路径生效的映射 → `(from, to, 是否路径级)`（v4.6.115）。
+
+        优先级：**路径级覆盖**（server_id + lib_id + idx）> **服务器级默认** > 原路径。
+        这样服务器级映射对所有路径统一生效，个别挂在不同挂载点的路径可单独覆盖。
+        """
+        sid = str(server_id or "").strip()
+        lid = str(lib_id or "").strip()
+        if sid and lid and idx is not None:
+            for m in (getattr(self, "_nfo_path_mappings", None) or []):
+                if not isinstance(m, dict):
+                    continue
+                if str(m.get("server_id") or "").strip() != sid:
+                    continue
+                if str(m.get("lib_id") or "").strip() != lid:
+                    continue
+                _mi = m.get("idx")
+                if _mi is None:
+                    continue
+                try:
+                    if int(_mi) != int(idx):
+                        continue
+                except Exception:
+                    continue
+                _f = str(m.get("from") or "").strip()
+                if _f:
+                    return _f, str(m.get("to") or "").strip(), True
+        _f2, _t2 = self._server_mapping(sid)
+        return _f2, _t2, False
+
+    def _resolve_library_path(self, server_id: str, raw_path: str,
+                              lib_id: str = "", idx: Optional[int] = None) -> str:
         """统一路径 resolver —— 唯一路径映射入口。
 
-        Emby 原始 Path →（服务器级 mapping > 原始）→ MP 本地路径。
+        Emby 原始 Path →（路径级覆盖 > 服务器级 mapping > 原始）→ MP 本地路径。
         扫描 / Webhook / 预检 / 文件浏览全部走本函数，禁止第二套替换逻辑。
+        lib_id + idx（v4.6.115）：可选，用于命中「路径级覆盖」映射。
         """
-        _f, _t = self._server_mapping(server_id)
+        _f, _t, _ = self._path_mapping_for(server_id, lib_id, idx)
         return self._apply_root_replace(raw_path, _f, _t)
 
     def _migrate_legacy_mapping_for(self, server_id: str, server_name: str = "") -> bool:
@@ -7150,6 +7202,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         for m in (getattr(self, "_nfo_path_mappings", None) or []):
             if not isinstance(m, dict):
                 continue
+            if str(m.get("lib_id") or "").strip() or m.get("idx") is not None:
+                continue   # v4.6.115：路径级覆盖需要 lib_id/idx 上下文，此处无 —— 跳过
             _f = str(m.get("from") or "").strip()
             if not _f:
                 continue
@@ -7159,9 +7213,13 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         return p
 
     def _get_emby_libraries(self) -> List[dict]:
-        """探测所有 Emby 服务下的媒体库列表（只读，含 Id/Name/Path）。
+        """探测所有 Emby 服务下的媒体库列表（只读，含 Id/Name/Path/每条路径）。
 
-        Path 已做前缀替换。失败返回 []（不影响既有流程）。
+        每条库记录的 `path` 已做前缀替换；v4.6.115 起额外携带 `paths[]`：
+        **一个库可挂多条 Locations**，逐条给出 `emby_path` / 映射后 `path` /
+        存在性 / 生效映射 / 唯一标识 `key`（`skey:lib_id:idx`）。
+        旧字段（`emby_path`/`path`/`path_exists`…）= 第 1 条，保持兼容。
+
         带 60s 内存缓存 —— Webhook 每事件、库页渲染都会用到，
         避免每次触发对 Emby 的探测往返。
         """
@@ -7191,9 +7249,36 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                     lib_id = str(lib.get("Id", ""))
                     if not lib_id:
                         continue
-                    _raw = str(lib.get("Path") or "")
-                    _mapped = self._resolve_library_path(skey, _raw)
-                    _mf, _mt = self._server_mapping(skey)
+                    # v4.6.115：展开全部 Locations（无 Locations 且无 Path 的库 → 0 条 → 界面显示空、不参与扫描）
+                    _raws = lib.get("Locations")
+                    if not isinstance(_raws, list) or not _raws:
+                        _p0 = str(lib.get("Path") or "").strip()
+                        _raws = [_p0] if _p0 else []
+                    _paths: List[dict] = []
+                    for _i, _raw in enumerate(_raws):
+                        _raw = str(_raw or "").strip()
+                        _mf, _mt, _plvl = self._path_mapping_for(skey, lib_id, _i)
+                        _mapped = self._apply_root_replace(_raw, _mf, _mt)
+                        _rec_p = {
+                            "idx": _i,
+                            "key": f"{skey}:{lib_id}:{_i}",
+                            "emby_path": _raw,
+                            "path": _mapped,
+                            "mapping_from": _mf,
+                            "mapping_to": _mt,
+                            "mapping_path_level": bool(_plvl),
+                        }
+                        try:
+                            _rec_p["exists"] = bool(_mapped) and os.path.exists(_mapped)
+                            _rec_p["readable"] = bool(_mapped) and os.access(_mapped, os.R_OK) if _rec_p["exists"] else False
+                            _rec_p["is_dir"] = bool(_mapped) and os.path.isdir(_mapped)
+                        except Exception:
+                            _rec_p["exists"] = False
+                            _rec_p["readable"] = False
+                            _rec_p["is_dir"] = False
+                        _paths.append(_rec_p)
+                    _first = _paths[0] if _paths else {}
+                    _mf0, _mt0 = self._server_mapping(skey)
                     _rec = {
                         "skey": skey,
                         "server_id": skey,
@@ -7201,16 +7286,19 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                         "server_name": sname,
                         "lib_name": str(lib.get("Name") or "?"),
                         "lib_type": str(lib.get("Type") or ""),
-                        "emby_path": _raw,
-                        "path": _mapped,
-                        "mapping_from": _mf,
-                        "mapping_to": _mt,
+                        "paths": _paths,
+                        "path_count": len(_paths),
+                        # 兼容旧字段（= 第 1 条路径）
+                        "emby_path": str(_first.get("emby_path") or ""),
+                        "path": str(_first.get("path") or ""),
+                        "mapping_from": _mf0,
+                        "mapping_to": _mt0,
                         "full_key": f"{skey}:{lib_id}",
                     }
                     try:
-                        _rec["path_exists"] = bool(_mapped) and os.path.exists(_mapped)
-                        _rec["path_readable"] = bool(_mapped) and os.access(_mapped, os.R_OK) if _rec["path_exists"] else False
-                        _rec["path_is_dir"] = bool(_mapped) and os.path.isdir(_mapped)
+                        _rec["path_exists"] = bool(_first.get("exists"))
+                        _rec["path_readable"] = bool(_first.get("readable"))
+                        _rec["path_is_dir"] = bool(_first.get("is_dir"))
                     except Exception:
                         _rec["path_exists"] = False
                         _rec["path_readable"] = False
@@ -7228,22 +7316,60 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         return result
 
     def _selected_library_paths(self) -> List[str]:
-        """已选中库的自动根目录（库 Path，经前缀替换）。
+        """已选中库的自动根目录（库的**全部**路径，经前缀替换）。
 
-        - 选中的库以 full_key（skey:lib_id）或裸 lib_id 匹配
-        - 命中且 Path 非空 → 作为扫描根目录
-        - 一个库都没选 → 返回 []（表示不启用库过滤/自动根目录）
+        v4.6.115：一个库可挂多条 Locations —— 界面显示几条、这里就返回几条（一一对应，
+        「显示多少 = 扫多少」）。并做两层收敛：
+          · 同服务器内去重；
+          · **父子剪枝**：被另一条已选路径包含的子路径去掉（父目录递归已覆盖，不漏文件）。
+        **跨服务器不合并** —— 两台 Emby 可能挂同一本地目录，归属按 server_id 区分。
         """
         libs = self._libraries or []
         if not libs:
             return []
         want = set(libs)
-        paths = []
+        pairs: List[Tuple[str, str]] = []
         for lib in self._get_emby_libraries():
-            if lib["full_key"] in want or lib["lib_id"] in want:
-                if lib["path"]:
-                    paths.append(lib["path"])
-        return list(dict.fromkeys(paths))
+            if not (lib["full_key"] in want or lib["lib_id"] in want):
+                continue
+            _sid = str(lib.get("skey") or "")
+            _ps = lib.get("paths")
+            if isinstance(_ps, list) and _ps:
+                for p in _ps:
+                    _pp = str(p.get("path") or "").strip()
+                    if _pp:
+                        pairs.append((_sid, _pp))
+            else:
+                _p0 = str(lib.get("path") or "").strip()
+                if _p0:
+                    pairs.append((_sid, _p0))
+        return self._prune_subpaths(pairs)
+
+    @staticmethod
+    def _prune_subpaths(pairs: List[Tuple[str, str]]) -> List[str]:
+        """同服务器内去重 + 剪掉被父路径包含的子路径（保留父，顺序穩定）。
+
+        `pairs` = [(server_id, local_path), ...]；跨服务器各自独立处理，不跨服务器去重。
+        """
+        by_srv: Dict[str, List[str]] = {}
+        seen = set()
+        for sid, p in (pairs or []):
+            n = str(p or "").replace("\\", "/").rstrip("/")
+            if not n:
+                continue
+            _k = (str(sid or ""), n)
+            if _k in seen:
+                continue
+            seen.add(_k)
+            by_srv.setdefault(str(sid or ""), []).append(n)
+        out: List[str] = []
+        for _sid, lst in by_srv.items():
+            for i, a in enumerate(lst):
+                # 被另一条（更短/相等前缀）覆盖 → 剪掉；父目录递归已覆盖，不会漏文件
+                if any(j != i and a.startswith(b + "/") for j, b in enumerate(lst)):
+                    continue
+                out.append(a)
+        return out
 
     def _all_nfo_roots(self) -> List[str]:
         """扫描根目录 = 已选中的媒体库路径（经前缀替换）。
@@ -7296,21 +7422,32 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
     def _library_name_for_path(self, path: str) -> str:
         """从 nfo 路径推导所属媒体库名（库页左侧分组用）。
 
-        遍历全部 Emby 服务的库，匹配路径前缀；匹配不到返回 ""（前端归「未分类」）。
-        仅使用缓存中的库列表（60s），不额外探测。
+        遍历全部 Emby 服务的库的**全部路径**，按 **最长前缀优先** 匹配
+        （v4.6.115：父子库并存时，文件归到更具体的那个库，而不是列表里排在前面的）。
+        匹配不到返回 ""（前端归「未分类」）。仅使用缓存中的库列表（60s），不额外探测。
         """
         try:
             p = str(path or "").replace("\\", "/").strip("/")
             if not p:
                 return ""
+            best = None          # (前缀长度, 库记录)
             for lib in self._get_emby_libraries():
-                r = str(lib.get("path") or "").replace("\\", "/").strip("/")
-                if r and (p == r or p.startswith(r + "/")):
-                    # 多服务器同名库 → 带服务器名前缀区分
-                    _srv = str(lib.get("server_name") or "").strip()
-                    _nm = str(lib.get("lib_name") or "").strip()
-                    return f"{_srv} · {_nm}" if _srv and _nm else (_nm or _srv or "")
-            return ""
+                _ps = lib.get("paths")
+                _cands = ([str(x.get("path") or "") for x in _ps]
+                          if isinstance(_ps, list) and _ps else [str(lib.get("path") or "")])
+                for _c in _cands:
+                    r = str(_c or "").replace("\\", "/").strip("/")
+                    if not r:
+                        continue
+                    if p == r or p.startswith(r + "/"):
+                        if best is None or len(r) > best[0]:
+                            best = (len(r), lib)
+            if best is None:
+                return ""
+            _lib = best[1]
+            _srv = str(_lib.get("server_name") or "").strip()
+            _nm = str(_lib.get("lib_name") or "").strip()
+            return f"{_srv} · {_nm}" if _srv and _nm else (_nm or _srv or "")
         except Exception:
             return ""
 
@@ -7322,15 +7459,19 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
 
     # ============================================================
     # ============================================================
-    def _check_one_path(self, server_id: str, lib_id: str, raw_path: str = "") -> dict:
+    def _check_one_path(self, server_id: str, lib_id: str, raw_path: str = "",
+                        idx: Optional[int] = None) -> dict:
         """单条路径预检（只读、不递归）。
 
         返回：映射前后的路径、映射是否命中、是否存在/可读/是目录、顶层 nfo 计数、明确提示。
+        v4.6.115：`idx` 指定库内第几条路径（一个库可挂多条 Locations）；返回体带
+        `key`（`server_id:lib_id:idx`）供前端逐路径标识。
         """
         server_id = str(server_id or "").strip()
         lib_id = str(lib_id or "").strip()
         emby_path = str(raw_path or "").strip()
         resolved = ""
+        _hit_path_rec: dict = {}
         # 1) 优先按媒体库定位（含 server_id 精确匹配）
         if lib_id:
             for lib in self._get_emby_libraries():
@@ -7338,20 +7479,44 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                     continue
                 if server_id and lib.get("skey") != server_id:
                     continue
-                emby_path = str(lib.get("emby_path") or "")
-                resolved = str(lib.get("path") or "")
+                _ps = lib.get("paths")
+                if isinstance(_ps, list) and _ps:
+                    _pick = None
+                    if idx is not None:
+                        for _x in _ps:
+                            try:
+                                if int(_x.get("idx")) == int(idx):
+                                    _pick = _x
+                                    break
+                            except Exception:
+                                continue
+                    if _pick is None:
+                        _pick = _ps[0]
+                    _hit_path_rec = _pick
+                    emby_path = str(_pick.get("emby_path") or "")
+                    resolved = str(_pick.get("path") or "")
+                else:
+                    emby_path = str(lib.get("emby_path") or "")
+                    resolved = str(lib.get("path") or "")
                 break
         # 2) 未命中媒体库 → 用传入 raw_path 走统一 resolver
         if not resolved and emby_path:
-            resolved = self._resolve_library_path(server_id, emby_path)
-        mf, mt = self._server_mapping(server_id)
+            resolved = self._resolve_library_path(server_id, emby_path, lib_id, idx)
+        if _hit_path_rec:
+            mf = str(_hit_path_rec.get("mapping_from") or "")
+            mt = str(_hit_path_rec.get("mapping_to") or "")
+        else:
+            mf, mt, _ = self._path_mapping_for(server_id, lib_id, idx)
         info = {
             "server_id": server_id,
             "lib_id": lib_id,
+            "idx": idx,
+            "key": f"{server_id}:{lib_id}:{idx if idx is not None else 0}",
             "emby_path": emby_path,
             "path": resolved,
             "mapping_from": mf,
             "mapping_to": mt,
+            "mapping_path_level": bool(_hit_path_rec.get("mapping_path_level")) if _hit_path_rec else False,
             "exists": False,
             "readable": False,
             "is_dir": False,
@@ -7392,36 +7557,53 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
 
     def _api_nfo_path_check(self, data: Optional[dict] = None):
         """扫描前路径预检 API。
-        入参：{"server_id","lib_id"} 或 {"server_id","path"}。"""
+        入参：{"server_id","lib_id","idx"?} 或 {"server_id","path"}。"""
         try:
             data = data or {}
+            _idx = data.get("idx")
+            try:
+                _idx = int(_idx) if _idx is not None and str(_idx).strip() != "" else None
+            except Exception:
+                _idx = None
             info = self._check_one_path(str(data.get("server_id") or ""),
                                         str(data.get("lib_id") or ""),
-                                        str(data.get("path") or ""))
+                                        str(data.get("path") or ""),
+                                        idx=_idx)
             return {"success": True, "data": info}
         except Exception as e:
             return {"success": False, "message": str(e)}
 
     def _api_nfo_path_check_all(self, data: Optional[dict] = None):
-        """「测试全部路径」—— 对所有已选媒体库批量预检。"""
+        """「测试全部路径」—— 对所有已选媒体库的**每一条路径**批量预检（v4.6.115）。"""
         try:
             want = set(self._libraries or [])
             libs = self._get_emby_libraries()
             targets = [l for l in libs
                        if (not want) or (l.get("full_key") in want or l.get("lib_id") in want)]
-            rows = [self._check_one_path(str(l.get("skey") or ""),
-                                         str(l.get("lib_id") or ""),
-                                         str(l.get("emby_path") or ""))
-                    for l in targets]
+            rows = []
+            for l in targets:
+                _ps = l.get("paths")
+                if isinstance(_ps, list) and _ps:
+                    for p in _ps:
+                        rows.append(self._check_one_path(str(l.get("skey") or ""),
+                                                         str(l.get("lib_id") or ""),
+                                                         str(p.get("emby_path") or ""),
+                                                         idx=p.get("idx")))
+                else:
+                    # 无路径的库（合集/文件夹类型）：也返回一行，标空
+                    rows.append(self._check_one_path(str(l.get("skey") or ""),
+                                                     str(l.get("lib_id") or ""), ""))
             ok = sum(1 for r in rows if r.get("exists") and r.get("is_dir") and r.get("readable"))
             return {"success": True, "data": {"total": len(rows), "ok": ok, "rows": rows}}
         except Exception as e:
             return {"success": False, "message": str(e)}
 
-    def _api_nfo_path_browse(self, server_id: str = "", lib_id: str = "", path: str = ""):
+    def _api_nfo_path_browse(self, server_id: str = "", lib_id: str = "", path: str = "",
+                             idx: int = -1):
         """文件浏览（只读，限定媒体库根目录）。
 
-        入参（GET query）：server_id / lib_id / path（path 可空=列根目录，可为根内子路径）。
+        入参（GET query）：server_id / lib_id / path（path 可空=列根目录，可为根内子路径）
+        / idx（v4.6.115：一个库可挂多条路径，指定浏览第几条；缺省或 -1 = 第一条）。
         修复：GET 端点必须用命名参数接收 query（宿主按函数签名绑定；同 /live_log、/pool/list）。
         此前用 POST 风格 data 字典签名 → 参数全部丢失（server_id/lib_id 恒为空）→ 恒报「未找到该媒体库」。
         安全：根目录只能来自已探测媒体库的映射后路径；禁止越界 / ../ / 任意绝对路径；不提供删除/改名。
@@ -7430,6 +7612,10 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             server_id = str(server_id or "").strip()
             lib_id = str(lib_id or "").strip()
             sub = str(path or "").strip()
+            try:
+                _idx = int(idx) if idx is not None and str(idx).strip() != "" else -1
+            except Exception:
+                _idx = -1
             root = ""
             emby_path = ""
             for lib in self._get_emby_libraries():
@@ -7439,8 +7625,24 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                     continue
                 if not (lib_id or server_id):
                     continue
-                emby_path = str(lib.get("emby_path") or "")
-                root = str(lib.get("path") or "")
+                _ps = lib.get("paths")
+                if isinstance(_ps, list) and _ps:
+                    _pick = None
+                    if _idx >= 0:
+                        for _x in _ps:
+                            try:
+                                if int(_x.get("idx")) == _idx:
+                                    _pick = _x
+                                    break
+                            except Exception:
+                                continue
+                    if _pick is None:
+                        _pick = _ps[0]
+                    emby_path = str(_pick.get("emby_path") or "")
+                    root = str(_pick.get("path") or "")
+                else:
+                    emby_path = str(lib.get("emby_path") or "")
+                    root = str(lib.get("path") or "")
                 break
             if not root and emby_path:
                 root = self._resolve_library_path(server_id, emby_path)
@@ -13542,9 +13744,13 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             data = data or {}
             item_id = str(data.get("item_id") or "").strip()
             server_id = str(data.get("server_id") or "").strip()
+            # v4.6.115（用户需求）：本次写回哪一排 —— 与「翻译」同一语义，默认两排
+            _scope = str(data.get("target_scope") or "both").strip().lower()
+            if _scope not in ("person", "role", "both"):
+                _scope = "both"
             if not item_id:
                 return {"success": False, "message": "缺少 item_id 参数"}
-            _r = self._restore_item_to_nfo(item_id, server_id)
+            _r = self._restore_item_to_nfo(item_id, server_id, scope=_scope)
             self._db_items_cache = None
             # v4.6.63（关键修复）：手动「写入」必须同步写回状态 —— 此前只写文件、从不更新
             # writeback_state，于是「待写回」徽章永远挂着（用户：点了「写入」待写回也没消失，
@@ -13565,9 +13771,12 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             except Exception as _we:
                 logger.debug(f"[Writeback] 手动写入状态同步失败（非致命）: {_we}")
             if _r.get("success"):
-                # 第一排（人名）再额外同步 Emby（Person 实体改名，全局生效）
+                # 第一排（人名）再额外同步 Emby（Person 实体改名，全局生效）——
+                # v4.6.115：仅当本次写回包含第一排时才做
                 try:
-                    if getattr(self, "_emby_name_sync", True) and not bool(getattr(self, "_nfo_preview", False)):
+                    if _scope in ("person", "both") \
+                            and getattr(self, "_emby_name_sync", True) \
+                            and not bool(getattr(self, "_nfo_preview", False)):
                         _db = getattr(self, "_people_db", None)
                         _recs = _db.people_of_item(plugin_id=self.__class__.__name__,
                                                    item_id=item_id, server_id=server_id) if _db else []
@@ -13600,7 +13809,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             logger.error(f"[DB] 恢复失败: {e}\n{traceback.format_exc()}")
             return {"success": False, "message": str(e)}
 
-    def _restore_item_to_nfo(self, item_id: str, server_id: str = "", auto: bool = False) -> dict:
+    def _restore_item_to_nfo(self, item_id: str, server_id: str = "", auto: bool = False,
+                             scope: str = "both") -> dict:
         """把某条目库中已翻译名单写回本地 nfo 文件（不调 LLM）—— 单条版与「全部写回」共用。
 
         仅支持 NFO 条目（库中带 nfo_path 的记录）。旧版 API 在线记录
@@ -13608,6 +13818,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         如需清理请使用库页「清空异模式数据」（/db/clear_other）。
         auto=True 供自动写回 worker 使用 —— 内容已是译文（apply 改动 0）时不落盘，
         避免无谓改动文件 mtime（手动路径保持旧行为：无改动也保存以便补锁 Cast）。
+        scope（v4.6.115）：本次写回哪一排 —— person=仅第一排 / role=仅第二排 / both=两排（默认）。
         :return: {"success", "message", "data": {...} | "skip": True}
         """
         try:
@@ -13638,7 +13849,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 done = changed_total = failed = skipped = noop = 0
                 for _p, recs in path_groups.items():
                     try:
-                        r = self._write_nfo_once(item_id, server_id, _p, people_records=recs, auto=auto)
+                        r = self._write_nfo_once(item_id, server_id, _p, people_records=recs,
+                                                 auto=auto, scope=scope)
                         if r.get("success"):
                             done += 1
                             changed_total += int((r.get("data") or {}).get("changed", 0))
@@ -13652,6 +13864,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                         failed += 1
                         logger.warning(f"[DB] 写回 nfo 失败 {_p}: {_e}")
                 msg = f"已写回 {done} 个 nfo 文件，改动 {changed_total} 条"
+                if _sc != "both":
+                    msg += f"（范围：{'仅第一排人名' if _sc == 'person' else '仅第二排角色'}）"
                 if noop:
                     msg += f"，{noop} 个已是译文（未重复写）"
                 if skipped:
@@ -13666,20 +13880,26 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 # 同层级。开关默认关；未开启 / 无译文 / 取不到 itemId 都只在文案里说明，不报错。
                 _ers: dict = {}
                 try:
-                    if done and not bool(getattr(self, "_nfo_preview", False)):
+                    # v4.6.115：仅当本次写回包含第二排（role/both）时才同步 Emby 条目角色
+                    if _sc not in ("role", "both"):
+                        # 用户选了「仅第一排」→ 明确说明本次不写第二排（不静默）
+                        msg += "；Emby 角色：本次未包含第二排（仅写第一排）"
+                    elif done and not bool(getattr(self, "_nfo_preview", False)):
                         _ers = self._emby_sync_item_roles(
                             item_id=item_id, server_id=server_id,
                             ctx=("自动写回" if auto else "写回")) or {}
                         if _ers.get("changed"):
                             msg += f"；Emby 角色同步 {_ers['changed']} 处"
-                        elif _ers.get("status") not in ("disabled", "noop", "", None):
+                        elif str(_ers.get("status") or "") == "disabled":
+                            msg += "；Emby 角色：未开启（设置页「角色译文同步到 Emby 条目」）"
+                        elif _ers.get("status") not in ("noop", "", None):
                             msg += f"；Emby 角色未同步（{_ers.get('reason')}）"
                 except Exception as _re:
                     logger.debug(f"[EmbyRole] 写回后角色同步失败（非致命）: {_re}")
                 return {"success": failed == 0, "message": msg,
                         "data": {"files": done, "changed": changed_total, "failed": failed,
                                  "skipped": skipped, "noop": noop, "skipped_missing": max(0, _miss),
-                                 "emby_roles": _ers}}
+                                 "scope": str(scope or "both").lower(), "emby_roles": _ers}}
 
             if _n_with_path:
                 _recs_wp = [r for r in (people_records or []) if str(r.get("nfo_path") or "").strip()]
@@ -13827,22 +14047,35 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                                      scan_mode=str(getattr(self, "_scan_mode", "nfo") or "nfo"))
             if not items:
                 return {"success": False, "message": "库中暂无记录"}
-            _err = self._launch_bg(self._writeback_all_worker, {}, task="writeback")
+            # v4.6.115（用户需求）：本次写回哪一排 —— 与「翻译」同一语义，默认两排
+            _scope = str((data or {}).get("target_scope") or "both").strip().lower()
+            if _scope not in ("person", "role", "both"):
+                _scope = "both"
+            _err = self._launch_bg(self._writeback_all_worker, {"scope": _scope}, task="writeback")
             if _err:
                 return _err
-            self._push_log("INFO", f"全部写回已启动：将把库中 {len(items)} 个条目的已翻译名单批量写回 nfo 文件（不重新翻译）")
-            return {"success": True, "message": f"全部写回已启动（{len(items)} 个条目，后台执行）"}
+            _lbl = {"person": "仅第一排人名", "role": "仅第二排角色",
+                    "both": "第一排人名 + 第二排角色"}.get(_scope, "第一排人名 + 第二排角色")
+            self._push_log("INFO", f"全部写回已启动（范围 = {_lbl}）：将把库中 {len(items)} 个条目的已翻译名单批量写回 nfo 文件（不重新翻译）")
+            return {"success": True, "message": f"全部写回已启动（{len(items)} 个条目 · 范围 = {_lbl}，后台执行）"}
         except Exception as e:
             logger.error(f"[DB] 全部写回启动失败: {e}\n{traceback.format_exc()}")
             return {"success": False, "message": str(e)}
 
     def _writeback_all_worker(self, data: Optional[dict] = None):
-        """遍历库中全部条目，逐条把已翻译名单写回 nfo 文件（复用单条写回逻辑）。"""
+        """遍历库中全部条目，逐条把已翻译名单写回 nfo 文件（复用单条写回逻辑）。
+        data["scope"]（v4.6.115）：本次写回哪一排 —— person / role / both（默认）。"""
         try:
             _pid = self.__class__.__name__
+            _scope = str((data or {}).get("scope") or "both").strip().lower()
+            if _scope not in ("person", "role", "both"):
+                _scope = "both"
             db = getattr(self, "_people_db", None)
             items = db.library_items(plugin_id=_pid) if db else []
             done = changed_total = failed = skipped = skipped_na = skipped_missing = 0
+            # v4.6.115：Emby 角色同步统计（issue #5 新增能力）—— 供通知/日志回报第二排实际写入情况
+            _er_ok = _er_changed = _er_no_item = _er_fail = 0
+            _er_err = ""
             # UI-004 同类修复：「全部写回」是写回任务，进度写入独立 _writeback_status，
             # 不再借用 _scan_status（否则会覆盖正在进行的扫描进度显示）
             self._writeback_status["running"] = True
@@ -13857,8 +14090,20 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 try:
                     _iid = str(it.get("item_id") or "")
                     _sid = str(it.get("server_id") or "")
-                    r = self._restore_item_to_nfo(_iid, _sid)
+                    r = self._restore_item_to_nfo(_iid, _sid, scope=_scope)
                     d = r.get("data") or {}
+                    # v4.6.115：累计 Emby 角色同步结果（第二排写入 Emby 条目级 People[].Role）
+                    _ers = d.get("emby_roles") if isinstance(d, dict) else None
+                    if isinstance(_ers, dict):
+                        _st_r = str(_ers.get("status") or "")
+                        if _ers.get("changed"):
+                            _er_ok += 1
+                            _er_changed += int(_ers.get("changed") or 0)
+                        elif _st_r == "no_item_id":
+                            _er_no_item += 1
+                        elif _st_r in ("failed", "unavailable", "no_client", "exception"):
+                            _er_fail += 1
+                            _er_err = _er_err or str(_ers.get("reason") or "")
                     # v4.6.63：「全部写回」同样同步 writeback_state —— 否则「待写回」徽章会一直挂着
                     try:
                         _wdb = self._wb_db()
@@ -13888,9 +14133,31 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                     failed += 1
                     logger.warning(f"[DB] 全部写回条目失败 {it.get('item_id')}: {_e}")
             _miss_txt = f"，文件已不存在跳过 {skipped_missing}（删除/观察期）" if skipped_missing else ""
-            self._push_log("INFO", f"全部写回完成：写回 {done} 个条目，改动 {changed_total} 条（无译文跳过 {skipped}，无 nfo 记录跳过 {skipped_na}{_miss_txt}，失败 {failed}）")
+            _scope_lbl = {"person": "仅第一排人名", "role": "仅第二排角色",
+                          "both": "第一排人名 + 第二排角色"}.get(_scope, "第一排人名 + 第二排角色")
+            # v4.6.115：第二排 → Emby 条目角色 的同步结果行（未开启 / 未含第二排时明确说明）
+            _er_line = ""
+            if _scope not in ("role", "both"):
+                _er_line = "🎭 Emby 角色：本次未包含第二排（写回范围 = 仅第一排人名）"
+            elif not bool(getattr(self, "_emby_role_sync", constants.DEFAULT_EMBY_ROLE_SYNC)):
+                _er_line = "🎭 Emby 角色：未开启（设置页「角色译文同步到 Emby 条目」）"
+            elif _er_changed or _er_ok:
+                _er_line = f"🎭 Emby 角色：同步 {_er_changed} 处（{_er_ok} 个条目）"
+                if _er_no_item:
+                    _er_line += f" · 未取到 Emby itemId {_er_no_item} 个"
+                if _er_fail:
+                    _er_line += f" · 失败 {_er_fail} 个"
+            elif _er_no_item or _er_fail:
+                _er_line = (f"🎭 Emby 角色：未写入（未取到 itemId {_er_no_item} · 失败 {_er_fail}）"
+                            + (f"｜{_er_err[:80]}" if _er_err else ""))
+            else:
+                _er_line = "🎭 Emby 角色：无可同步的角色译文"
+            self._push_log("INFO", f"全部写回完成（范围 = {_scope_lbl}）：写回 {done} 个条目，改动 {changed_total} 条"
+                                   f"（无译文跳过 {skipped}，无 nfo 记录跳过 {skipped_na}{_miss_txt}，失败 {failed}）"
+                                   f"｜{_er_line}")
             _emby_sync_line = ""
-            if not bool(getattr(self, "_nfo_preview", False)):
+            # v4.6.115：第一排（Person 实体改名）仅在本次写回包含第一排时执行
+            if _scope in ("person", "both") and not bool(getattr(self, "_nfo_preview", False)):
                 _esr = self._pool_sync_all(ctx="全部写回") if getattr(self, "_emby_name_sync", True) else {}
                 if _esr and _esr.get("total"):
                     _emby_sync_line = (f"🔄 Emby 人名：改名 {_esr.get('renamed', 0)} · "
@@ -13904,11 +14171,13 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                         f"⏭️ 跳过：{skipped + skipped_na + skipped_missing}"
                         f"{f'（其中文件已不存在 {skipped_missing} 个：删除/观察期）' if skipped_missing else ''}"
                         f"　❌ 失败：{failed}　💾 备份：{_backup_txt}",
+                        f"🧭 写回范围：{_scope_lbl}",
                         f"🔐 锁定：{_lock_txt}",
-                        "不重新翻译 · 使用库中已翻译名单落盘",
                     ]
                     if _emby_sync_line:
                         _lines.append(_emby_sync_line)
+                    _lines.append(_er_line)
+                    _lines.append("不重新翻译 · 使用库中已翻译名单落盘")
                     self.post_message(
                         mtype=NotificationType.Manual,
                         title="✅ 全部写回完成",
