@@ -49,7 +49,7 @@ from .emby_client import EmbyClient, ITEM_FOUND, ITEM_NOT_FOUND, ITEM_UNAVAILABL
 from .llm_client import (LLMClient, LLMError, RateLimited, QuotaExceeded,
                          AuthenticationError, ContextLengthExceeded)
 from .db import (PeopleDb, NameMapDb, WritebackDb, TranslateJobDb, pool_target_name,
-                 _is_kana_text, split_media_id, db_rev)
+                 _is_kana_text, split_media_id, db_rev, get_meta, set_meta)
 from . import constants
 from .task_manager import TaskStateMixin
 from .path_utils import PathUtilsMixin
@@ -100,7 +100,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
     plugin_name = "Emby 演职人员中文化"
     plugin_desc = "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回；拉取人名时可用 TMDB 刮削补中文名/简介/头像"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/embypeoplelocalize.png"
-    plugin_version = "4.6.110"
+    plugin_version = "4.6.111"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "embypeoplelocalize_"
@@ -1030,11 +1030,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         # v4.6.103（TMDB-2）：进程级负缓存 —— 同一 TmdbId 已在本进程确认「TMDB 无人物详情」时，
         # TTL 内直接跳过（此前每次拉池都重打一遍坏 ID，宿主 tmdbapi 每次 logger.error 一行
         # "The resource you requested could not be found."，用户日志被刷屏）。
-        _dead = getattr(self, "_tmdb_dead", None)
-        if _dead is None:
-            _dead = self._tmdb_dead = {}
-        _dts = _dead.get(("person", _tid))
-        if _dts and (time.time() - float(_dts)) < float(getattr(self, "_TMDB_DEAD_TTL", 21600.0) or 21600.0):
+        # v4.6.111（LIB-020）：负缓存同时看内存与持久化副本（重启也生效）
+        if self._tmdb_dead_hit(("person", _tid)):
             out["err"] = "TMDB 无人物详情（负缓存命中，跳过请求）"
             return out
         _cache = getattr(self, "_tmdb_person_cache", None)
@@ -1051,10 +1048,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 _pd = None
             _cache[_tid] = _pd
         if not _pd:
-            try:
-                _dead[("person", _tid)] = time.time()   # v4.6.103（TMDB-2）：登记负结果
-            except Exception:
-                pass
+            # v4.6.103（TMDB-2）登记负结果；v4.6.111（LIB-020）同时落持久化副本（重启也生效）
+            self._tmdb_dead_note(("person", _tid))
             out["err"] = "TMDB 无人物详情"
             return out
         # 中文名来源（v4.6.11 修正）：
@@ -1130,6 +1125,107 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 out["avatar"] = bool(cli.set_person_primary_image(person_id, _img))
         return out
 
+    # ── v4.6.111（LIB-020）：TMDB 无效 ID 负缓存的**持久化** + 「查不到」日志汇总 ──
+    _TMDB_DEAD_META_KEY = "tmdb_dead_ids"
+
+    def _tmdb_dead_key_str(self, key) -> str:
+        """把内存里的负缓存元组键转成可持久化的字符串键（credits|1822070|movie / person|12345）。"""
+        try:
+            _k, _v = (key or ("", ""))
+            if isinstance(_v, (list, tuple)):
+                return f"{_k}|" + "|".join(str(x) for x in _v)
+            return f"{_k}|{_v}"
+        except Exception:
+            return str(key)
+
+    def _tmdb_dead_dict(self) -> dict:
+        """负缓存的持久化副本（跨重启有效）—— 只存 {键: 时间戳}，读取时按 TTL 过滤。
+
+        v4.6.111（LIB-020）：此前负缓存只在进程内存里，**重启插件后同一批坏 id 会再问一遍**
+        （用户实测：每次扫描日志里都有「很多 404」）。落进插件库后，问过一次就记住，
+        直到用户在设置页点「清空缓存」。
+        """
+        _m = getattr(self, "_tmdb_dead_store", None)
+        if isinstance(_m, dict):
+            return _m
+        _m = {}
+        try:
+            _raw = str(get_meta(self._TMDB_DEAD_META_KEY, "") or "")
+            if _raw:
+                _d = json.loads(_raw)
+                if isinstance(_d, dict):
+                    _now = time.time()
+                    _ttl = float(getattr(self, "_TMDB_DEAD_TTL", 21600.0) or 21600.0)
+                    _m = {str(k): float(v) for k, v in _d.items()
+                          if isinstance(v, (int, float)) and (_now - float(v)) < _ttl}
+        except Exception:
+            _m = {}
+        self._tmdb_dead_store = _m
+        return _m
+
+    def _tmdb_dead_note(self, key) -> None:
+        """登记一条负结果：内存 + 持久化副本（打脏标记，扫描收尾时统一落库，避免频繁写盘）。"""
+        _now = time.time()
+        try:
+            _dead = getattr(self, "_tmdb_dead", None)
+            if _dead is None:
+                _dead = self._tmdb_dead = {}
+            _dead[key] = _now
+        except Exception:
+            pass
+        try:
+            self._tmdb_dead_dict()[self._tmdb_dead_key_str(key)] = _now
+            self._tmdb_dead_dirty = True
+        except Exception:
+            pass
+
+    def _tmdb_dead_hit(self, key) -> bool:
+        """该键是否在 TTL 内已被判定为「无效」（内存或持久化副本命中）。"""
+        _ttl = float(getattr(self, "_TMDB_DEAD_TTL", 21600.0) or 21600.0)
+        _now = time.time()
+        try:
+            _dead = getattr(self, "_tmdb_dead", None) or {}
+            _ts = _dead.get(key)
+            if _ts and (_now - float(_ts)) < _ttl:
+                return True
+        except Exception:
+            pass
+        try:
+            _ts2 = self._tmdb_dead_dict().get(self._tmdb_dead_key_str(key))
+            return bool(_ts2 and (_now - float(_ts2)) < _ttl)
+        except Exception:
+            return False
+
+    def _tmdb_scan_flush(self) -> None:
+        """扫描收尾：负缓存落库 + 把「查不到」的逐条日志**汇总成一行**。
+
+        v4.6.111（LIB-020）：此前每个查不到的 id 都打一条 INFO，用户日志被刷屏
+        （「还有很多，我就不一一复制了」）；现在明细降到 debug，结束时只报一条汇总。
+        """
+        try:
+            if getattr(self, "_tmdb_dead_dirty", False):
+                _st = getattr(self, "_tmdb_dead_store", None)
+                if isinstance(_st, dict):
+                    _now = time.time()
+                    _ttl = float(getattr(self, "_TMDB_DEAD_TTL", 21600.0) or 21600.0)
+                    _st = {k: v for k, v in _st.items() if (_now - float(v)) < _ttl}
+                    self._tmdb_dead_store = _st
+                    set_meta(self._TMDB_DEAD_META_KEY, json.dumps(_st, ensure_ascii=False))
+                self._tmdb_dead_dirty = False
+        except Exception:
+            pass
+        try:
+            _q = getattr(self, "_tmdb_empty_log", None) or []
+            if _q:
+                _uniq = sorted({str(x) for x in _q})
+                _preview = "、".join(_uniq[:6])
+                logger.info(f"[TMDB] 本次查不到演职员的 ID 共 {len(_q)} 个（已跳过并登记负缓存，"
+                            f"重启也不会重复请求；「清空缓存」可重置；明细见 debug 日志）"
+                            f"｜示例：{_preview}" + ("…" if len(_uniq) > 6 else ""))
+            self._tmdb_empty_log = []
+        except Exception:
+            pass
+
     def _tmdb_credits_role_map(self, item_id: str, item_type: str, hint: str = "") -> dict:
         """取条目的 TMDB 演职人员表，构建 {人物 TmdbId(str): 英文角色名}。
 
@@ -1151,11 +1247,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         # 404/异常一律吞掉返回 []，插件无法区分「确实没有演职员」与「ID 无效/请求失败」；此前
         # _tmdb_credits_cache 每轮扫描清空，同一个坏 ID 会被反复重打（日志 1 秒 1 条 404）。
         # 命中即跳过；TTL 过期自动重试。
-        _dead = getattr(self, "_tmdb_dead", None)
-        if _dead is None:
-            _dead = self._tmdb_dead = {}
-        _dts = _dead.get(("credits", _key))
-        if _dts and (time.time() - float(_dts)) < float(getattr(self, "_TMDB_DEAD_TTL", 21600.0) or 21600.0):
+        # v4.6.111（LIB-020）：负缓存查询同时看内存与**持久化副本**（重启也生效）
+        if self._tmdb_dead_hit(("credits", _key)):
             _cache[_key] = {}
             return {}
         _map = {}
@@ -1183,19 +1276,21 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         if not _map:
             # v4.6.103（TMDB-1）：空结果登记负缓存（TTL 内不再重打 —— 404 的 ID 与「确实无演职员」
             # 在宿主侧无法区分，两者都不值得每轮重试；TTL 到期会自动再试一次）。
+            # v4.6.111（LIB-020）：登记负缓存（内存 + 待落库），并把明细排进扫描汇总队列 ——
+            # 逐条 info 会刷屏（用户实测「还有很多」），现在只 debug 留明细、扫描结束汇总一行。
+            self._tmdb_dead_note(("credits", _key))
             try:
-                _dead[("credits", _key)] = time.time()
+                _q = getattr(self, "_tmdb_empty_log", None)
+                if _q is None:
+                    _q = self._tmdb_empty_log = []
+                if len(_q) < 200:
+                    _q.append(f"{_iid}({'tv' if _is_tv else 'movie'})"
+                              f"{('｜' + hint) if hint else ''}")
             except Exception:
                 pass
-            # v4.6.109：**带上 ID 记一行** —— 宿主 tmdbapi.py 那条
-            # "The resource you requested could not be found." 不含任何 ID，
-            # 无法判断是哪个条目/哪个 ID 在 404（也分不清是不是本插件发的）。
-            # 这行紧跟在它旁边，直接把 id + 类型 + 结论写清楚，便于定位与排查。
-            _ttl_h = float(getattr(self, "_TMDB_DEAD_TTL", 21600.0) or 21600.0) / 3600.0
-            logger.info(f"[TMDB] 演职员表为空：id={_iid}（{'tv' if _is_tv else 'movie'}）"
-                        f"{('｜' + hint) if hint else ''}"
-                        f"—— 该 ID 无效（TMDB 返回 404）或该条目确实没有演职员；"
-                        f"已负缓存 {_ttl_h:.0f} 小时，期间不再重打")
+            logger.debug(f"[TMDB] 演职员表为空：id={_iid}（{'tv' if _is_tv else 'movie'}）"
+                         f"{('｜' + hint) if hint else ''}"
+                         f" —— 该 ID 无效（TMDB 返回 404）或该条目确实没有演职员")
         return _map
 
     def _pool_fetch_worker(self, data: Optional[dict] = None):
@@ -4856,6 +4951,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         self._scan_status["total"] = 0
         self._scan_status["done"] = 0
         self._tmdb_credits_cache = {}
+        # v4.6.111（LIB-020）：本轮扫描的「TMDB 查不到」明细队列清零（结束时会汇总成一行）
+        self._tmdb_empty_log = []
         _sig: str = ""
         _done: Dict[str, str] = {}
         _sigs_new: Dict[str, str] = {}
@@ -5333,6 +5430,11 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                         self._save_file_sigs()   # 独立文件，不塞进 state.json（断点会高频重写它）
                     except Exception:
                         pass
+                # v4.6.111（LIB-020）：收尾 —— 负缓存落库（跨重启有效）+ 「查不到」汇总一行
+                try:
+                    self._tmdb_scan_flush()
+                except Exception:
+                    pass
                 self._save_state()
             except Exception:
                 pass
@@ -8646,6 +8748,15 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             self._tmdb_poster_cache = {}
             self._tmdb_credits_cache = {}
             self._tmdb_person_cache = {}
+            # v4.6.111（LIB-020）：**持久化的负缓存副本也一并清掉**（否则清完缓存，
+            # 重启后又从库里读回那批坏 id，用户点「清空缓存」将失去意义）。
+            self._tmdb_dead_store = {}
+            self._tmdb_dead_dirty = False
+            self._tmdb_empty_log = []
+            try:
+                set_meta(self._TMDB_DEAD_META_KEY, "{}")
+            except Exception:
+                pass
         except Exception:
             pass
         self._save_state()
