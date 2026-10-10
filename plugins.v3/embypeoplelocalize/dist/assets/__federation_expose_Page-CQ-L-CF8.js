@@ -2513,6 +2513,7 @@ const {computed: computed$3,inject: inject$3,nextTick,onActivated: onActivated$2
 
 const ITEM_PAGE_SIZE = 100;
 const EP_PAGE_SIZE = 50;
+const FAST_POLL_MS = 8000;
 
 const _sfc_main$3 = {
   __name: 'LibraryView',
@@ -2596,6 +2597,54 @@ function _normItems(resp) {
 }
 
 let _itemsInflight = false;
+// v4.6.104（LIB-006）：左栏每一行真正渲染出来的字段 —— 只比这些；签名一致就整段跳过赋值。
+const _ITEM_SIG_FIELDS = ['title', 'item_type', 'library_name', 'deleted_at', 'deleted_eps', 'person_count', 'episode_count'];
+function _itemSig(it) {
+  let s = '';
+  for (const f of _ITEM_SIG_FIELDS) s += String((it && it[f]) != null ? it[f] : '') + '\u0001';
+  return s
+}
+// 两轮数据完全等价？—— 等价则跳过赋值：不触发 computed、不让 v-list 整列重建（滚动跳动/闪烁的来源）
+function _itemsSame(a, b) {
+  if (a === b) return true
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    if (itemKey(a[i]) !== itemKey(b[i])) return false
+    if (_itemSig(a[i]) !== _itemSig(b[i])) return false
+  }
+  return true
+}
+// 原地合并（v4.6.104 · LIB-007 / LIB-010）：同 key 的条目**保留对象引用**只改字段、顺序不变；
+// 新 key 追加。未变化的行引用不变 → Vue 不重建 DOM，滚动位置与展开状态都稳住。
+// removeMissing 只在「本次请求已覆盖服务端全部条目」时为 true（见 loadItems）——
+// 若本次只取回一个不完整窗口（还在分页 / limit < total），绝不能把 cur 里 next 没出现的
+// 条目删掉：列表按 translated_at 倒序，翻译一发生顺序就变，上一窗口的条目会落到新窗口外，
+// 一删就是「分库整组消失、下次再补回来」的无限抖动（用户实测 v4.6.104 前一版）。
+function _mergeItems(cur, next, removeMissing = true) {
+  const byKey = new Map();
+  for (const it of next) { const k = itemKey(it); if (k) byKey.set(k, it); }
+  const out = [];
+  const used = new Set();
+  for (const it of cur) {
+    const k = itemKey(it);
+    const n = k ? byKey.get(k) : null;
+    if (!n) {
+      if (removeMissing) continue   // 已确认拉全 → 服务端真的没了，移除
+      out.push(it);                  // 窗口不完整 → 保留已加载的，一个都不丢
+      continue
+    }
+    used.add(k);
+    for (const f of Object.keys(n)) { if (it[f] !== n[f]) it[f] = n[f]; }
+    out.push(it);
+  }
+  for (const it of next) {
+    const k = itemKey(it);
+    if (!k || used.has(k)) continue
+    used.add(k);
+    out.push(it);
+  }
+  return out
+}
 async function loadItems(silent = false) {
   // v4.6.103（LIB-004）：单飞守卫 —— 与 loadTxPreview 的 _txPreviewInflight 同款。
   // 症状（用户实测 v4.6.102，库内 360 条目）：左侧条目早已渲染出来，进度条却一直转、停不下来。
@@ -2612,10 +2661,23 @@ async function loadItems(silent = false) {
   const seq = ++itemsSeq;
   if (!silent) loadingList.value = true;
   try {
-    const resp = await api.get(props.api, '/db/items', { limit: ITEM_PAGE_SIZE, offset: 0 });
+    // v4.6.104（LIB-006/007）：静默轮询不再把列表塌回第 1 页、也不再整段换新数组。
+    // 症状（用户实测 v4.6.103，库内 360 条目）：每次刷新页面都「拉一下、加载一下」。
+    // 成因：本函数固定 limit=100/offset=0 且无条件 items.value = list —— 用户滚动加载出来的
+    // 后续条目被整段丢弃、列表塌回 100 条（视觉跳变），底部哨兵又把它们补回来，
+    // 「刷新 → 塌陷 → 重新加载」每 8s 循环一次。现按当前窗口大小请求，并按 key 原地合并。
+    const limit = Math.max(ITEM_PAGE_SIZE, items.value.length);
+    const resp = await api.get(props.api, '/db/items', { limit, offset: 0 });
     if (seq !== itemsSeq) return
-    const { list, hasMore } = _normItems(resp);
-    items.value = list;
+    const { list, total, hasMore } = _normItems(resp);
+    // v4.6.104（LIB-010）：只有「本次请求覆盖了服务端全部条目」时，才允许移除服务端已消失的条目；
+    // 否则（还有下一页 / limit < total）只做「改字段 + 追加」，绝不删 —— 防止分库整组消失再补回。
+    const _complete = list.length >= total;
+    if (silent && _itemsSame(items.value, list)) {   // 无变化：不赋值、不触发渲染
+      itemHasMore.value = hasMore;
+      return
+    }
+    items.value = _mergeItems(items.value, list, _complete);
     itemHasMore.value = hasMore;
   } catch (e) { if (seq === itemsSeq && !silent) notify(e.message, 'error'); }
   finally {
@@ -3204,11 +3266,21 @@ const autoWriteback = ref$3(false);
 // v4.6.75（规范 §五-1/§五-5）：任务「运行中 → 结束」跳变检测 —— 结束瞬间立即刷新详情与统计，
 // 此前只靠 30s 定时器，会出现「翻译已完成但界面仍显示未翻译」。
 let _wasTaskRunning = false;
+// v4.6.104（LIB-009）：库数据版本号（后端 db_rev，只在 person 表写入时自增）。
+// 用户诉求：「有数据更新才刷新，没更新干嘛要刷新」——左侧列表不再按固定周期重拉，
+// 改由 8s 的状态轮询带回 items_rev，**只有版本号变了才 loadItems(true)**。
+let _lastItemsRev = null;
 async function loadStatus() {
   try {
     const st = await api.get(props.api, '/status');
     // v4.6.70：统一任务守卫同步（扫描 / 翻译 / 写回 / 人名池 / 探测库 + 常驻翻译 worker 许可）
     guard.loadStatus(st);
+    // v4.6.104（LIB-009）：变更检测 —— 没写库就一个字节都不重拉
+    const _rev = (st && st.items_rev != null) ? String(st.items_rev) : '';
+    if (_rev && _rev !== _lastItemsRev) {
+      if (_lastItemsRev !== null) loadItems(true);   // 首帧列表已由 startPoll 拉过，不重复
+      _lastItemsRev = _rev;
+    }
     autoWriteback.value = !!st?.auto_writeback;
     const _run = !!(st?.tasks?.translate || st?.tasks?.writeback
                     || (st?.tx && (st.tx.requested || st.tx.running))
@@ -3461,6 +3533,11 @@ const summaryTotal = computed$3(() => summaryGroups.value.reduce((n, g) => n + g
 
 let pollTimer = null;
 let detailTimer = null;
+// v4.6.104（LIB-008/009）：列表不再按固定周期重拉。
+// 用户反馈①：列表每 8s 全量刷一次观感很差（「页面拉一下」）；
+// 用户反馈②：「有数据更新才刷新，没数据更新干嘛要刷新」。
+// 现改为**事件驱动**：只有 ①items_rev 变化（真的写库了，见 loadStatus）②任务结束跳变
+// ③用户操作（增删改/翻译/导入）④切回前台 —— 才拉列表。状态与统计徽章仍保持 8s（要跟手）。
 function startPoll() {
   stopPoll();
   loadItems(true);
@@ -3469,19 +3546,34 @@ function startPoll() {
   // v4.6.60（P1-1）：明细弹窗打开时随轮询一起刷新 —— 此前只在打开时拉一次，
   // 后台翻译完成后弹窗仍显示旧的 3 条（要关掉重开才更新）
   pollTimer = setInterval(() => {
-    loadItems(true); loadStatus(); loadTxPreview(true);
+    if (document.hidden) return          // v4.6.104：页面在后台不轮询（省请求；切回来立即补一次）
+    loadStatus();                         // 列表刷新由 loadStatus 里的 items_rev 变更检测触发
+    loadTxPreview(true);
     if (pendingDlg.value) loadPendingDetail(true);
-  }, 8000);
+  }, FAST_POLL_MS);
   detailTimer = setInterval(refreshDetailSoft, 30000);
 }
 function stopPoll() {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   if (detailTimer) { clearInterval(detailTimer); detailTimer = null; }
 }
-onMounted$3(() => { startPoll(); _syncNarrow(); window.addEventListener('resize', _syncNarrow); });
+// v4.6.104：从后台切回前台立即补一次（否则最长要等 30s 才看到新数据）
+function _onDocVisible() {
+  if (document.hidden) return
+  loadItems(true); loadStatus(); loadTxPreview(true);
+}
+onMounted$3(() => {
+  startPoll(); _syncNarrow();
+  window.addEventListener('resize', _syncNarrow);
+  document.addEventListener('visibilitychange', _onDocVisible);
+});
 onActivated$2(startPoll);
 onDeactivated$1(stopPoll);
-onBeforeUnmount$1(() => { stopPoll(); teardownEpObserver(); teardownItemObserver(); window.removeEventListener('resize', _syncNarrow); });
+onBeforeUnmount$1(() => {
+  stopPoll(); teardownEpObserver(); teardownItemObserver();
+  window.removeEventListener('resize', _syncNarrow);
+  document.removeEventListener('visibilitychange', _onDocVisible);
+});
 
 return (_ctx, _cache) => {
   const _component_v_icon = _resolveComponent$3("v-icon");
@@ -5294,7 +5386,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const Library = /*#__PURE__*/_export_sfc(_sfc_main$3, [['__scopeId',"data-v-18923f32"]]);
+const Library = /*#__PURE__*/_export_sfc(_sfc_main$3, [['__scopeId',"data-v-2c479296"]]);
 
 const {toDisplayString:_toDisplayString$2,createElementVNode:_createElementVNode$2,createTextVNode:_createTextVNode$2,resolveComponent:_resolveComponent$2,withCtx:_withCtx$2,createVNode:_createVNode$2,openBlock:_openBlock$2,createElementBlock:_createElementBlock$2,createCommentVNode:_createCommentVNode$2,createBlock:_createBlock$2,Fragment:_Fragment$2,withKeys:_withKeys,withModifiers:_withModifiers,renderList:_renderList$2,normalizeClass:_normalizeClass$1,unref:_unref,createStaticVNode:_createStaticVNode} = await importShared('vue');
 

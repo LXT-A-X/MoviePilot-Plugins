@@ -431,6 +431,9 @@ def _x(sql: str, params: tuple = ()) -> int:
                 conn = _get_conn()
                 cur = conn.execute(sql, params)
                 conn.commit()
+                # v4.6.104（LIB-009）：只认影响库列表的写入（person 表）
+                if "person" in sql.lower():
+                    _bump_rev()
                 n = cur.rowcount if cur.rowcount is not None else 0
                 cur.close()
                 return n
@@ -445,6 +448,21 @@ def _x(sql: str, params: tuple = ()) -> int:
 
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+# ── v4.6.104（LIB-009）：库数据版本号 ──
+# 库页左侧列表按「有变化才重拉」驱动：前端 8s 轮询 /status，只有本版本号变了才去拉 /db/items。
+# 只在**真正影响列表的写入**（person 表）时自增 —— 翻译任务/批次等簿记写入不参与，避免刷屏。
+_REV = [0]
+
+
+def _bump_rev() -> None:
+    _REV[0] += 1
+
+
+def db_rev() -> int:
+    """进程内单调自增的库数据版本号（插件 reload 后归零，前端只做「不等即变化」比较）。"""
+    return int(_REV[0])
 
 
 
@@ -1161,6 +1179,9 @@ class PeopleDb:
                         "media_provider, media_id, series_media_id, file_fingerprint) "
                         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows_data)
                 conn.commit()
+                # v4.6.104（LIB-009）：批量写入 person（最常见的写路径）→ 版本号自增
+                if rows_data:
+                    _bump_rev()
             return len(rows_data)
         except Exception as e:
             try:

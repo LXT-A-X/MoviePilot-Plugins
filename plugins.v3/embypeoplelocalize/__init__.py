@@ -49,7 +49,7 @@ from .emby_client import EmbyClient, ITEM_FOUND, ITEM_NOT_FOUND, ITEM_UNAVAILABL
 from .llm_client import (LLMClient, LLMError, RateLimited, QuotaExceeded,
                          AuthenticationError, ContextLengthExceeded)
 from .db import (PeopleDb, NameMapDb, WritebackDb, TranslateJobDb, pool_target_name,
-                 _is_kana_text, split_media_id)
+                 _is_kana_text, split_media_id, db_rev)
 from . import constants
 from .task_manager import TaskStateMixin
 from .path_utils import PathUtilsMixin
@@ -100,7 +100,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
     plugin_name = "Emby 演职人员中文化"
     plugin_desc = "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回；拉取人名时可用 TMDB 刮削补中文名/简介/头像"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/embypeoplelocalize.png"
-    plugin_version = "4.6.103"
+    plugin_version = "4.6.104"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "embypeoplelocalize_"
@@ -7519,6 +7519,9 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 "scan_mode": self._scan_mode,
                 "scan_status": scan_status,
                 "pool_total": pool_total,
+                # v4.6.104（LIB-009）：库数据版本号 —— 前端据此决定「有更新才重拉左侧列表」，
+                # 没写库就完全不拉（用户诉求：没数据更新干嘛要刷新）。
+                "items_rev": db_rev(),
                 "pool_hit_rate": pool_hit_rate,
                 "failed_translations": {
                     "terms": sorted(getattr(self, "_failed_terms", None) or ()),
