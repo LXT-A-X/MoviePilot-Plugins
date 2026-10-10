@@ -2496,27 +2496,37 @@ class PeopleDb:
             return []
 
     def probe_keys(self, *, plugin_id: str, db: Optional[Any] = None) -> dict:
-        """返回库内「已知条目」与「已收录集」：
-        {"items": {item_id, ...}, "episodes": {item_id: {(season, episode), ...}}}
-        探测时与 Emby 清单对差，缺的集/全新条目才会被补翻。"""
-        items: set = set()
+        """返回库内「已知条目」与「已收录集」，**按 server_id 分组**（v4.6.116 · P1-05）。
+
+        `{"items": {server_id: {item_id, ...}},
+          "episodes": {server_id: {item_id: {(season, episode), ...}}}}`
+
+        为什么必须分组：同一 Provider ID（TMDB/TVDB）只代表**作品身份相同**，
+        两台 Emby 的文件集合完全可能不同。此前只按 item_id 汇总 → A 缺 E09、B 有 E09 时
+        并集会把 E09 视为存在 → A 的缺集被掩盖；反向标记也可能套用错误的服务器。
+        legacy 空来源（`server_id=''`）作为**独立分组**返回，由调用方按
+        「是否单服务器」决定是否允许兜底，绝不静默并入某台服务器。
+        """
+        items: dict = {}
         eps: dict = {}
         try:
-            for r in _q("SELECT DISTINCT item_id, item_type FROM person "
+            for r in _q("SELECT DISTINCT COALESCE(server_id,'') sid, item_id, item_type FROM person "
                         "WHERE plugin_id=? AND item_type IN ('Series','Movie')", (plugin_id,)):
                 _i = str(r.get("item_id") or "").strip()
                 if _i:
-                    items.add(_i)
-            for r in _q("SELECT DISTINCT item_id, season_num, episode_num FROM person "
-                        "WHERE plugin_id=? AND season_num IS NOT NULL AND episode_num IS NOT NULL",
-                        (plugin_id,)):
+                    items.setdefault(str(r.get("sid") or ""), set()).add(_i)
+            for r in _q("SELECT DISTINCT COALESCE(server_id,'') sid, item_id, season_num, episode_num "
+                        "FROM person WHERE plugin_id=? AND season_num IS NOT NULL "
+                        "AND episode_num IS NOT NULL", (plugin_id,)):
                 _i = str(r.get("item_id") or "").strip()
                 if not _i:
                     continue
-                eps.setdefault(_i, set()).add((int(r.get("season_num") or 0),
-                                               int(r.get("episode_num") or 0)))
+                _s = str(r.get("sid") or "")
+                eps.setdefault(_s, {}).setdefault(_i, set()).add(
+                    (int(r.get("season_num") or 0), int(r.get("episode_num") or 0)))
             # 有集记录的剧也算已知条目（剧级记录缺失时，剧仍不应被当「全新」处理）
-            items.update(eps.keys())
+            for _s, _m in eps.items():
+                items.setdefault(_s, set()).update(_m.keys())
         except Exception as e:
             logger.warning(f"[DB] probe_keys 失败: {e}")
         return {"items": items, "episodes": eps}

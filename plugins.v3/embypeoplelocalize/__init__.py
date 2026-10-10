@@ -122,7 +122,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
     plugin_name = "Emby 演职人员中文化"
     plugin_desc = "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回；拉取人名时可用 TMDB 刮削补中文名/简介/头像"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/embypeoplelocalize.png"
-    plugin_version = "4.6.115"
+    plugin_version = "4.6.116"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "embypeoplelocalize_"
@@ -249,6 +249,9 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
     TX_SNAPSHOT_VERSION: int = 2
     # v4.6.113（P2）：重启恢复队列 —— 多个未完成强制重翻任务**逐个**恢复（各保留自己的 job/范围/条目）
     _tx_recover_queue: object = None
+    # v4.6.116（P1-08）：等待队列 —— 任务运行中到达的新请求**独立入队**（各自 source/scope/items/terms/
+    # cfg_snapshot/job_id），不再合并进正在跑的 Job 的全局字段；当前任务结束由 worker 逐个出队启动。
+    _tx_wait_jobs: object = None
     # v4.6.103（TMDB-1/2）：TMDB 无效 ID 负缓存 TTL（秒）。宿主 TmdbApi 对 404/异常一律
     # 吞掉返回空，插件无法区分「确实没有」与「请求失败」；负结果在 TTL 内跳过重试，避免
     # 每轮扫描/每次拉池都重打同一个坏 ID。TTL 过期自动重试 —— 网络抖动不会永久毒化。
@@ -929,12 +932,20 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             logger.warning(f"[Emby] 取多服务客户端失败: {e}")
         return out
 
-    def _pool_collect_persons(self, cli, scope: str) -> list:
+    def _pool_collect_persons(self, cli, scope: str) -> tuple:
         """收集一个 Emby 服务上的 Person 列表（按 Id 去重，文档 §2.3）。
         同时保留 Emby People 关系中的 Type，并合并多类型（文档 §八/§九/§十三）。
         scope=all → /Persons 分页取实体，再用已选媒体库 People 关系按 ID 补类型；
-        scope=libraries → 直接遍历已选媒体库条目的 People（含 Type）。"""
+        scope=libraries → 直接遍历已选媒体库条目的 People（含 Type）。
+
+        v4.6.116（P1-04）：返回 **`(persons, complete, errors)`** —— 任何一页
+        请求失败 / 响应非法 / 总数跨页变化 / 达到页数上限仍未读完 → `complete=False`。
+        **只有 `complete=True` 才允许调用方执行 `sweep_pool_lifecycle`**，
+        否则「没读到的人」会被当成「已消失」而涨 miss_count。
+        """
         out: Dict[str, dict] = {}
+        errors: List[str] = []
+        complete = True
 
         def _add(_id: str, _nm: str, _types):
             _rec = out.get(_id)
@@ -949,10 +960,14 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                     _ts.append(_t)
 
         def _iter_library_people():
-            """遍历已选媒体库条目的 People 关系，产出 (id, name, [types])。"""
+            """遍历已选媒体库条目的 People 关系，产出 (id, name, [types])。
+            v4.6.116：改用严格状态接口 —— 一页失败不再被当成「已到末尾」。"""
+            nonlocal complete
             _want = set(str(x) for x in (self._libraries or []) if str(x).strip())
             for lib in (self._get_emby_libraries() or []):
                 if self._pool_stop:
+                    complete = False
+                    errors.append("stopped")
                     break
                 if _want and lib.get("full_key") not in _want and lib.get("lib_id") not in _want:
                     continue
@@ -960,12 +975,32 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 if not _lib_id:
                     continue
                 _start = 0
+                _seen_total = None
+                _pages = 0
                 while not self._pool_stop:
-                    r = cli.query_items({"ParentId": _lib_id, "Recursive": "true",
-                                         "IncludeItemTypes": "Movie,Series",
-                                         "Fields": "People",
-                                         "StartIndex": _start, "Limit": self.POOL_PAGE})
-                    items = r.get("Items") or []
+                    _st, _d, _why = cli.query_items_status(
+                        {"ParentId": _lib_id, "Recursive": "true",
+                         "IncludeItemTypes": "Movie,Series", "Fields": "People",
+                         "StartIndex": _start, "Limit": self.POOL_PAGE})
+                    if _st != ITEM_FOUND:
+                        complete = False
+                        errors.append(f"lib_people:{_lib_id}:{_why}")
+                        self._push_log("WARNING", f"[Pool] 媒体库人员索引查询失败（{_why}）"
+                                                 f"→ 本轮标记为「部分拉取」，不执行生命周期刷新")
+                        break
+                    items = (_d or {}).get("Items") or []
+                    _total = int((_d or {}).get("TotalRecordCount") or 0)
+                    if _seen_total is None:
+                        _seen_total = _total
+                    elif _total != _seen_total:
+                        complete = False
+                        errors.append(f"lib_people_total_changed:{_lib_id}")
+                        break
+                    _pages += 1
+                    if _pages > 200:
+                        complete = False
+                        errors.append(f"lib_people_max_pages:{_lib_id}")
+                        break
                     for it in items:
                         for p in (it.get("People") or []):
                             _id = str(p.get("Id") or "").strip()
@@ -976,7 +1011,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                             yield _id, _nm, ([_ty] if _ty else [])
                     self._pool_status["collect_done"] = len(out)
                     _start += len(items)
-                    if not items or len(items) < self.POOL_PAGE:
+                    if not items or _start >= _seen_total or len(items) < self.POOL_PAGE:
                         break
 
         if scope == "all":
@@ -989,14 +1024,34 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 for _t in _ts:
                     if _t and _t not in _cur:
                         _cur.append(_t)
-            # 2) /Persons 分页取全部 Person 实体，按 ID 合并类型
+            # 2) /Persons 分页取全部 Person 实体，按 ID 合并类型（严格状态 + 总数一致）
             _start = 0
+            _total = None
+            _pages = 0
             while not self._pool_stop:
-                r = cli.list_all_persons(limit=self.POOL_PAGE, start_index=_start) or {}
-                items = r.get("Items") or []
-                _total = int(r.get("TotalRecordCount") or 0)
-                if _total:
-                    self._pool_status["collect_total"] = _total
+                if _pages > 500:
+                    complete = False
+                    errors.append("persons_max_pages")
+                    break
+                _pages += 1
+                _st, _d, _why = cli.list_all_persons_status(limit=self.POOL_PAGE,
+                                                           start_index=_start)
+                if _st != ITEM_FOUND:
+                    complete = False
+                    errors.append(f"persons:{_why}")
+                    self._push_log("WARNING", f"[Pool] 人物清单查询失败（{_why}）"
+                                             f"→ 本轮标记为「部分拉取」，不执行生命周期刷新")
+                    break
+                items = (_d or {}).get("Items") or []
+                _t = int((_d or {}).get("TotalRecordCount") or 0)
+                if _total is None:
+                    _total = _t
+                    if _t:
+                        self._pool_status["collect_total"] = _t
+                elif _t != _total:
+                    complete = False
+                    errors.append("persons_total_changed")
+                    break
                 for it in items:
                     _id = str(it.get("Id") or "").strip()
                     _nm = str(it.get("Name") or "").strip()
@@ -1004,16 +1059,21 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                         _add(_id, _nm, _type_idx.get(_id, []))
                 self._pool_status["collect_done"] = len(out)
                 _start += len(items)
-                if not items or len(items) < self.POOL_PAGE or (_total and _start >= _total):
+                if not items or _start >= (_total or 0) or len(items) < self.POOL_PAGE:
                     break
-            return list(out.values())
+            if self._pool_stop:
+                complete = False
+                errors.append("stopped")
+            return list(out.values()), complete, errors
         # scope=libraries：遍历已选库的条目（电影/剧）取 People（含 Type）
         for _id, _nm, _ts in _iter_library_people():
             if self._pool_stop:
+                complete = False
+                errors.append("stopped")
                 break
             if _id and _nm:
                 _add(_id, _nm, _ts)
-        return list(out.values())
+        return list(out.values()), complete, errors
 
     def _tmdb_download_image(self, profile_path: str) -> Optional[bytes]:
         """下载 TMDB 人物头像原图（/t/p/original）—— 对齐 personmeta set_item_image 的下载分支。
@@ -1394,9 +1454,16 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 self._pool_status["current_server"] = _sname
                 self._pool_status["current"] = f"读取 {_sname} 的人员清单…"
                 self._push_log("INFO", f"[Pool] Emby {_sname}：开始拉取人员清单（scope={_scope}）")
-                _persons = self._pool_collect_persons(cli, _scope)
+                _persons, _pcomplete, _perrs = self._pool_collect_persons(cli, _scope)
+                if not _pcomplete:
+                    self._push_log("WARNING", f"[Pool] {_sname} 人员清单**部分拉取**"
+                                             f"（{'、'.join(str(x) for x in (_perrs or [])[:3])}）"
+                                             f"→ 本轮跳过生命周期刷新（不把「没读到」当「已消失」）")
                 if not _persons:
-                    self._push_log("WARNING", f"[Pool] {_sname} 未读到任何 Person（接口不可用或该库无条目）")
+                    # 一份 Person 都没读到 → 绝不进入入池/生命周期流程（空 seen_ids 会把全员判消失）
+                    self._push_log("WARNING", f"[Pool] {_sname} 未读到任何 Person"
+                                             f"（{'接口不可用/部分失败' if not _pcomplete else '该服务器确实没有 Person'}）"
+                                             f"→ 跳过本台（不更新任何人的生命周期状态）")
                     continue
                 _srv_total = len(_persons)
                 _srv_done_base = int(self._pool_status.get("done") or 0)
@@ -1481,14 +1548,21 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 self._pool_status["server_done"] = _srv_total
                 self._pool_status["done"] = _srv_done_base + _srv_total
                 if str(_scope or "").strip().lower() == "all":
-                    try:
-                        _seen = {str(p.get("id") or "").strip() for p in _persons if str(p.get("id") or "").strip()}
-                        _lc = _dbm.sweep_pool_lifecycle(plugin_id=_pid, server_id=_skey, seen_ids=_seen) or {}
-                        if _lc:
-                            self._push_log("INFO", f"[Pool] {_sname} 生命周期刷新：在线 {_lc.get('active', 0)} / "
-                                                  f"暂缺 {_lc.get('stale', 0)} / 已消失 {_lc.get('missing', 0)}")
-                    except Exception as _e:
-                        logger.debug(f"[Pool] 生命周期刷新失败: {_e}")
+                    # v4.6.116（P1-04）：**只有完整拉取**才允许生命周期刷新 ——
+                    # 部分清单里「没读到的人」会被当成「已消失」而涨 miss_count。
+                    if not _pcomplete:
+                        self._push_log("WARNING", f"[Pool] {_sname} 人员清单不完整 → 已**跳过生命周期刷新**"
+                                                 f"（保留现有 active/stale/missing，不增加 miss_count）")
+                        logger.warning(f"[Pool] {_sname} sweep 跳过（清单不完整: {_perrs[:3]}）")
+                    else:
+                        try:
+                            _seen = {str(p.get("id") or "").strip() for p in _persons if str(p.get("id") or "").strip()}
+                            _lc = _dbm.sweep_pool_lifecycle(plugin_id=_pid, server_id=_skey, seen_ids=_seen) or {}
+                            if _lc:
+                                self._push_log("INFO", f"[Pool] {_sname} 生命周期刷新：在线 {_lc.get('active', 0)} / "
+                                                      f"暂缺 {_lc.get('stale', 0)} / 已消失 {_lc.get('missing', 0)}")
+                        except Exception as _e:
+                            logger.debug(f"[Pool] 生命周期刷新失败: {_e}")
                 else:
                     self._push_log("INFO", f"[Pool] {_sname} 为「仅已选媒体库」拉取，跳过全服务器生命周期判定"
                                            f"（未覆盖的 Person 不算消失）")
@@ -2527,6 +2601,9 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                         self._tx_recover_pump()
                         if bool(getattr(self, "_tx_requested", False)):
                             continue
+                    # v4.6.116（P1-08）：再出队启动一个「运行中到达并独立排队」的请求
+                    if self._tx_pump_wait_jobs():
+                        continue
                     _ev.wait(2.0); _ev.clear(); continue
                 if not bool(getattr(self, "_tx_permit_logged", False)):
                     self._tx_permit_logged = True
@@ -2826,6 +2903,11 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                     _wait = 1.0 if _idle < 3 else (2.0 if _idle < 10 else 5.0)
                     if self._translate_status.get("running"):
                         self._translate_status["running"] = False
+                    try:
+                        # v4.6.116（P1-08）：任务结束 → 暴露等待队列长度（可能马上被出队启动）
+                        self._translate_status["queued"] = len(getattr(self, "_tx_wait_jobs", None) or [])
+                    except Exception:
+                        pass
                     _ev.wait(_wait); _ev.clear(); continue
                 _idle = 0
                 # v4.6.61（P1-6）：有实际轮次产出 → Job 从 rate_limited/quota_paused 恢复为 running
@@ -2866,6 +2948,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                     "running": True, "phase": "translate",
                     "job": str(getattr(self, "_tx_job_id", "") or ""),
                     "status": str(getattr(self, "_tx_job_status", "") or ""),
+                    # v4.6.116（P1-08）：区分「当前任务」与「等待队列中的任务」
+                    "queued": len(getattr(self, "_tx_wait_jobs", None) or []),
                     "total": _jt if _jt > 0 else (int(_st.get("done") or 0) + int(_st.get("left") or 0)),
                     "done": min(_jd, _jt) if _jt > 0 else _jd,
                     "failed": int(getattr(self, "_tx_job_failed", 0) or 0), "current": str(_st.get("current") or ""),
@@ -2888,6 +2972,22 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 except Exception:
                     pass
 
+    def _tx_force_enqueue(self, item_id: str, job: dict, job_id: str = "") -> None:
+        """强制重翻入队（v4.6.116 · P2-10）—— 键为 **`(job_id, item_id)`**。
+
+        此前键只用 `item_id` 且 `setdefault` → 两个未完成强制任务包含同一 item_id 时，
+        后来的 payload 被丢弃，恢复后可能用错范围/内容。复合键让每个任务各自成项。
+        """
+        _iid = str(item_id or "").strip()
+        if not _iid or not isinstance(job, dict):
+            return
+        _jobs = getattr(self, "_tx_force_jobs", None)
+        if _jobs is None:
+            _jobs = {}
+            self._tx_force_jobs = _jobs
+        _jid = str(job_id or getattr(self, "_tx_job_id", "") or "")
+        _jobs.setdefault((_jid, _iid), job)
+
     def _tx_force_round(self, pid: str, skip: Dict[str, int]) -> Optional[dict]:
         """强制重翻任务轮 —— 「重新翻译」按钮只做「入队」，
         真正重翻由本方法在常驻翻译 worker 内执行（统一限流/熔断/错误链路，无第二套翻译系统）：
@@ -2909,10 +3009,19 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                             "zhconv": 0, "llm_zhc": 0, "failed": 0},
                  "role": {"done": 0, "llm": 0, "pool": 0, "role_mem": 0, "tmdb": 0,
                           "zhconv": 0, "llm_zhc": 0, "failed": 0}}
-        for _item in list(_jobs.keys()):
+        for _orig_key in list(_jobs.keys()):
             if self._tx_stop_requested():
                 break
-            _job = _jobs.get(_item) or {}
+            # v4.6.116（P2-10）：键为 (job_id, item_id) —— 只处理**本任务**的条目，
+            # 不遍历其它强制任务的共享 key（避免用错 payload / 范围）。
+            if isinstance(_orig_key, tuple):
+                _ekey, _item = str(_orig_key[0] or ""), str(_orig_key[1] or "")
+            else:
+                _ekey, _item = "", str(_orig_key)      # 兼容旧内存结构
+            _cur_jid = str(getattr(self, "_tx_job_id", "") or "")
+            if _ekey and _cur_jid and _ekey != _cur_jid:
+                continue
+            _job = _jobs.get(_orig_key) or {}
             _cur = str(_job.get("title") or _item)
             try:
                 _scope_f = self._tx_scope()
@@ -2928,7 +3037,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                     and ((o["kind"] == "role" and self._tx_role_type_enabled(o.get("person_type"), _scope_f))
                          or (o["kind"] != "role" and self._tx_type_enabled(o.get("person_type"), _scope_f)))]
                 if not _occs:
-                    _jobs.pop(_item, None)
+                    _jobs.pop(_orig_key, None)
                     continue
                 _fresh: List[dict] = []
                 _ok_all = True
@@ -3014,18 +3123,18 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                     except Exception:
                         pass
                 if _ok_all:
-                    _jobs.pop(_item, None)
+                    _jobs.pop(_orig_key, None)
                     # 重翻完成 → 登记写回候选（由 Writeback Worker 按门控统一落盘，save 成功才标 done）
                     try:
                         self._wb_register_item(_item, str(_job.get("server_id") or ""), _scope_f)
                     except Exception:
                         pass
                 elif _fresh:
-                    _jobs.pop(_item, None)   # 有产出但部分失败：本轮已尽力，失败词条留给失败清单重试
+                    _jobs.pop(_orig_key, None)   # 有产出但部分失败：本轮已尽力，失败词条留给失败清单重试
             except Exception as _e:
                 logger.warning(f"[Translate] 强制重翻任务异常 {_item}: {_e}")
                 failed += 1
-                _jobs.pop(_item, None)
+                _jobs.pop(_orig_key, None)
         if not (done or llm_n or hits_n or failed):
             return None
         return {"done": done, "llm": llm_n, "hits": hits_n, "failed": failed, "current": _cur,
@@ -3694,6 +3803,118 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         except Exception as _e:
             logger.debug(f"[TranslateJob] 重启恢复泵失败（非致命）: {_e}")
 
+    def _tx_build_cfg_snapshot(self) -> Optional[dict]:
+        """构建当前实时配置的 Job 快照（v4.6.116 · P1-08 抽出）—— 任务开始时**冻结**一次，
+        运行中改设置不影响本任务；入队请求也在入队时冻结一份。失败返回 None（调用方回退实时值）。"""
+        try:
+            # v4.6.99（报告 P1-03 A）：快照覆盖本任务**真正依赖**的设置，而不只是类型开关；
+            # 并带上 version，供旧任务恢复时按明确规则迁移（缺字段不静默套用新配置）。
+            # 注意：这里**直接读实时配置**（不经 _tx_limits_by_level / _tx_exclude_episodes），
+            # 避免赋值前拿到「上一个任务的旧快照」造成跨任务串味。
+            _ctt = self._collect_trans_types() or {}
+            _tt = dict(_ctt.get("translate", {}) or {})
+            _one = dict(_ctt.get("limits", {}) or {})
+            return {
+                "version": int(getattr(self, "TX_SNAPSHOT_VERSION", 2) or 2),
+                "person": bool(_tt.get("person", True)),
+                "role": bool(_tt.get("role", True)),
+                "types": _tt,
+                "exclude_episodes": (not bool(getattr(self, "_nfo_include_episodes", False))),
+                "scope": str(getattr(self, "_tx_target_scope", "both") or "both"),
+                # 人数上限（每文件每类型前 N）—— 运行中改设置不得影响本任务
+                "limits": {"movie": dict(_one), "tvshow": dict(_one), "episode": dict(_one)},
+                "tmdb_credits": bool(getattr(self, "_pool_tmdb_credits", False)),
+                "tmdb_fill": bool(getattr(self, "_pool_tmdb_fill", True)),
+                "auto_writeback": bool(getattr(self, "_auto_writeback", True)),
+                "nfo_preview": bool(getattr(self, "_nfo_preview", False)),
+                "batching": str(getattr(self, "_translate_batching", "per_title") or "per_title"),
+                "batch_size": int(getattr(self, "_tx_batch", 0) or 0),
+                "libraries": [str(x) for x in (getattr(self, "_libraries", None) or [])],
+                "servers": sorted(self._configured_server_keys()),
+                "llm_model": str(getattr(self, "_llm_model", "") or ""),
+            }
+        except Exception:
+            return None
+
+    def _tx_enqueue_request(self, *, source: str = "both", scope: str = "",
+                            items: Optional[list] = None, terms: Optional[list] = None,
+                            payload: str = "") -> None:
+        """把「任务运行中到达的新请求」独立入队（v4.6.116 · P1-08）—— 绝不改写当前 Job 的
+        source/scope/items/terms/snapshot（Job 开始后不可变）。每个排队请求都有自己的
+        job_id / 冻结快照 / 持久化记录（status=queued），当前任务结束后由 worker 出队启动。
+
+        仅「开始执行前」允许合并：与队列中已有请求 source/scope/items/terms 完全一致时去重。"""
+        _src = str(source or "both").strip().lower()
+        if _src not in ("pool", "library", "both"):
+            _src = "both"
+        _scope = str(scope or "").strip().lower()
+        _items = sorted({str(x).strip() for x in (items or []) if str(x or "").strip()})
+        _terms = sorted({str(x).strip() for x in (terms or []) if str(x or "").strip()})
+        _q = getattr(self, "_tx_wait_jobs", None)
+        if _q is None:
+            _q = []
+            self._tx_wait_jobs = _q
+        for _e in _q:
+            if (str(_e.get("source") or "") == _src and str(_e.get("scope") or "") == _scope
+                    and list(_e.get("items") or []) == _items
+                    and list(_e.get("terms") or []) == _terms):
+                logger.debug(f"[TranslateJob] 等待队列已有等价请求（source={_src} "
+                             f"scope={_scope or '当前'}）→ 去重，不重复入队")
+                return
+        _snap = self._tx_build_cfg_snapshot()
+        try:
+            _ms = int((time.time() % 1) * 1000)
+            _jid = time.strftime("%Y%m%d%H%M%S") + f"-{_ms:03d}"
+        except Exception:
+            _jid = str(int(time.time() * 1000))
+        _jt = "force" if (_items or _terms) else "auto"
+        try:
+            # create 即以 status='queued' 落盘（TranslateJobDb.create），供 UI/重启查看排队任务
+            self._tx_job_db().create(
+                plugin_id=self.__class__.__name__, job_id=_jid, job_type=_jt,
+                source=_src, scope=(_scope or str(getattr(self, "_tx_target_scope", "both") or "both")),
+                batch_mode=str(getattr(self, "_translate_batching", "") or ""),
+                batch_size=int(getattr(self, "_tx_batch", 0) or 0),
+                item_count=len(_items), term_count=len(_terms), payload=str(payload or ""),
+                cfg_snapshot=(json.dumps(_snap, ensure_ascii=False) if isinstance(_snap, dict) else ""))
+        except Exception:
+            pass
+        _q.append({"job_id": _jid, "source": _src, "scope": _scope, "items": _items,
+                   "terms": _terms, "payload": str(payload or ""), "cfg_snapshot": _snap})
+        logger.info(f"[TranslateJob] 当前任务运行中 → 新请求独立入队 job={_jid} "
+                    f"source={_src} scope={_scope or '当前'} items={len(_items)} terms={len(_terms)}"
+                    f"（排队 {len(_q)} 个）")
+        try:
+            self._push_log("INFO", f"翻译任务运行中：新请求已独立排队（job={_jid}，来源 {_src}），"
+                                   f"待当前任务结束后自动开始")
+        except Exception:
+            pass
+
+    def _tx_pump_wait_jobs(self) -> bool:
+        """出队启动一个等待中的翻译请求（v4.6.116 · P1-08）—— 仅在当前无运行任务时调用。
+        每个排队请求携带自己的 job_id / 冻结快照，启动时不与其它任务合并。"""
+        _q = getattr(self, "_tx_wait_jobs", None)
+        if not _q:
+            return False
+        if bool(getattr(self, "_tx_requested", False)):
+            return False
+        _e = _q.pop(0)
+        self._tx_wait_jobs = _q
+        _snap = _e.get("cfg_snapshot")
+        if isinstance(_snap, dict):
+            self._tx_cfg_snapshot = _snap
+        self._tx_request_consume(source=str(_e.get("source") or "both"),
+                                 scope=str(_e.get("scope") or ""),
+                                 items=list(_e.get("items") or []),
+                                 terms=list(_e.get("terms") or []),
+                                 payload=str(_e.get("payload") or ""),
+                                 resume_job_id=str(_e.get("job_id") or ""),
+                                 from_queue=True)
+        logger.info(f"[TranslateJob] 等待队列出队启动 job={_e.get('job_id')} "
+                    f"source={_e.get('source')} scope={_e.get('scope') or '当前'} "
+                    f"items={len(_e.get('items') or [])}（剩余排队 {len(_q)}）")
+        return bool(getattr(self, "_tx_requested", False))
+
     def _tx_job_recover(self) -> None:
         """进程重启恢复（v4.6.61 · P1-6）—— 未完成的 Job 标记 interrupted；
         「重新翻译」（force）的 payload 重新入队并唤醒 worker（不再静默丢任务）。
@@ -3707,10 +3928,6 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             _stale = self._tx_job_db().mark_stale(plugin_id=_pid) or []
             if not _stale:
                 return
-            _jobs = getattr(self, "_tx_force_jobs", None)
-            if _jobs is None:
-                _jobs = {}
-                self._tx_force_jobs = _jobs
             _queue = list(getattr(self, "_tx_recover_queue", None) or [])
             _n_force = 0
             for _row in _stale:
@@ -3726,7 +3943,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 for _iid, _job in _payload.items():
                     _iid = str(_iid or "").strip()
                     if _iid and isinstance(_job, dict):
-                        _jobs.setdefault(_iid, _job)
+                        # v4.6.116（P2-10）：复合键 (job_id, item_id) 入队，各任务互不覆盖
+                        self._tx_force_enqueue(_iid, _job, job_id=str(_row.get("id") or ""))
                         _items.append(_iid)
                 if not _items:
                     continue
@@ -3751,7 +3969,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
 
     def _tx_request_consume(self, *, source: str = "both", scope: str = "",
                             items: Optional[list] = None, terms: Optional[list] = None,
-                            payload: str = "", resume_job_id: str = "") -> None:
+                            payload: str = "", resume_job_id: str = "",
+                            from_queue: bool = False) -> None:
         """授予翻译消费许可 —— 显式声明本次作业来源与目标范围（任务字段）。
 
         source: library=库内词条；pool=人名池；both=都消费。
@@ -3759,8 +3978,17 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         items:  条目级限定（如「重新翻译」某条）—— 非空时翻译 worker 只重翻这些条目，
                 不再扫全库（避免「点单条重翻 → 整库重翻」）。
         terms:  词条级限定（如「重试失败」）—— 非空时只翻这些词条。
-        并发合并：已有不同来源的作业在跑 → 并入为 both（互不覆盖、不串任务）；许可归还时由 worker 复位。
+        v4.6.116（P1-08）：任务**运行中**到达的新请求不再合并进当前 Job 的全局字段，
+        而是独立入队（`_tx_wait_jobs`），当前任务结束后由 worker 逐个出队启动；只有
+        `from_queue`（出队启动）或 `resume_job_id`（恢复既有 Job）才真正落盘启动。
         """
+        # v4.6.116（P1-08 · 任务隔离）：当前有任务在跑，且既非"出队启动"也非"恢复既有 Job" →
+        # 新请求独立入队，绝不改写运行中 Job 的 source/scope/items/terms/snapshot。
+        if (bool(getattr(self, "_tx_requested", False)) and not from_queue
+                and not str(resume_job_id or "").strip()):
+            self._tx_enqueue_request(source=source, scope=scope, items=items,
+                                     terms=terms, payload=payload)
+            return
         _src = str(source or "both").strip().lower()
         if _src not in ("pool", "library", "both"):
             _src = "both"
@@ -3791,35 +4019,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             logger.debug("[Translate] 并发/恢复请求：沿用当前任务配置快照"
                          "（不覆盖运行中任务的冻结配置，新设置下一个任务生效）")
         else:
-            try:
-                # v4.6.99（报告 P1-03 A）：快照覆盖本任务**真正依赖**的设置，而不只是类型开关；
-                # 并带上 version，供旧任务恢复时按明确规则迁移（缺字段不静默套用新配置）。
-                # 注意：这里**直接读实时配置**（不经 _tx_limits_by_level / _tx_exclude_episodes），
-                # 避免赋值前拿到「上一个任务的旧快照」造成跨任务串味。
-                _ctt = self._collect_trans_types() or {}
-                _tt = dict(_ctt.get("translate", {}) or {})
-                _one = dict(_ctt.get("limits", {}) or {})
-                self._tx_cfg_snapshot = {
-                    "version": int(getattr(self, "TX_SNAPSHOT_VERSION", 2) or 2),
-                    "person": bool(_tt.get("person", True)),
-                    "role": bool(_tt.get("role", True)),
-                    "types": _tt,
-                    "exclude_episodes": (not bool(getattr(self, "_nfo_include_episodes", False))),
-                    "scope": str(getattr(self, "_tx_target_scope", "both") or "both"),
-                    # 人数上限（每文件每类型前 N）—— 运行中改设置不得影响本任务
-                    "limits": {"movie": dict(_one), "tvshow": dict(_one), "episode": dict(_one)},
-                    "tmdb_credits": bool(getattr(self, "_pool_tmdb_credits", False)),
-                    "tmdb_fill": bool(getattr(self, "_pool_tmdb_fill", True)),
-                    "auto_writeback": bool(getattr(self, "_auto_writeback", True)),
-                    "nfo_preview": bool(getattr(self, "_nfo_preview", False)),
-                    "batching": str(getattr(self, "_translate_batching", "per_title") or "per_title"),
-                    "batch_size": int(getattr(self, "_tx_batch", 0) or 0),
-                    "libraries": [str(x) for x in (getattr(self, "_libraries", None) or [])],
-                    "servers": sorted(self._configured_server_keys()),
-                    "llm_model": str(getattr(self, "_llm_model", "") or ""),
-                }
-            except Exception:
-                self._tx_cfg_snapshot = None
+            self._tx_cfg_snapshot = self._tx_build_cfg_snapshot()
         # v4.6.61（P0-4 → P1-6 · Job 持久化）：每轮任务一个 job_id；
         # 常规许可 = auto、带 items/terms = force（重新翻译）—— 均落 SQLite（translate_jobs），
         # force 的 payload 供重启恢复；resume_job_id 非空 = 恢复既有 Job（不新建行）。
@@ -6080,7 +6280,15 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         # 带真实 server_id；两者按 server_id 隔离 → 「先 Webhook 入库、后扫描」同一文件会出现
         # 两份记录（实测 6 行 / 库页 2 个条目）。这里在 server_id 为空时复用该文件已登记的
         # **唯一**真实来源 → upsert 命中同一组（覆盖而非新增），已有重复也会被顺带收编。
+        # v4.6.116（P1-07）：调用方仍未给来源时，**先从扫描根反推**（哪个已选库的路径包含该文件）
+        # —— 首次扫描也能拿到明确归属，不再静默落 `server_id=""`；只有同一物理目录
+        # 被多台服务器共享（无法唯一确定）时才留空，交给 legacy 隔离与人工确认。
         _sid_final = str(server_id or "")
+        if not _sid_final:
+            try:
+                _sid_final = self._scan_root_server(doc.path) or ""
+            except Exception:
+                _sid_final = ""
         if not _sid_final:
             try:
                 _sid_final = dbm.server_id_by_nfo_path(plugin_id=_pid, nfo_path=doc.path) or ""
@@ -7185,6 +7393,55 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             pass
         return item or {}
 
+    def _resolve_lib_ctx_for_emby_path(self, server_id: str, raw_emby_path: str) -> tuple:
+        """该服务器内，某条 **Emby 原始路径** 属于哪个库的哪条 Locations
+        （v4.6.116 · P1-06）→ `(lib_id, idx)`；无法唯一确定 → `(None, None)`。
+
+        为什么需要：路径级映射（server_id + lib_id + idx）在归一化时必须知道
+        「这条 Webhook 路径是哪个库的第几条路径」才能命中。此前 Webhook 归一化只传
+        server_id → 路径级覆盖永远不生效，配了路径级映射的用户 Webhook 会整批失效。
+
+        消歧规则（**按原始 Emby 路径**做最长前缀匹配）：
+          · 唯一命中（长度最大且只有一条）→ 返回它；
+          · 多条同长命中（前缀重叠）→ 返回 (None, None) 并记录歧义，不任取第一条；
+          · 都不命中 → (None, None)（退回服务器级映射）。
+        """
+        _sid = str(server_id or "").strip()
+        _p = str(raw_emby_path or "").replace("\\", "/").strip("/")
+        if not _sid or not _p:
+            return None, None
+        try:
+            best = None          # (前缀长度, lib_id, idx)
+            dup = False
+            for lib in self._get_emby_libraries():
+                if str(lib.get("skey") or "") != _sid:
+                    continue
+                _lid = str(lib.get("lib_id") or "")
+                _ps = lib.get("paths")
+                _cands = (_ps if isinstance(_ps, list) and _ps
+                          else [{"idx": 0, "emby_path": str(lib.get("emby_path") or "")}])
+                for p in _cands:
+                    q = str(p.get("emby_path") or "").replace("\\", "/").strip("/")
+                    if not q:
+                        continue
+                    if _p == q or _p.startswith(q + "/"):
+                        _ln = len(q)
+                        if best is None or _ln > best[0]:
+                            best = (_ln, _lid, p.get("idx", 0))
+                            dup = False
+                        elif _ln == best[0] and (_lid, p.get("idx", 0)) != (best[1], best[2]):
+                            dup = True
+            if dup:
+                self._warn_once(f"path:ctx-ambiguous:{_sid}:{_p}",
+                                f"[Webhook] 路径 {_p} 在该服务器内命中多条同长 Locations 前缀 → "
+                                f"无法唯一确定库/路径级映射，本次只按服务器级映射处理（请检查库路径是否重叠）")
+                return None, None
+            if best:
+                return best[1], best[2]
+        except Exception as e:
+            logger.debug(f"[Webhook] 反推库路径上下文失败（非致命）{_sid}:{_p}: {e}")
+        return None, None
+
     def _normalize_webhook_path(self, server_id: str, path: str) -> str:
         """Webhook 条目路径归一化 —— 复用统一 resolver，不得另起替换逻辑。
         server_id 已知 → 只应用该服务器自己的 mapping（绝不套用其它服务器的规则）；
@@ -7198,7 +7455,11 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         _sid = str(server_id or "").strip()
         if _sid:
             _sid = self._canonical_server_id(_sid)
-            return self._resolve_library_path(_sid, p)
+            # v4.6.116（P1-06）：先按**原始 Emby 路径**反推 (lib_id, idx)，
+            # 让「路径级 Locations 映射」也能在 Webhook 链路上生效
+            # （无法唯一确定时返回 (None, None)，自动退回服务器级映射）。
+            _lid, _idx = self._resolve_lib_ctx_for_emby_path(_sid, p)
+            return self._resolve_library_path(_sid, p, _lid, _idx)
         for m in (getattr(self, "_nfo_path_mappings", None) or []):
             if not isinstance(m, dict):
                 continue
@@ -7315,45 +7576,65 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             pass
         return result
 
-    def _selected_library_paths(self) -> List[str]:
-        """已选中库的自动根目录（库的**全部**路径，经前缀替换）。
+    def _selected_library_roots(self) -> List[dict]:
+        """已选中库的扫描根（**结构化**，v4.6.116 · P1-07）——
+        `[{"server_id","lib_id","idx","emby_path","path"}]`。
 
-        v4.6.115：一个库可挂多条 Locations —— 界面显示几条、这里就返回几条（一一对应，
-        「显示多少 = 扫多少」）。并做两层收敛：
-          · 同服务器内去重；
-          · **父子剪枝**：被另一条已选路径包含的子路径去掉（父目录递归已覆盖，不漏文件）。
-        **跨服务器不合并** —— 两台 Emby 可能挂同一本地目录，归属按 server_id 区分。
+        为什么需要结构化：此前 `_selected_library_paths()` 把 (server_id, path) 压平成
+        `List[str]`，server 维度丢失 → NFO 扫描入库时拿不到来源，首次扫描必然落
+        `server_id=""`（空来源记录，后续按服务器删除/恢复/同步/探测都对不上）。
+
+        规则：
+          · 勾选单位仍是「库」（`full_key` 或裸 `lib_id`）；
+          · 展开该库的**全部**路径（有几条就是几条）；
+          · **同服务器内**去重 + 父子剪枝（父目录递归已覆盖子路径，不漏文件）；
+          · **跨服务器不合并**（两台 Emby 可挂同一本地目录 → 各自成根，各写自己的来源）；
+          · 裸 `lib_id` 在多台服务器同 ID 时**歧义** → 跳过并告警（不跨服务器全选）。
         """
         libs = self._libraries or []
         if not libs:
             return []
         want = set(libs)
-        pairs: List[Tuple[str, str]] = []
+        seen_bare_ambiguous: set = set()
+        pairs: List[tuple] = []      # (server_id, lib_id, idx, emby_path, path)
         for lib in self._get_emby_libraries():
-            if not (lib["full_key"] in want or lib["lib_id"] in want):
-                continue
+            _fk = str(lib.get("full_key") or "")
+            _lid = str(lib.get("lib_id") or "")
             _sid = str(lib.get("skey") or "")
+            if _fk in want:
+                pass                    # 精确（含服务器）选择：直接用
+            elif _lid in want:
+                # 裸 lib_id：多服务器同 ID 时不猜
+                _same = [x for x in self._get_emby_libraries()
+                         if str(x.get("lib_id") or "") == _lid]
+                if len({str(x.get("skey") or "") for x in _same}) > 1:
+                    if _lid not in seen_bare_ambiguous:
+                        seen_bare_ambiguous.add(_lid)
+                        self._warn_once(f"lib:bare-ambiguous:{_lid}",
+                                        f"[Libraries] 配置里的库 ID「{_lid}」在多台 Emby 上都存在 → "
+                                        f"已跳过该条（请到设置页重新勾选，改用「服务器:库ID」精确选择；"
+                                        f"不再默认跨服务器全选）")
+                    continue
+            else:
+                continue
             _ps = lib.get("paths")
             if isinstance(_ps, list) and _ps:
                 for p in _ps:
                     _pp = str(p.get("path") or "").strip()
                     if _pp:
-                        pairs.append((_sid, _pp))
+                        pairs.append((_sid, _lid, p.get("idx", 0), str(p.get("emby_path") or ""), _pp))
             else:
                 _p0 = str(lib.get("path") or "").strip()
                 if _p0:
-                    pairs.append((_sid, _p0))
-        return self._prune_subpaths(pairs)
+                    pairs.append((_sid, _lid, 0, str(lib.get("emby_path") or ""), _p0))
+        return self._prune_roots(pairs)
 
     @staticmethod
-    def _prune_subpaths(pairs: List[Tuple[str, str]]) -> List[str]:
-        """同服务器内去重 + 剪掉被父路径包含的子路径（保留父，顺序穩定）。
-
-        `pairs` = [(server_id, local_path), ...]；跨服务器各自独立处理，不跨服务器去重。
-        """
-        by_srv: Dict[str, List[str]] = {}
+    def _prune_roots(pairs: List[tuple]) -> List[dict]:
+        """同服务器内去重 + 剪掉被父路径包含的子路径（保留父），**保留 server 归属**。"""
+        by_srv: Dict[str, List[tuple]] = {}
         seen = set()
-        for sid, p in (pairs or []):
+        for sid, lid, idx, emby_path, p in (pairs or []):
             n = str(p or "").replace("\\", "/").rstrip("/")
             if not n:
                 continue
@@ -7361,15 +7642,49 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             if _k in seen:
                 continue
             seen.add(_k)
-            by_srv.setdefault(str(sid or ""), []).append(n)
-        out: List[str] = []
+            by_srv.setdefault(str(sid or ""), []).append((str(sid or ""), str(lid or ""),
+                                                          idx, str(emby_path or ""), n))
+        out: List[dict] = []
         for _sid, lst in by_srv.items():
-            for i, a in enumerate(lst):
-                # 被另一条（更短/相等前缀）覆盖 → 剪掉；父目录递归已覆盖，不会漏文件
-                if any(j != i and a.startswith(b + "/") for j, b in enumerate(lst)):
-                    continue
-                out.append(a)
+            for i, item in enumerate(lst):
+                _a = item[4]
+                if any(j != i and _a.startswith(other[4] + "/") for j, other in enumerate(lst)):
+                    continue   # 被父路径覆盖 → 剪（父递归已扫到，不漏文件）
+                out.append({"server_id": item[0], "lib_id": item[1], "idx": item[2],
+                            "emby_path": item[3], "path": _a})
         return out
+
+    def _selected_library_paths(self) -> List[str]:
+        """已选中库的自动根目录（路径字符串列表 —— `_selected_library_roots()` 的投影）。"""
+        return [r["path"] for r in self._selected_library_roots() if r.get("path")]
+
+    def _scan_root_server(self, local_path: str) -> str:
+        """本地路径 → 来源服务器（v4.6.116 · P1-07）—— 按**命中根的最长前缀**判定。
+
+        扫描入库时用它给出明确来源，避免首次扫描落 `server_id=""`。
+        多条根同长命中（同一物理目录被多台服务器共享）→ 无法唯一确定，返回 ""
+        （宁可留空走 legacy 隔离，也不任意挑一台）。
+        """
+        try:
+            p = str(local_path or "").replace("\\", "/").strip("/")
+            if not p:
+                return ""
+            best_len, best_sid, _dup = -1, "", False
+            for r in self._selected_library_roots():
+                q = str(r.get("path") or "").replace("\\", "/").strip("/")
+                if not q:
+                    continue
+                if p == q or p.startswith(q + "/"):
+                    if len(q) > best_len:
+                        best_len, best_sid, _dup = len(q), str(r.get("server_id") or ""), False
+                    elif len(q) == best_len and str(r.get("server_id") or "") != best_sid:
+                        _dup = True
+            if _dup:
+                logger.debug(f"[Scan] 路径 {p} 同时命中多台服务器的同长根 → 来源留空（不猜）")
+                return ""
+            return best_sid
+        except Exception:
+            return ""
 
     def _all_nfo_roots(self) -> List[str]:
         """扫描根目录 = 已选中的媒体库路径（经前缀替换）。
@@ -10158,19 +10473,33 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 if _st != ITEM_FOUND:
                     return [], False, f"series_query_{_st}:{_reason}"
             emby_pairs = set()
+            _bad_eps: List[str] = []
             for _ep in (_items or []):
                 _s = _ep.get("ParentIndexNumber")
                 _e = _ep.get("IndexNumber")
+                # v4.6.116（P1-01）：**任一**应比对的 Episode 缺季/集号（或格式非法）
+                # 都使整份枚举不可信 —— 此前只是静默 continue，会把这条从
+                # `emby_pairs` 里漏掉 → 计算差集时被当成「已删除」而误标观察期。
                 if _s is None or _e is None:
+                    _bad_eps.append(f"id={_ep.get('Id') or '?'} name={_ep.get('Name') or '?'} "
+                                    f"series={_ep.get('SeriesId') or '?'} "
+                                    f"缺失={'ParentIndexNumber' if _s is None else ''}"
+                                    f"{'/' if _s is None and _e is None else ''}"
+                                    f"{'IndexNumber' if _e is None else ''}")
                     continue
                 try:
                     emby_pairs.add((int(_s), int(_e)))
                 except Exception:
-                    pass
-            if _items and not emby_pairs:
-                # v4.6.99（报告 §2.2 B）：服务器返回了条目，但**没有一条**能解析出季/集号
-                #（响应结构异常 / 脏数据）→ 枚举不可信，不得据此判定「整季都消失了」。
-                return [], False, "items_without_season_episode"
+                    _bad_eps.append(f"id={_ep.get('Id') or '?'} name={_ep.get('Name') or '?'} "
+                                    f"series={_ep.get('SeriesId') or '?'} "
+                                    f"非法季集号={_s!r}/{_e!r}")
+            if _bad_eps:
+                # 有明确认出的「特殊类型」可在此显式放行；未知情况一律不可信。
+                logger.warning(f"[Webhook] 缺失集比对不可信：Emby 返回 {len(_items)} 条，其中 "
+                               f"{len(_bad_eps)} 条无法解析季/集号 → 不计算删除差集。\n  "
+                               + "\n  ".join(_bad_eps[:10])
+                               + ("\n  …（其余省略）" if len(_bad_eps) > 10 else ""))
+                return [], False, f"episode_without_season_episode:{len(_bad_eps)}/{len(_items)}"
             return sorted(db_pairs - emby_pairs), True, ""
         except Exception as _e:
             logger.warning(f"[Webhook] 缺失集比对异常（按不可信处理，不标记）: {_e}")
@@ -11558,18 +11887,33 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             pass
         return out
 
-    def _probe_light_counts(self, clients: Dict[str, Any], libs: list) -> Dict[str, int]:
-        """轻查：选中库内 剧/电影/单集 总数（每库每类型 1 个小请求，Limit=1 只取总数）。"""
+    def _probe_light_counts(self, clients: Dict[str, Any], libs: list) -> dict:
+        """轻查：选中库内 剧/电影/单集 总数（每库每类型 1 个小请求，Limit=1 只取总数）。
+
+        v4.6.116（P1-03）：返回 `{"counts": {...}, "failed": [...], "complete": bool}` ——
+        查询失败**不再写成 0**（0 会被当成「计数变化」触发深查、或掩盖真实变化）。
+        任何一项失败 → 该轮计数视为不完整，调用方据此**不更新**基线快照。
+        """
         counts: Dict[str, int] = {}
+        failed: List[str] = []
         for lib in libs:
             cli = clients.get(str(lib.get("skey") or ""))
             if cli is None:
+                failed.append(f"{lib.get('skey')}:{lib.get('lib_id')}:no_client")
                 continue
             for _t in ("Series", "Movie", "Episode"):
-                r = cli.query_items({"ParentId": lib.get("lib_id"), "Recursive": "true",
-                                     "IncludeItemTypes": _t, "Limit": 1, "EnableImages": "false"})
-                counts[f"{lib.get('skey')}:{lib.get('lib_id')}:{_t}"] = int(r.get("TotalRecordCount") or 0)
-        return counts
+                _key = f"{lib.get('skey')}:{lib.get('lib_id')}:{_t}"
+                try:
+                    _st, _d, _why = cli.query_items_status({
+                        "ParentId": lib.get("lib_id"), "Recursive": "true",
+                        "IncludeItemTypes": _t, "Limit": 1, "EnableImages": "false"})
+                except Exception as _e:
+                    _st, _d, _why = ITEM_UNAVAILABLE, {}, str(_e)
+                if _st != ITEM_FOUND:
+                    failed.append(f"{_key}:{_why}")
+                    continue
+                counts[_key] = int((_d or {}).get("TotalRecordCount") or 0)
+        return {"counts": counts, "failed": failed, "complete": not failed}
 
     @staticmethod
     def _probe_item_keys(provider_ids: dict) -> List[str]:
@@ -11593,84 +11937,85 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
     def _probe_deep_collect(self, clients: Dict[str, Any], libs: list,
                             max_pages: int = 80) -> dict:
         """深查：分页拉选中库清单 —— 剧/电影（ProviderIds + Path）+ 单集（Path/SeriesId/季/集号）。
-        返回 {"series": {canonical_key: rec}, "movies": {...}, "eps": {canonical_key: {(s,e): {...}}}}"""
-        series: Dict[str, dict] = {}
-        movies: Dict[str, dict] = {}
-        eps: Dict[str, dict] = {}
-        emby_id2key: Dict[tuple, str] = {}
+
+        v4.6.116（P1-03 / P1-05）：
+        · 改用**严格分页** `query_items_paged_status()` —— 任一页失败 / 响应非法 /
+          总数跨页变化 / 翻到页数上限仍未读完 → 该 (服务器, 库) 清单标 **incomplete**；
+        · 主键改为 **`(server_id, canonical_key)`** —— 同一 Provider ID 只代表作品身份相同，
+          **绝不跨服务器合并集号**（A 缺 E09、B 有 E09 时不能把 E09 视为 A 也存在）。
+
+        返回 `{"series": {(skey,ckey): rec}, "movies": {...}, "eps": {(skey,ckey): {(s,e): {...}}},
+              "complete_servers": {skey: bool}, "incomplete": [...], "ok": bool}`。
+        调用方：**reverse mark（破坏性）只能用 `complete_servers[skey] is True` 的服务器**。
+        """
+        series: Dict[tuple, dict] = {}
+        movies: Dict[tuple, dict] = {}
+        eps: Dict[tuple, dict] = {}
+        emby_id2key: Dict[tuple, tuple] = {}
+        incomplete: List[str] = []
+        srv_bad: Dict[str, bool] = {}
         for lib in libs:
             skey = str(lib.get("skey") or "")
             cli = clients.get(skey)
             if cli is None:
+                srv_bad[skey] = True
+                incomplete.append(f"{skey}:{lib.get('lib_id')}:no_client")
                 continue
             lib_id = str(lib.get("lib_id") or "")
             # 1) 剧 + 电影
-            start = 0
-            for _ in range(max_pages):
-                if self._probe_stop:
-                    break
-                r = cli.query_items({"ParentId": lib_id, "Recursive": "true",
-                                     "IncludeItemTypes": "Series,Movie",
-                                     "Fields": "ProviderIds,Path", "StartIndex": start,
-                                     "Limit": 500, "EnableImages": "false"})
-                items = r.get("Items") or []
-                total = int(r.get("TotalRecordCount") or 0)
-                for it in items:
-                    _keys = self._probe_item_keys(it.get("ProviderIds") or {})
-                    if not _keys:
-                        continue
-                    _ck = _keys[0]
-                    _is_series = str(it.get("Type") or "").lower() in ("series", "tvshow")
-                    _rec = {"key": _ck, "keys": _keys,
-                            "name": str(it.get("Name") or ""),
-                            "path": self._normalize_webhook_path(skey, str(it.get("Path") or "")),
-                            "emby_id": str(it.get("Id") or ""), "skey": skey}
-                    _dst = series if _is_series else movies
-                    if _ck not in _dst:
-                        _dst[_ck] = _rec
-                    else:
-                        # 多服务器并集：候选键合并、路径取先有的非空
-                        for _k in _keys:
-                            if _k not in _dst[_ck]["keys"]:
-                                _dst[_ck]["keys"].append(_k)
-                        if not _dst[_ck].get("path") and _rec.get("path"):
-                            _dst[_ck].update(_rec)
-                    if _is_series and _rec["emby_id"]:
-                        emby_id2key[(skey, _rec["emby_id"])] = _ck
-                start += len(items)
-                if not items or start >= total:
-                    break
+            _st, _d, _why = cli.query_items_paged_status(
+                {"ParentId": lib_id, "Recursive": "true", "IncludeItemTypes": "Series,Movie",
+                 "Fields": "ProviderIds,Path", "EnableImages": "false"},
+                page_size=500, max_pages=max_pages)
+            if _st != ITEM_FOUND or not (_d or {}).get("complete"):
+                srv_bad[skey] = True
+                incomplete.append(f"{skey}:{lib_id}:series_movie:{_why}")
+            for it in (_d or {}).get("Items") or []:
+                _keys = self._probe_item_keys(it.get("ProviderIds") or {})
+                if not _keys:
+                    continue
+                _ck = _keys[0]
+                _is_series = str(it.get("Type") or "").lower() in ("series", "tvshow")
+                _gk = (skey, _ck)
+                _rec = {"key": _ck, "keys": _keys,
+                        "name": str(it.get("Name") or ""),
+                        "path": self._normalize_webhook_path(skey, str(it.get("Path") or "")),
+                        "emby_id": str(it.get("Id") or ""), "skey": skey}
+                _dst = series if _is_series else movies
+                if _gk not in _dst:
+                    _dst[_gk] = _rec
+                if _is_series and _rec["emby_id"]:
+                    emby_id2key[(skey, _rec["emby_id"])] = _gk
             # 2) 单集
-            start = 0
-            for _ in range(max_pages):
-                if self._probe_stop:
-                    break
-                r = cli.query_items({"ParentId": lib_id, "Recursive": "true",
-                                     "IncludeItemTypes": "Episode",
-                                     "Fields": "Path,SeriesId,ParentIndexNumber,IndexNumber",
-                                     "StartIndex": start, "Limit": 1000, "EnableImages": "false"})
-                items = r.get("Items") or []
-                total = int(r.get("TotalRecordCount") or 0)
-                for it in items:
-                    _k = emby_id2key.get((skey, str(it.get("SeriesId") or "")))
-                    if not _k:
-                        continue
-                    try:
-                        _s = int(it.get("ParentIndexNumber"))
-                        _e = int(it.get("IndexNumber"))
-                    except Exception:
-                        continue
-                    if _s == 0:
-                        continue   # 特别篇（S0）默认忽略，避免误报缺口
-                    eps.setdefault(_k, {})
-                    if (_s, _e) not in eps[_k]:
-                        eps[_k][(_s, _e)] = {
-                            "path": self._normalize_webhook_path(skey, str(it.get("Path") or "")),
-                            "emby_id": str(it.get("Id") or ""), "skey": skey}
-                start += len(items)
-                if not items or start >= total:
-                    break
-        return {"series": series, "movies": movies, "eps": eps}
+            _st2, _d2, _why2 = cli.query_items_paged_status(
+                {"ParentId": lib_id, "Recursive": "true", "IncludeItemTypes": "Episode",
+                 "Fields": "Path,SeriesId,ParentIndexNumber,IndexNumber", "EnableImages": "false"},
+                page_size=1000, max_pages=max_pages)
+            if _st2 != ITEM_FOUND or not (_d2 or {}).get("complete"):
+                srv_bad[skey] = True
+                incomplete.append(f"{skey}:{lib_id}:episode:{_why2}")
+            for it in (_d2 or {}).get("Items") or []:
+                _gk = emby_id2key.get((skey, str(it.get("SeriesId") or "")))
+                if not _gk:
+                    continue
+                try:
+                    _s = int(it.get("ParentIndexNumber"))
+                    _e = int(it.get("IndexNumber"))
+                except Exception:
+                    continue
+                if _s == 0:
+                    continue   # 特别篇（S0）默认忽略，避免误报缺口
+                eps.setdefault(_gk, {})
+                if (_s, _e) not in eps[_gk]:
+                    eps[_gk][(_s, _e)] = {
+                        "path": self._normalize_webhook_path(skey, str(it.get("Path") or "")),
+                        "emby_id": str(it.get("Id") or ""), "skey": skey}
+        complete_servers = {str(l.get("skey") or ""): (not srv_bad.get(str(l.get("skey") or ""), False))
+                            for l in libs}
+        return {"series": series, "movies": movies, "eps": eps,
+                "complete_servers": complete_servers,
+                "incomplete": incomplete,
+                "ok": not incomplete}
 
     def _probe_make_ep_target(self, rec: dict, ep: dict, s: int, e: int) -> Optional[dict]:
         """把一个 Emby 单集转成补翻目标（路径归一化 + 库白名单 + nfo 定位 + 防重复）。"""
@@ -11687,26 +12032,44 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
 
     def _probe_diff(self, inventory: dict, dbkeys: dict) -> list:
         """对差：库里已有的剧比 (季,集) 集合补缺集；Emby 有库里没有的整条补（新剧含各集/新电影）。
-        返回去重后的待补翻目标列表（按 nfo 路径去重）。"""
-        db_items = set(dbkeys.get("items") or ())
-        db_eps = dict(dbkeys.get("episodes") or {})
+        返回去重后的待补翻目标列表（按 nfo 路径去重）。
+
+        v4.6.116（P1-05）：逐 `(server_id, 作品)` 比对 —— 只用**该服务器自己的**库记录
+        （并允许 legacy 空来源兜底：这是**非破坏性**方向，宁可少补也不误判「全新」而整库重翻）。
+        集号绝不跨服务器并集，因此 A 缺 E09 而 B 有 E09 时，A 仍会补 E09。
+        """
+        db_items_by = dict(dbkeys.get("items") or {})
+        db_eps_by = dict(dbkeys.get("episodes") or {})
+        _legacy_items = set(db_items_by.get("") or ())
+        _legacy_eps = dict(db_eps_by.get("") or {})
         targets: Dict[str, dict] = {}
         _series = inventory.get("series") or {}
         _eps_map = inventory.get("eps") or {}
+
+        def _db_for(gkey):
+            _s = str((gkey[0] if isinstance(gkey, tuple) else "") or "")
+            _items = set(db_items_by.get(_s) or ()) | _legacy_items
+            _eps = dict(db_eps_by.get(_s) or {})
+            for _k, _v in _legacy_eps.items():
+                _eps.setdefault(_k, set()).update(_v)
+            return _items, _eps
+
         # 1) 已有剧：缺集
-        for ckey, rec in _series.items():
+        for gkey, rec in _series.items():
+            db_items, db_eps = _db_for(gkey)
             if not any(k in db_items for k in (rec.get("keys") or [])):
                 continue
             _db_key = next((k for k in (rec.get("keys") or []) if k in db_eps), None)
             _have = (db_eps.get(_db_key) or set()) if _db_key else set()
-            for (s, e), ep in sorted((_eps_map.get(ckey) or {}).items()):
+            for (s, e), ep in sorted((_eps_map.get(gkey) or {}).items()):
                 if (s, e) in _have:
                     continue
                 _t = self._probe_make_ep_target(rec, ep, s, e)
                 if _t:
                     targets.setdefault(_t["path"], _t)
         # 2) 全新剧：整部补（tvshow.nfo + 各集）
-        for ckey, rec in _series.items():
+        for gkey, rec in _series.items():
+            db_items, _eps = _db_for(gkey)
             if any(k in db_items for k in (rec.get("keys") or [])):
                 continue
             _tv = self._locate_nfo_from_item({"Path": rec.get("path") or "", "Type": "Series"})
@@ -11715,15 +12078,16 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                     "kind": "item", "path": _tv, "title": rec.get("name") or "",
                     "series": rec.get("name") or "", "s": None, "e": None,
                     "emby_id": rec.get("emby_id") or "", "skey": rec.get("skey") or "",
-                    "group": "new:" + ckey})
-            for (s, e), ep in sorted((_eps_map.get(ckey) or {}).items()):
+                    "group": "new:" + str(gkey)})
+            for (s, e), ep in sorted((_eps_map.get(gkey) or {}).items()):
                 _t = self._probe_make_ep_target(rec, ep, s, e)
                 if _t:
                     _t["kind"] = "item"
-                    _t["group"] = "new:" + ckey
+                    _t["group"] = "new:" + str(gkey)
                     targets.setdefault(_t["path"], _t)
         # 3) 全新电影
-        for ckey, rec in (inventory.get("movies") or {}).items():
+        for gkey, rec in (inventory.get("movies") or {}).items():
+            db_items, _eps = _db_for(gkey)
             if any(k in db_items for k in (rec.get("keys") or [])):
                 continue
             _mv = self._locate_nfo_from_item({"Path": rec.get("path") or "", "Type": "Movie"})
@@ -11732,7 +12096,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                     "kind": "item", "path": _mv, "title": rec.get("name") or "",
                     "series": "", "s": None, "e": None,
                     "emby_id": rec.get("emby_id") or "", "skey": rec.get("skey") or "",
-                    "group": "new:" + ckey})
+                    "group": "new:" + str(gkey)})
         return list(targets.values())
 
     def _run_probe_round(self, force_deep: bool = False) -> dict:
@@ -11760,11 +12124,17 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 return res
             # 1) 轻查：计数没变且 24h 内深查过 → 结束（稳态零开销）
             _before = dict(getattr(self, "_probe_counts", None) or {})
-            counts = self._probe_light_counts(clients, libs)
+            _lc = self._probe_light_counts(clients, libs) or {}
+            counts = dict(_lc.get("counts") or {})
+            if not _lc.get("complete", True):
+                # v4.6.116（P1-03）：轻查不完整 → 不更新基线（否则失败被当成「计数变化」）
+                logger.warning(f"[Probe] 轻查不完整（{len(_lc.get('failed') or [])} 项失败）→ 本轮不更新计数基线")
+                self._push_log("WARNING", f"探测库：轻查部分失败（{len(_lc.get('failed') or [])} 项）"
+                                          f"→ 不更新计数基线，本轮改做深查以确保安全")
             _changed = bool(counts) and bool(_before) and (counts != _before)
-            if counts:
+            if counts and _lc.get("complete", True):
                 self._probe_counts = counts
-            _deep_due = (force_deep or (not _before) or _changed
+            _deep_due = (force_deep or (not _before) or _changed or not _lc.get("complete", True)
                          or (now - float(getattr(self, "_probe_last_deep", 0) or 0) >= self.PROBE_DEEP_MAX_AGE))
             if not _deep_due:
                 self._save_state()
@@ -11780,12 +12150,16 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 _inv_s = len(inventory.get("series") or {})
                 _inv_m = len(inventory.get("movies") or {})
                 _inv_e = sum(len(v) for v in (inventory.get("eps") or {}).values())
-                _db_i = len(keys.get("items") or ())
+                _db_i = sum(len(v) for v in (keys.get("items") or {}).values())
                 _db_e = sum(len(v) for v in (keys.get("episodes") or {}).values())
-                self._push_log("INFO",
+                _bad_srv = sorted({str(k) for k, v in (inventory.get("complete_servers") or {}).items()
+                                   if v is False})
+                _inc = (f"；**{len(inventory.get('incomplete') or [])} 项清单不完整**"
+                        f"（服务器 {_bad_srv or '-'} 已跳过反向标记）" if inventory.get("incomplete") else "")
+                self._push_log("INFO" if not inventory.get("incomplete") else "WARNING",
                                f"探测库：Emby 清单 剧 {_inv_s} / 电影 {_inv_m} / 单集 {_inv_e}；"
                                f"插件库 条目 {_db_i} / 已收录集 {_db_e}；比对后待补 {res['found']} 个"
-                               f"（探测只补「Emby 有、插件库没有」的缺口）")
+                               f"（探测只补「Emby 有、插件库没有」的缺口）{_inc}")
             except Exception:
                 pass
             # 惰性初始化 LLM（探测线程此前可能未初始化；「AI 翻译」关闭时仅池/繁转简，不中止）
@@ -11810,7 +12184,14 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         """反向检查 —— 剧在 Emby 存在且**能拉到集**，但某集插件库有、Emby 没有：
         说明服务器已删除该集（可能漏接 library.deleted）→ 标记观察期 + 登记「失效/待恢复」行。
         安全阀：①拉不到集（0 集）的剧一律不判（避免未刮削/接口异常误判成删除）；
-        ②每轮最多标 PROBE_REVERSE_MAX 集；③已标记过的（deleted_at 非空）不重复计数。"""
+        ②每轮最多标 PROBE_REVERSE_MAX 集；③已标记过的（deleted_at 非空）不重复计数。
+
+        v4.6.116（P1-03 / P1-05）：
+        · **清单不完整的服务器一律跳过**（`complete_servers[skey] is False`）——
+          部分清单会把「没读到」当成「已删除」；
+        · 逐 (server_id, 作品) 比对：只用**该服务器自己的**库记录（+ 单服务器时允许
+          legacy 空来源兜底），绝不使用其它服务器的集号做并集。
+        """
         try:
             db = getattr(self, "_people_db", None)
             if db is None:
@@ -11818,22 +12199,42 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             _pid = self.__class__.__name__
             _series = inventory.get("series") or {}
             _eps_map = inventory.get("eps") or {}
-            db_items = set(dbkeys.get("items") or ())
-            db_eps = dict(dbkeys.get("episodes") or {})
+            _db_items_by = dict(dbkeys.get("items") or {})
+            _db_eps_by = dict(dbkeys.get("episodes") or {})
+            _complete = dict(inventory.get("complete_servers") or {})
+            # legacy 空来源：仅当只配置了 1 台 Emby 时才允许兜底（多服务器下归属不明 → 隔离）
+            _legacy_ok = False
+            try:
+                _legacy_ok = len(self._configured_server_keys()) <= 1
+            except Exception:
+                _legacy_ok = False
             _gh = float(getattr(self, "_nfo_dead_grace_hours", 24) or 24)
             _now = time.time()
             _marked = 0
             _names: List[str] = []
-            for ckey, rec in _series.items():
-                _hit = [k for k in (rec.get("keys") or []) if k in db_items]
+            _skipped_incomplete: List[str] = []
+            for gkey, rec in _series.items():
+                # gkey = (server_id, canonical_key)
+                _skey = str((gkey[0] if isinstance(gkey, tuple) else rec.get("skey")) or "")
+                if _complete.get(_skey) is False:
+                    if _skey not in _skipped_incomplete:
+                        _skipped_incomplete.append(_skey)
+                    continue
+                _db_items = set(_db_items_by.get(_skey) or ())
+                _db_eps = dict(_db_eps_by.get(_skey) or {})
+                if _legacy_ok:
+                    _db_items |= set(_db_items_by.get("") or ())
+                    for _k, _v in (_db_eps_by.get("") or {}).items():
+                        _db_eps.setdefault(_k, set()).update(_v)
+                _hit = [k for k in (rec.get("keys") or []) if k in _db_items]
                 if not _hit:
                     continue
-                _emby_eps = _eps_map.get(ckey) or {}
+                _emby_eps = _eps_map.get(gkey) or {}
                 if not _emby_eps:
                     continue   # 该剧在 Emby 一集都没拉到 → 不判，避免误标
                 _sn = str(rec.get("name") or "")
                 for _dbk in _hit:
-                    for (_s, _e) in sorted(db_eps.get(_dbk) or set()):
+                    for (_s, _e) in sorted(_db_eps.get(_dbk) or set()):
                         if _marked >= self.PROBE_REVERSE_MAX:
                             break
                         if _s == 0 or (_s, _e) in _emby_eps:
@@ -11841,7 +12242,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                         _n = db.mark_deleted_by_episode(plugin_id=_pid, item_id=_dbk,
                                                         season_num=_s, episode_num=_e,
                                                         deleted_ts=_now,
-                                                        server_id=str(rec.get("skey") or ""))
+                                                        server_id=_skey)
                         if _n > 0:
                             _marked += 1
                             self._push_webhook_event(
@@ -11849,9 +12250,13 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                                 f"探测发现 Emby 已无该集（S{_s}E{_e}），标记观察期（{_gh:.0f} 小时）；"
                                 f"期间重新入库会自动恢复，到期未恢复则清理",
                                 series_name=_sn, season=_s, episode=_e,
-                                server_id=str(rec.get("skey") or ""))
+                                server_id=_skey)
                             if _sn and _sn not in _names:
                                 _names.append(_sn)
+            if _skipped_incomplete:
+                self._push_log("WARNING", f"探测库反向检查：{len(_skipped_incomplete)} 台服务器的清单"
+                                         f"不完整（分页/请求异常）→ 已跳过其反向缺集标记，避免误标")
+                logger.warning(f"[Probe] 反向标记跳过不完整服务器: {_skipped_incomplete}")
             if _marked:
                 res["reverse_marked"] = _marked
                 res["reverse_names"] = _names

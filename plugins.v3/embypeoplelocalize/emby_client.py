@@ -210,6 +210,7 @@ class EmbyClient:
         page = max(1, int(limit or 200))
         out: List[dict] = []
         start = 0
+        expected_total = None      # v4.6.116（P1-02）：固定第一页声明的总数
         try:
             while True:
                 params = {
@@ -227,20 +228,26 @@ class EmbyClient:
                 _ok, items, total, _why = self._parse_items_page(_r)
                 if not _ok:
                     return ITEM_UNAVAILABLE, out, f"bad_response_{_why}_at_{start}"
+                # v4.6.116（P1-02）：总数必须跨页一致 —— 中途变化说明清单在变，
+                # 半旧半新的清单绝不能用于删除差集（否则会把「没读到」当成「已删除」）。
+                if expected_total is None:
+                    expected_total = total
+                elif total != expected_total:
+                    return ITEM_UNAVAILABLE, out, f"pagination_total_changed_{expected_total}->{total}_at_{start}"
                 if not items:
                     # 本页为空：只有「已到末尾」才算完整；服务器声称还有 = 分页异常
-                    if start >= total:
+                    if start >= expected_total:
                         return ITEM_FOUND, out, ""
-                    return ITEM_UNAVAILABLE, out, f"empty_page_but_total_{total}_at_{start}"
-                if total == 0:
+                    return ITEM_UNAVAILABLE, out, f"empty_page_but_total_{expected_total}_at_{start}"
+                if expected_total == 0:
                     # 声称总数为 0 却返回了条目 → 自相矛盾 → 不可信
                     return ITEM_UNAVAILABLE, out, f"total_zero_but_items_at_{start}"
                 out.extend(items)
                 start += len(items)
-                if start >= total:
+                if start >= expected_total:
                     return ITEM_FOUND, out, ""
                 if len(items) < page:
-                    return ITEM_UNAVAILABLE, out, f"short_page_{start}/{total}"
+                    return ITEM_UNAVAILABLE, out, f"short_page_{start}/{expected_total}"
         except Exception as e:
             logger.warning(f"[EmbyClient] 拉取剧集单集异常 {series_id}: {e}")
             return ITEM_UNAVAILABLE, out, "exception"
@@ -288,10 +295,88 @@ class EmbyClient:
             return ITEM_UNAVAILABLE, dict(_empty), f"bad_response_{_why}"
         return ITEM_FOUND, {"Items": _items, "TotalRecordCount": _total}, ""
 
+    def query_items_paged_status(self, params: Optional[dict] = None,
+                                 page_size: int = 500, max_pages: int = 80) -> tuple:
+        """**分页**通用条目查询 + 完整性（v4.6.116 · P1-03）→ `(status, data, reason)`。
+
+        专供**探测**等「清单参与删除/缺集判定」的场景：任何一页失败、响应非法、
+        总数跨页变化、或翻到 `max_pages` 仍未读完 → 一律 UNAVAILABLE（清单不完整），
+        调用方**不得**用它做反向缺失标记。
+
+        data = `{"Items": [...], "TotalRecordCount": n, "complete": bool, "pages": k}`
+        （UNAVAILABLE 时 Items 仅含已成功读到的部分，`complete=False`）。
+        """
+        _base = dict(params or {})
+        _page = max(1, int(page_size or 500))
+        _maxp = max(1, int(max_pages or 80))
+        out: List[dict] = []
+        try:
+            uid = self._get_user_id()
+        except Exception:
+            uid = None
+        if not uid:
+            return ITEM_UNAVAILABLE, {"Items": [], "TotalRecordCount": 0,
+                                      "complete": False, "pages": 0}, "no_user_id"
+        url = f"/Users/{uid}/Items"
+        start = 0
+        expected_total = None
+        pages = 0
+        try:
+            for _ in range(_maxp):
+                _p = dict(_base)
+                _p["StartIndex"] = start
+                _p["Limit"] = _page
+                _st, _r = self._get_status(url, _p)
+                if _st == ITEM_NOT_FOUND:
+                    return ITEM_NOT_FOUND, {"Items": [], "TotalRecordCount": 0,
+                                            "complete": False, "pages": pages}, "http_404"
+                if _st != ITEM_FOUND:
+                    return ITEM_UNAVAILABLE, {"Items": out, "TotalRecordCount": expected_total or 0,
+                                              "complete": False, "pages": pages}, f"http_error_at_{start}"
+                _ok, items, total, _why = self._parse_items_page(_r)
+                if not _ok:
+                    return ITEM_UNAVAILABLE, {"Items": out, "TotalRecordCount": expected_total or 0,
+                                              "complete": False, "pages": pages}, f"bad_response_{_why}_at_{start}"
+                if expected_total is None:
+                    expected_total = total
+                elif total != expected_total:
+                    return ITEM_UNAVAILABLE, {"Items": out, "TotalRecordCount": expected_total,
+                                              "complete": False, "pages": pages}, \
+                        f"pagination_total_changed_{expected_total}->{total}_at_{start}"
+                pages += 1
+                if not items:
+                    if start >= expected_total:
+                        return ITEM_FOUND, {"Items": out, "TotalRecordCount": expected_total,
+                                            "complete": True, "pages": pages}, ""
+                    return ITEM_UNAVAILABLE, {"Items": out, "TotalRecordCount": expected_total,
+                                              "complete": False, "pages": pages}, \
+                        f"empty_page_but_total_{expected_total}_at_{start}"
+                out.extend(items)
+                start += len(items)
+                if start >= expected_total:
+                    return ITEM_FOUND, {"Items": out, "TotalRecordCount": expected_total,
+                                        "complete": True, "pages": pages}, ""
+                if len(items) < _page:
+                    return ITEM_UNAVAILABLE, {"Items": out, "TotalRecordCount": expected_total,
+                                              "complete": False, "pages": pages}, \
+                        f"short_page_{start}/{expected_total}"
+            # 翻到页数上限仍未读完 → 不完整（绝不当作「已到末尾」）
+            return ITEM_UNAVAILABLE, {"Items": out, "TotalRecordCount": expected_total or 0,
+                                      "complete": False, "pages": pages}, f"max_pages_{_maxp}_hit_at_{start}"
+        except Exception as e:
+            logger.warning(f"[EmbyClient] 分页条目查询异常: {e}")
+            return ITEM_UNAVAILABLE, {"Items": out, "TotalRecordCount": expected_total or 0,
+                                      "complete": False, "pages": pages}, "exception"
+
     def query_items(self, params: Optional[dict] = None) -> Dict[str, Any]:
         """通用条目查询（探测入库用）—— 支持 ParentId/IncludeItemTypes/Fields/
         StartIndex/Limit 等，返回 {"Items": [...], "TotalRecordCount": n}。
-        Limit=1 时可只取 TotalRecordCount（轻查计数，极小响应）。失败返回空。"""
+        Limit=1 时可只取 TotalRecordCount（轻查计数，极小响应）。失败返回空。
+
+        ⚠️ v4.6.116（P1-03）：本方法**吞掉请求错误**（失败 = 空列表）。任何会用于
+        「删除差集 / 缺集标记 / 生命周期判定」的场景，必须改用
+        `query_items_status()` 或 `query_items_paged_status()`。
+        """
         try:
             uid = self._get_user_id()
             path = f"/Users/{uid}/Items" if uid else "/Items"
@@ -303,22 +388,48 @@ class EmbyClient:
             logger.warning(f"[EmbyClient] 条目查询失败: {e}")
             return {"Items": [], "TotalRecordCount": 0}
 
+    def list_all_persons_status(self, limit: int = 500, start_index: int = 0) -> tuple:
+        """单页拉取 Person + **三态**（v4.6.116 · P1-04）→ `(status, data, reason)`。
+
+        错误不再伪装成「空列表」—— 人名池生命周期判定（sweep）必须能区分
+        「确实没有 Person」与「这一页没问到」。
+        """
+        _empty = {"Items": [], "TotalRecordCount": 0}
+        try:
+            uid = self._get_user_id()
+        except Exception:
+            uid = None
+        if not uid:
+            return ITEM_UNAVAILABLE, dict(_empty), "no_user_id"
+        params = {
+            "Recursive": "true",
+            "Fields": "ProviderIds",
+            "StartIndex": max(0, int(start_index or 0)),
+            "Limit": max(1, int(limit or 500)),
+        }
+        _st, _r = self._get_status("/Persons", params)
+        if _st == ITEM_NOT_FOUND:
+            return ITEM_NOT_FOUND, dict(_empty), "http_404"
+        if _st != ITEM_FOUND:
+            return ITEM_UNAVAILABLE, dict(_empty), "http_error"
+        _ok, _items, _total, _why = self._parse_items_page(_r)
+        if not _ok:
+            return ITEM_UNAVAILABLE, dict(_empty), f"bad_response_{_why}"
+        return ITEM_FOUND, {"Items": _items, "TotalRecordCount": _total}, ""
+
     def list_all_persons(self, limit: int = 500, start_index: int = 0) -> Dict[str, Any]:
         """分页拉取 Emby 全部 Person（人名池「全库 Person」拉取用，文档 §2.3）。
-        返回 {"Items": [{"Id","Name","ProviderIds"}...], "TotalRecordCount": n}；失败返回空。"""
+        返回 {"Items": [{"Id","Name","ProviderIds"}...], "TotalRecordCount": n}；失败返回空。
+
+        ⚠️ v4.6.116（P1-04）：失败 = 空列表；需要区分「请求失败」与「真的空」时
+        请用 `list_all_persons_status()`（生命周期 sweep 必须用它）。
+        """
         try:
-            params = {
-                "Recursive": "true",
-                "Fields": "ProviderIds",
-                "StartIndex": max(0, int(start_index or 0)),
-                "Limit": max(1, int(limit or 500)),
-            }
-            r = self._get("/Persons", params) or {}
-            return {"Items": r.get("Items") or [],
-                    "TotalRecordCount": int(r.get("TotalRecordCount") or 0)}
+            _st, _d, _ = self.list_all_persons_status(limit=limit, start_index=start_index)
         except Exception as e:
             logger.warning(f"[EmbyClient] 拉取 Person 列表失败: {e}")
             return {"Items": [], "TotalRecordCount": 0}
+        return _d if _st == ITEM_FOUND else {"Items": [], "TotalRecordCount": 0}
 
     def find_person_by_name(self, name: str, tmdbid: str = "") -> Optional[dict]:
         """在 Emby 中查找 Person 实体（先按 tmdbid 精确匹配，再按原名完全相同兜底）。
@@ -421,7 +532,14 @@ class EmbyClient:
         也可能清空人物的 Overview / LockedFields / 图片等元数据 —— 属于不可接受的数据
         丢失风险。现在：只有成功取得完整对象、且完整回写成功才返回 True；读取或完整
         保存失败即返回 False（交由上层记失败 / 重试），**不再猜测精简提交一定安全**。
-        `provider_ids` 参数仅为兼容旧调用签名保留，不再用于任何回退提交。"""
+        `provider_ids` 参数仅为兼容旧调用签名保留，不再用于任何回退提交。
+
+        v4.6.116（P2-11）：**回写后复读校验** —— 只凭「POST 成功」不能证明元数据没丢。
+        改名后重新 GET，逐项比对 Overview / LockedFields / ProviderIds / ImageTags
+        是否与改名前一致（**不比 Name**，避免 Emby 改名生效时序造成误判）；
+        任何一项变化 → 记 ERROR 并返回 False（上层按失败处理），从而把
+        「整份回写丢字段」变成可发现的失败，而不是静默的数据损坏。
+        """
         pid = str(person_id or "").strip()
         nn = str(new_name or "").strip()
         if not pid or not nn:
@@ -435,29 +553,55 @@ class EmbyClient:
             logger.warning(f"[EmbyClient] 重命名 Person 中止：未取得完整 DTO {pid} "
                            f"（不提交稀疏对象，避免清空元数据；将按失败处理等待重试）")
             return False
+        before = {k: detail.get(k) for k in self._PERSON_KEEP_FIELDS}
         try:
             detail["Name"] = nn
-            return bool(self._post(f"/emby/Items/{pid}", detail))
+            if not self._post(f"/emby/Items/{pid}", detail):
+                return False
         except Exception as e:
             logger.warning(f"[EmbyClient] 重命名 Person 失败（完整回写）{pid}: {e}")
             return False
+        # 回写后复读校验：只比「必须保持不变」的字段
+        try:
+            _after_d = self.get_person_detail(pid)
+            if isinstance(_after_d, dict) and _after_d:
+                for k, v in before.items():
+                    if v is None and k not in (_after_d or {}):
+                        continue
+                    if _after_d.get(k) != v:
+                        logger.error(f"[EmbyClient] 重命名 Person 后元数据校验失败（{k} 变化）"
+                                     f" pid={pid}：before={v!r} after={(_after_d or {}).get(k)!r}"
+                                     f" —— 本次改名按失败处理（可能整份回写丢字段）")
+                        return False
+        except Exception as e:
+            logger.debug(f"[EmbyClient] 重命名后复读校验跳过（非致命）{pid}: {e}")
+        return True
+
+    # 改名时必须保持不变的关键字段（复读校验用）
+    _PERSON_KEEP_FIELDS = ("Overview", "LockedFields", "ProviderIds", "ImageTags")
 
     def get_person_detail(self, person_id: str) -> Optional[dict]:
-        """取 Person 完整详情（TMDB 补译用）—— 写回前必须先取全量 DTO：
+        """取 Person 完整详情（TMDB 补译 / 改名整份回写用）—— 写回前必须先取全量 DTO：
         Emby POST /Items/{id} 按整份对象覆盖，只提交部分字段会清空其它属性。
-        对齐 personmeta get_iteminfo（Emby 分支：Fields=ChannelMappingInfo）。"""
+
+        v4.6.116（P2-11）：字段集补齐为 `ChannelMappingInfo,ProviderIds,Overview,
+        LockedFields,ImageTags` —— 否则改名前根本看不到这些字段，也就无法在回写后
+        校验它们有没有被清空（只靠「POST 成功」不能证明元数据完整）。
+        """
         pid = str(person_id or "").strip()
         if not pid:
             return None
         try:
             uid = self._get_user_id()
             path = f"/Users/{uid}/Items/{pid}" if uid else f"/emby/Items/{pid}"
-            it = self._get(path, {"Fields": "ChannelMappingInfo"})
+            it = self._get(path, {"Fields": self._PERSON_DETAIL_FIELDS})
             if it and str(it.get("Id") or "").strip():
                 return it
         except Exception as e:
             logger.debug(f"[EmbyClient] 取 Person 详情失败 {pid}: {e}")
         return None
+
+    _PERSON_DETAIL_FIELDS = "ChannelMappingInfo,ProviderIds,Overview,LockedFields,ImageTags"
 
     def update_person_info(self, person_id: str, iteminfo: dict) -> bool:
         """写回 Person 详情（整份 DTO，含 LockedFields）——
