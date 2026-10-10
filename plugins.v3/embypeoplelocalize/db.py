@@ -2180,6 +2180,40 @@ class PeopleDb:
             "nfo_path": row.get("nfo_path") or "",
         }
 
+    def item_identity(self, *, plugin_id: str, item_id: str, server_id: Optional[str] = "",
+                      db: Optional[Any] = None) -> Optional[dict]:
+        """条目的 **Emby 侧身份**（v4.6.114 · issue #5）—— 写回 Emby 条目级 People 用。
+
+        返回 `{emby_item_id, media_provider, media_id, item_type, server_id, title}`；
+        无记录 → None（调用方按「无法同步」处理，不猜）。
+
+        背景：NFO 模式下 `person.item_id` 存的是媒体 id（TMDB 等），而 `emby_item_id`
+        只有 Webhook / Emby 拉取路径才会写 —— 纯扫描入库的条目该列为空，
+        因此调用方拿到本结构后：**优先用 emby_item_id，为空才按 media_provider + media_id
+        反查 Emby itemId**（`search_item_by_provider`）。server_id 见 `_scope_sql_soft`。
+        """
+        _sc, _scp = _scope_sql_soft(server_id)
+        try:
+            rows = _q("SELECT emby_item_id, media_provider, media_id, item_type, server_id, title "
+                      "FROM person WHERE plugin_id=? AND item_id=?" + _sc +
+                      " ORDER BY CASE WHEN COALESCE(emby_item_id,'')<>'' THEN 0 ELSE 1 END, "
+                      "person_index LIMIT 1",
+                      (plugin_id, item_id, *_scp))
+        except Exception as e:
+            logger.warning(f"[DB] item_identity 查询失败: {e}")
+            return None
+        row = rows[0] if rows else None
+        if not row:
+            return None
+        return {
+            "emby_item_id": str(row.get("emby_item_id") or ""),
+            "media_provider": str(row.get("media_provider") or ""),
+            "media_id": str(row.get("media_id") or ""),
+            "item_type": str(row.get("item_type") or ""),
+            "server_id": str(row.get("server_id") or ""),
+            "title": str(row.get("title") or ""),
+        }
+
     def delete_item(self, *, plugin_id: str, item_id: str, server_id: Optional[str] = "",
                     db: Optional[Any] = None) -> int:
         """删除条目的全部记录。server_id 见 _scope_sql ——

@@ -15,6 +15,7 @@ const DEFAULT = {
   enable_ai: true,
   lock_cast: false,
   emby_name_sync: true,
+  emby_role_sync: false,
   translate_actor: true,
   translate_director: false,
   translate_writer: false,
@@ -576,6 +577,13 @@ onMounted(() => {
               <div class="epl-switch-desc">写回 nfo 时写入 &lt;lockedfields&gt;Cast&lt;/lockedfields&gt; 只锁定演员字段，Emby 重新刮削/刷新时不会覆盖中文名单，剧情/简介/海报等照常更新（新番简介过几天出中文也不受影响）</div>
             </div>
             <v-switch v-model="config.lock_cast" color="primary" hide-details></v-switch>
+          </div>
+          <div class="epl-switch-row">
+            <div class="flex-grow-1">
+              <div class="epl-switch-title">角色译文同步到 Emby 条目</div>
+              <div class="epl-switch-desc">把「第二排角色名」的中文译文写入 Emby 条目级 People[].Role（与第一排同名层级）。只写 nfo 时，Emby 刷新元数据会用它条目级缓存的英文角色名把 nfo 覆盖回去——开启本项后 Emby 自己写 nfo 带的即是中文，不再依赖 Cast 锁能否挡住覆盖。写回后自动执行：每条目 1 次读取，命中才整份回写（只改 Role、不动 Name）；默认关，建议开启</div>
+            </div>
+            <v-switch v-model="config.emby_role_sync" color="primary" hide-details></v-switch>
           </div>
           <div class="epl-switch-row">
             <div class="flex-grow-1">

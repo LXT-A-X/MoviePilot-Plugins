@@ -1129,7 +1129,7 @@ return (_ctx, _cache) => {
             _createVNode$5(_component_v_tooltip, {
               location: "top",
               "max-width": "300",
-              text: poolFetchHint.value || '把 Emby 的 Person 拉进人名池（翻译一次全局复用）：按设置页「翻译范围」的人名类型开关拉取；拉取期间入库事件自动排队'
+              text: poolFetchHint.value || '把 Emby 的 Person 拉进人名池（翻译一次全局复用）：来源跟随设置页「拉取来源」（仅已选媒体库 / 全库 Person，不能在此临时改）；要临时改本次来源请到「人名池」页的「拉取人名」弹窗'
             }, {
               activator: _withCtx$5(({ props: tp }) => [
                 _createVNode$5(_component_v_btn, _mergeProps$2({
@@ -2030,7 +2030,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const Dashboard = /*#__PURE__*/_export_sfc(_sfc_main$5, [['__scopeId',"data-v-4c9bc22d"]]);
+const Dashboard = /*#__PURE__*/_export_sfc(_sfc_main$5, [['__scopeId',"data-v-3ca40b70"]]);
 
 const {createTextVNode:_createTextVNode$4,resolveComponent:_resolveComponent$4,withCtx:_withCtx$4,createVNode:_createVNode$4,toDisplayString:_toDisplayString$4,createElementVNode:_createElementVNode$4,openBlock:_openBlock$4,createElementBlock:_createElementBlock$4,createCommentVNode:_createCommentVNode$4,createBlock:_createBlock$4} = await importShared('vue');
 
@@ -2462,7 +2462,7 @@ const _hoisted_81$2 = {
 };
 const _hoisted_82$2 = { class: "epl-edit-row" };
 const _hoisted_83$2 = { class: "epl-edit-orig epl-readonly-box" };
-const _hoisted_84$1 = { class: "epl-edit-row" };
+const _hoisted_84$2 = { class: "epl-edit-row" };
 const _hoisted_85$1 = {
   key: 0,
   class: "epl-edit-orig"
@@ -5094,7 +5094,7 @@ return (_ctx, _cache) => {
                                         "hide-details": "",
                                         class: "mb-2"
                                       }, null, 8, ["modelValue"]),
-                                      _createElementVNode$3("div", _hoisted_84$1, [
+                                      _createElementVNode$3("div", _hoisted_84$2, [
                                         _cache[77] || (_cache[77] = _createElementVNode$3("span", { class: "epl-edit-label" }, "范围", -1)),
                                         (editDlgForm.value.role_level === 'movie')
                                           ? (_openBlock$3(), _createElementBlock$3("span", _hoisted_85$1, "仅这一条（电影只有这一条记录）"))
@@ -5700,7 +5700,7 @@ const _hoisted_80$1 = { class: "epl-dlg-acts" };
 const _hoisted_81$1 = { class: "epl-dlg" };
 const _hoisted_82$1 = { class: "epl-dlg-body" };
 const _hoisted_83$1 = { class: "epl-field" };
-const _hoisted_84 = { class: "epl-field-v" };
+const _hoisted_84$1 = { class: "epl-field-v" };
 const _hoisted_85 = { class: "epl-dlg-acts" };
 
 const {computed: computed$2,inject: inject$2,onActivated: onActivated$1,onBeforeUnmount,onDeactivated,onMounted: onMounted$2,ref: ref$2,watch: watch$1} = await importShared('vue');
@@ -5795,7 +5795,11 @@ const poolDataOpBlockedHint = computed$2(() => {
   if (poolTaskRunning.value) return '人名池任务（拉取/同步）进行中，请先「终止」或等待完成后再操作'
   return ''
 });
-const scope = ref$2('libraries');
+// v4.6.114（issue #4）：来源拆成两个 ref，**不再共用一个**
+//   scopeCfg   = 设置页「拉取来源」配置值（只由 /status 回填，供弹窗打开时做初值）
+//   fetchScope = 拉取弹窗**本次**选择的覆盖值（弹窗局部 state，轮询绝不改写它）
+const scopeCfg = ref$2('libraries');
+const fetchScope = ref$2('libraries');
 
 // 出现清单（懒加载，只展示不编辑）
 const occOpen = ref$2('');
@@ -5932,7 +5936,10 @@ async function loadStatus() {
     fetchState.value = d.fetch || {};
     txState.value = d.tx || {};
     poolTaskRunning.value = !!d.running;
-    if (d.scope) scope.value = d.scope;
+    // v4.6.114（issue #4）：只回填**配置值**，绝不碰弹窗里的本次选择（fetchScope）
+    // —— 此前二者是同一个 ref，3 秒轮询一回填就把用户刚选的来源冲掉
+    //（`scope`/`scope_cfg` 分别是「最近一次任务实际来源」与「设置页配置值」）
+    if (d.scope_cfg || d.scope) scopeCfg.value = d.scope_cfg || d.scope;
     // v4.6.70：同步统一任务守卫（/pool/status 已附 is_running + tasks 快照）
     guard.loadStatus(d);
   } catch (e) { /* 静默 */ }
@@ -6236,6 +6243,9 @@ async function refetchOne(r) {
 
 // ── 拉取 ──
 function openFetch() {
+  // v4.6.114（issue #4）：打开时用当前配置值初始化「本次覆盖」，
+  // 之后只有用户自己能动它（轮询不再回填）
+  fetchScope.value = scopeCfg.value || 'libraries';
   fetchDlg.value = true;
 }
 
@@ -6243,7 +6253,7 @@ async function doFetch() {
   if (!guard.check('拉取人名')) return   // v4.6.70：统一守卫
   busy.value = true;
   try {
-    const d = await api.post(props.api, '/pool/fetch', { scope: scope.value });
+    const d = await api.post(props.api, '/pool/fetch', { scope: fetchScope.value });
     notify(d?.message || '拉取已启动', 'success');
     fetchDlg.value = false;
     fetchState.value = { running: true, total: 0, done: 0, current: '准备中…' };
@@ -6640,7 +6650,7 @@ return (_ctx, _cache) => {
         : _createCommentVNode$2("", true)
     ], 512),
     _createElementVNode$2("div", _hoisted_23$1, [
-      _cache[38] || (_cache[38] = _createStaticVNode("<div class=\"epl-pool-th\" data-v-a3db2143><span class=\"c-name\" data-v-a3db2143>原文名</span><span class=\"c-zh\" data-v-a3db2143>译名</span><span class=\"c-type\" data-v-a3db2143>类型</span><span class=\"c-status\" data-v-a3db2143>状态</span><span class=\"c-occ\" data-v-a3db2143>出现</span><span class=\"c-op\" data-v-a3db2143>操作</span></div>", 1)),
+      _cache[38] || (_cache[38] = _createStaticVNode("<div class=\"epl-pool-th\" data-v-872f46e1><span class=\"c-name\" data-v-872f46e1>原文名</span><span class=\"c-zh\" data-v-872f46e1>译名</span><span class=\"c-type\" data-v-872f46e1>类型</span><span class=\"c-status\" data-v-872f46e1>状态</span><span class=\"c-occ\" data-v-872f46e1>出现</span><span class=\"c-op\" data-v-872f46e1>操作</span></div>", 1)),
       (loading.value)
         ? (_openBlock$2(), _createBlock$2(_component_v_progress_linear, {
             key: 0,
@@ -6966,12 +6976,12 @@ return (_ctx, _cache) => {
     }, {
       default: _withCtx$2(() => [
         _createElementVNode$2("div", _hoisted_71$1, [
-          _cache[55] || (_cache[55] = _createElementVNode$2("div", { class: "epl-dlg-title" }, "拉取人名", -1)),
+          _cache[56] || (_cache[56] = _createElementVNode$2("div", { class: "epl-dlg-title" }, "拉取人名", -1)),
           _createElementVNode$2("div", _hoisted_72$1, [
             _cache[51] || (_cache[51] = _createElementVNode$2("div", { class: "epl-dlg-tip" }, "拉取类型跟随设置页「翻译范围」的人名类型开关（不再单独设置）。人物类型优先从 Emby People 关系获取；无法确定类型的全库 Person 不参与按类型筛选，建议使用「已选媒体库」范围。", -1)),
             _createVNode$2(_component_v_radio_group, {
-              modelValue: scope.value,
-              "onUpdate:modelValue": _cache[10] || (_cache[10] = $event => ((scope).value = $event)),
+              modelValue: fetchScope.value,
+              "onUpdate:modelValue": _cache[10] || (_cache[10] = $event => ((fetchScope).value = $event)),
               density: "compact",
               "hide-details": "",
               class: "epl-dlg-radio"
@@ -6987,14 +6997,15 @@ return (_ctx, _cache) => {
                 })
               ]),
               _: 1
-            }, 8, ["modelValue"])
+            }, 8, ["modelValue"]),
+            _cache[52] || (_cache[52] = _createElementVNode$2("div", { class: "epl-dlg-tip" }, "此处选择仅本次拉取生效，不改设置页配置；仪表盘的「拉取人名」按钮则始终跟随设置页「拉取来源」。", -1))
           ]),
           _createElementVNode$2("div", _hoisted_73$1, [
             _createVNode$2(_component_v_btn, {
               variant: "text",
               onClick: _cache[11] || (_cache[11] = $event => (fetchDlg.value = false))
             }, {
-              default: _withCtx$2(() => [...(_cache[52] || (_cache[52] = [
+              default: _withCtx$2(() => [...(_cache[53] || (_cache[53] = [
                 _createTextVNode$2("取消", -1)
               ]))]),
               _: 1
@@ -7005,7 +7016,7 @@ return (_ctx, _cache) => {
               loading: busy.value,
               onClick: doRescreen
             }, {
-              default: _withCtx$2(() => [...(_cache[53] || (_cache[53] = [
+              default: _withCtx$2(() => [...(_cache[54] || (_cache[54] = [
                 _createTextVNode$2("按当前设置重筛池", -1)
               ]))]),
               _: 1
@@ -7016,7 +7027,7 @@ return (_ctx, _cache) => {
               loading: busy.value,
               onClick: doFetch
             }, {
-              default: _withCtx$2(() => [...(_cache[54] || (_cache[54] = [
+              default: _withCtx$2(() => [...(_cache[55] || (_cache[55] = [
                 _createTextVNode$2("开始拉取", -1)
               ]))]),
               _: 1
@@ -7033,14 +7044,14 @@ return (_ctx, _cache) => {
     }, {
       default: _withCtx$2(() => [
         _createElementVNode$2("div", _hoisted_74$1, [
-          _cache[61] || (_cache[61] = _createElementVNode$2("div", { class: "epl-dlg-title" }, "批量翻译", -1)),
+          _cache[62] || (_cache[62] = _createElementVNode$2("div", { class: "epl-dlg-title" }, "批量翻译", -1)),
           _createElementVNode$2("div", _hoisted_75$1, [
             _createElementVNode$2("div", _hoisted_76$1, [
-              _cache[56] || (_cache[56] = _createElementVNode$2("span", { class: "epl-field-k" }, "待翻译", -1)),
+              _cache[57] || (_cache[57] = _createElementVNode$2("span", { class: "epl-field-k" }, "待翻译", -1)),
               _createElementVNode$2("span", _hoisted_77$1, _toDisplayString$2(counts.value.pending) + " 个", 1)
             ]),
             _createElementVNode$2("div", _hoisted_78$1, [
-              _cache[57] || (_cache[57] = _createElementVNode$2("span", { class: "epl-field-k" }, "无需操作", -1)),
+              _cache[58] || (_cache[58] = _createElementVNode$2("span", { class: "epl-field-k" }, "无需操作", -1)),
               _createElementVNode$2("span", _hoisted_79$1, _toDisplayString$2(counts.value.no_change) + " 个", 1)
             ]),
             _createVNode$2(_component_v_checkbox, {
@@ -7051,14 +7062,14 @@ return (_ctx, _cache) => {
               color: "primary",
               label: "翻译完成后自动同步 Emby（默认关闭）"
             }, null, 8, ["modelValue"]),
-            _cache[58] || (_cache[58] = _createElementVNode$2("div", { class: "epl-dlg-tip" }, "翻译由后台常驻 worker 自动完成（限流不丢）；不勾则只写池，之后到「人名池 → 批量同步」手动同步。", -1))
+            _cache[59] || (_cache[59] = _createElementVNode$2("div", { class: "epl-dlg-tip" }, "翻译由后台常驻 worker 自动完成（限流不丢）；不勾则只写池，之后到「人名池 → 批量同步」手动同步。", -1))
           ]),
           _createElementVNode$2("div", _hoisted_80$1, [
             _createVNode$2(_component_v_btn, {
               variant: "text",
               onClick: _cache[14] || (_cache[14] = $event => (transDlg.value = false))
             }, {
-              default: _withCtx$2(() => [...(_cache[59] || (_cache[59] = [
+              default: _withCtx$2(() => [...(_cache[60] || (_cache[60] = [
                 _createTextVNode$2("取消", -1)
               ]))]),
               _: 1
@@ -7069,7 +7080,7 @@ return (_ctx, _cache) => {
               loading: busy.value,
               onClick: doTranslate
             }, {
-              default: _withCtx$2(() => [...(_cache[60] || (_cache[60] = [
+              default: _withCtx$2(() => [...(_cache[61] || (_cache[61] = [
                 _createTextVNode$2("开始", -1)
               ]))]),
               _: 1
@@ -7086,20 +7097,20 @@ return (_ctx, _cache) => {
     }, {
       default: _withCtx$2(() => [
         _createElementVNode$2("div", _hoisted_81$1, [
-          _cache[66] || (_cache[66] = _createElementVNode$2("div", { class: "epl-dlg-title" }, "批量同步到 Emby", -1)),
+          _cache[67] || (_cache[67] = _createElementVNode$2("div", { class: "epl-dlg-title" }, "批量同步到 Emby", -1)),
           _createElementVNode$2("div", _hoisted_82$1, [
             _createElementVNode$2("div", _hoisted_83$1, [
-              _cache[62] || (_cache[62] = _createElementVNode$2("span", { class: "epl-field-k" }, "待同步", -1)),
-              _createElementVNode$2("span", _hoisted_84, _toDisplayString$2(counts.value.translated) + " 个", 1)
+              _cache[63] || (_cache[63] = _createElementVNode$2("span", { class: "epl-field-k" }, "待同步", -1)),
+              _createElementVNode$2("span", _hoisted_84$1, _toDisplayString$2(counts.value.translated) + " 个", 1)
             ]),
-            _cache[63] || (_cache[63] = _createElementVNode$2("div", { class: "epl-dlg-warn" }, "⚠️ Emby 里改名会全局生效（该 Person 在所有作品中的显示名都会变）。", -1))
+            _cache[64] || (_cache[64] = _createElementVNode$2("div", { class: "epl-dlg-warn" }, "⚠️ Emby 里改名会全局生效（该 Person 在所有作品中的显示名都会变）。", -1))
           ]),
           _createElementVNode$2("div", _hoisted_85, [
             _createVNode$2(_component_v_btn, {
               variant: "text",
               onClick: _cache[16] || (_cache[16] = $event => (syncDlg.value = false))
             }, {
-              default: _withCtx$2(() => [...(_cache[64] || (_cache[64] = [
+              default: _withCtx$2(() => [...(_cache[65] || (_cache[65] = [
                 _createTextVNode$2("取消", -1)
               ]))]),
               _: 1
@@ -7110,7 +7121,7 @@ return (_ctx, _cache) => {
               loading: busy.value,
               onClick: doSync
             }, {
-              default: _withCtx$2(() => [...(_cache[65] || (_cache[65] = [
+              default: _withCtx$2(() => [...(_cache[66] || (_cache[66] = [
                 _createTextVNode$2("开始", -1)
               ]))]),
               _: 1
@@ -7138,7 +7149,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const PeoplePool = /*#__PURE__*/_export_sfc(_sfc_main$2, [['__scopeId',"data-v-a3db2143"]]);
+const PeoplePool = /*#__PURE__*/_export_sfc(_sfc_main$2, [['__scopeId',"data-v-872f46e1"]]);
 
 const {createTextVNode:_createTextVNode$1,resolveComponent:_resolveComponent$1,withCtx:_withCtx$1,createVNode:_createVNode$1,createElementVNode:_createElementVNode$1,openBlock:_openBlock$1,createElementBlock:_createElementBlock$1,createCommentVNode:_createCommentVNode$1,renderList:_renderList$1,Fragment:_Fragment$1,toDisplayString:_toDisplayString$1,createBlock:_createBlock$1,normalizeClass:_normalizeClass,mergeProps:_mergeProps} = await importShared('vue');
 
@@ -7184,25 +7195,25 @@ const _hoisted_32 = { class: "epl-switch-row" };
 const _hoisted_33 = { class: "epl-switch-row" };
 const _hoisted_34 = { class: "epl-switch-row" };
 const _hoisted_35 = { class: "epl-switch-row" };
-const _hoisted_36 = {
+const _hoisted_36 = { class: "epl-switch-row" };
+const _hoisted_37 = {
   key: 3,
   class: "epl-switch-row"
 };
-const _hoisted_37 = { class: "epl-switch-row" };
-const _hoisted_38 = { class: "flex-grow-1" };
-const _hoisted_39 = { class: "epl-switch-title" };
-const _hoisted_40 = {
+const _hoisted_38 = { class: "epl-switch-row" };
+const _hoisted_39 = { class: "flex-grow-1" };
+const _hoisted_40 = { class: "epl-switch-title" };
+const _hoisted_41 = {
   key: 4,
   class: "epl-switch-row"
 };
-const _hoisted_41 = { class: "d-flex flex-wrap ga-3 mt-1 mb-1" };
-const _hoisted_42 = { class: "epl-switch-row mt-1" };
-const _hoisted_43 = { class: "epl-switch-row" };
+const _hoisted_42 = { class: "d-flex flex-wrap ga-3 mt-1 mb-1" };
+const _hoisted_43 = { class: "epl-switch-row mt-1" };
 const _hoisted_44 = { class: "epl-switch-row" };
 const _hoisted_45 = { class: "epl-switch-row" };
-const _hoisted_46 = { class: "flex-grow-1" };
-const _hoisted_47 = { class: "epl-switch-title" };
-const _hoisted_48 = { class: "epl-switch-row" };
+const _hoisted_46 = { class: "epl-switch-row" };
+const _hoisted_47 = { class: "flex-grow-1" };
+const _hoisted_48 = { class: "epl-switch-title" };
 const _hoisted_49 = { class: "epl-switch-row" };
 const _hoisted_50 = { class: "epl-switch-row" };
 const _hoisted_51 = { class: "epl-switch-row" };
@@ -7210,38 +7221,39 @@ const _hoisted_52 = { class: "epl-switch-row" };
 const _hoisted_53 = { class: "epl-switch-row" };
 const _hoisted_54 = { class: "epl-switch-row" };
 const _hoisted_55 = { class: "epl-switch-row" };
-const _hoisted_56 = { class: "flex-grow-1" };
-const _hoisted_57 = { class: "epl-switch-title" };
-const _hoisted_58 = { class: "epl-switch-row" };
-const _hoisted_59 = ["title"];
-const _hoisted_60 = { class: "d-flex ga-2" };
-const _hoisted_61 = { class: "epl-switch-row" };
+const _hoisted_56 = { class: "epl-switch-row" };
+const _hoisted_57 = { class: "flex-grow-1" };
+const _hoisted_58 = { class: "epl-switch-title" };
+const _hoisted_59 = { class: "epl-switch-row" };
+const _hoisted_60 = ["title"];
+const _hoisted_61 = { class: "d-flex ga-2" };
 const _hoisted_62 = { class: "epl-switch-row" };
-const _hoisted_63 = {
+const _hoisted_63 = { class: "epl-switch-row" };
+const _hoisted_64 = {
   key: 1,
   class: "text-body-2",
   style: {"opacity":"0.75"}
 };
-const _hoisted_64 = { class: "epl-switch-row" };
-const _hoisted_65 = { class: "flex-grow-1" };
-const _hoisted_66 = { class: "epl-switch-title" };
-const _hoisted_67 = { class: "epl-switch-row" };
+const _hoisted_65 = { class: "epl-switch-row" };
+const _hoisted_66 = { class: "flex-grow-1" };
+const _hoisted_67 = { class: "epl-switch-title" };
 const _hoisted_68 = { class: "epl-switch-row" };
 const _hoisted_69 = { class: "epl-switch-row" };
-const _hoisted_70 = { class: "flex-grow-1" };
-const _hoisted_71 = { class: "epl-switch-title" };
-const _hoisted_72 = { class: "d-flex ga-2 flex-wrap mt-2" };
-const _hoisted_73 = { class: "d-flex align-center mb-1" };
-const _hoisted_74 = { class: "epl-switch-row" };
+const _hoisted_70 = { class: "epl-switch-row" };
+const _hoisted_71 = { class: "flex-grow-1" };
+const _hoisted_72 = { class: "epl-switch-title" };
+const _hoisted_73 = { class: "d-flex ga-2 flex-wrap mt-2" };
+const _hoisted_74 = { class: "d-flex align-center mb-1" };
 const _hoisted_75 = { class: "epl-switch-row" };
 const _hoisted_76 = { class: "epl-switch-row" };
-const _hoisted_77 = { class: "d-flex justify-end mt-2" };
-const _hoisted_78 = { class: "d-flex ga-1 mb-2 flex-wrap align-center" };
-const _hoisted_79 = { class: "epl-browse-list" };
-const _hoisted_80 = ["onClick"];
-const _hoisted_81 = { class: "epl-browse-name" };
-const _hoisted_82 = { class: "epl-browse-size" };
-const _hoisted_83 = {
+const _hoisted_77 = { class: "epl-switch-row" };
+const _hoisted_78 = { class: "d-flex justify-end mt-2" };
+const _hoisted_79 = { class: "d-flex ga-1 mb-2 flex-wrap align-center" };
+const _hoisted_80 = { class: "epl-browse-list" };
+const _hoisted_81 = ["onClick"];
+const _hoisted_82 = { class: "epl-browse-name" };
+const _hoisted_83 = { class: "epl-browse-size" };
+const _hoisted_84 = {
   key: 0,
   class: "epl-switch-desc"
 };
@@ -7269,6 +7281,7 @@ const DEFAULT = {
   enable_ai: true,
   lock_cast: false,
   emby_name_sync: true,
+  emby_role_sync: false,
   translate_actor: true,
   translate_director: false,
   translate_writer: false,
@@ -7638,12 +7651,12 @@ return (_ctx, _cache) => {
               start: "",
               color: "primary"
             }, {
-              default: _withCtx$1(() => [...(_cache[61] || (_cache[61] = [
+              default: _withCtx$1(() => [...(_cache[62] || (_cache[62] = [
                 _createTextVNode$1("mdi-file-document-outline", -1)
               ]))]),
               _: 1
             }),
-            _cache[63] || (_cache[63] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
+            _cache[64] || (_cache[64] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
               _createElementVNode$1("div", { class: "font-weight-medium" }, "NFO 本地文件模式"),
               _createElementVNode$1("div", {
                 class: "text-caption",
@@ -7655,7 +7668,7 @@ return (_ctx, _cache) => {
               color: "success",
               variant: "tonal"
             }, {
-              default: _withCtx$1(() => [...(_cache[62] || (_cache[62] = [
+              default: _withCtx$1(() => [...(_cache[63] || (_cache[63] = [
                 _createTextVNode$1("当前", -1)
               ]))]),
               _: 1
@@ -7674,19 +7687,19 @@ return (_ctx, _cache) => {
         _createVNode$1(_component_v_card_title, { class: "text-subtitle-1" }, {
           default: _withCtx$1(() => [
             _createVNode$1(_component_v_icon, { start: "" }, {
-              default: _withCtx$1(() => [...(_cache[64] || (_cache[64] = [
+              default: _withCtx$1(() => [...(_cache[65] || (_cache[65] = [
                 _createTextVNode$1("mdi-cog-outline", -1)
               ]))]),
               _: 1
             }),
-            _cache[65] || (_cache[65] = _createTextVNode$1("基础设置", -1))
+            _cache[66] || (_cache[66] = _createTextVNode$1("基础设置", -1))
           ]),
           _: 1
         }),
         _createVNode$1(_component_v_card_text, null, {
           default: _withCtx$1(() => [
             _createElementVNode$1("div", _hoisted_2$1, [
-              _cache[66] || (_cache[66] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
+              _cache[67] || (_cache[67] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
                 _createElementVNode$1("div", { class: "epl-switch-title" }, "启用插件"),
                 _createElementVNode$1("div", { class: "epl-switch-desc" }, "开启后扫描/入库时自动翻译演职人员")
               ], -1)),
@@ -7698,7 +7711,7 @@ return (_ctx, _cache) => {
               }, null, 8, ["modelValue"])
             ]),
             _createElementVNode$1("div", _hoisted_3$1, [
-              _cache[67] || (_cache[67] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
+              _cache[68] || (_cache[68] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
                 _createElementVNode$1("div", { class: "epl-switch-title" }, "AI 翻译（LLM）"),
                 _createElementVNode$1("div", { class: "epl-switch-desc" }, "关闭后仅禁用 LLM 翻译：人名池命中 / 繁转简 / 人工修正照常生效，新词条照常采集入库（保留原文）")
               ], -1)),
@@ -7710,7 +7723,7 @@ return (_ctx, _cache) => {
               }, null, 8, ["modelValue"])
             ]),
             _createElementVNode$1("div", _hoisted_4$1, [
-              _cache[68] || (_cache[68] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
+              _cache[69] || (_cache[69] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
                 _createElementVNode$1("div", { class: "epl-switch-title" }, "完成时发送通知"),
                 _createElementVNode$1("div", { class: "epl-switch-desc" }, [
                   _createTextVNode$1("以下任务完成时推送通知（含统计与失败提示）：NFO 扫描 / 全部写回 / "),
@@ -7726,7 +7739,7 @@ return (_ctx, _cache) => {
               }, null, 8, ["modelValue"])
             ]),
             _createElementVNode$1("div", _hoisted_5$1, [
-              _cache[69] || (_cache[69] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
+              _cache[70] || (_cache[70] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
                 _createElementVNode$1("div", { class: "epl-switch-title" }, "Webhook 入库后自动翻译"),
                 _createElementVNode$1("div", { class: "epl-switch-desc" }, [
                   _createTextVNode$1("本开关只负责"),
@@ -7745,7 +7758,7 @@ return (_ctx, _cache) => {
               }, null, 8, ["modelValue", "disabled"])
             ]),
             _createElementVNode$1("div", _hoisted_6$1, [
-              _cache[70] || (_cache[70] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
+              _cache[71] || (_cache[71] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
                 _createElementVNode$1("div", { class: "epl-switch-title" }, "扫描 / 探测库入库后自动翻译"),
                 _createElementVNode$1("div", { class: "epl-switch-desc" }, [
                   _createTextVNode$1("本开关只负责"),
@@ -7779,19 +7792,19 @@ return (_ctx, _cache) => {
             _createVNode$1(_component_v_card_title, { class: "text-subtitle-1" }, {
               default: _withCtx$1(() => [
                 _createVNode$1(_component_v_icon, { start: "" }, {
-                  default: _withCtx$1(() => [...(_cache[71] || (_cache[71] = [
+                  default: _withCtx$1(() => [...(_cache[72] || (_cache[72] = [
                     _createTextVNode$1("mdi-file-document-outline", -1)
                   ]))]),
                   _: 1
                 }),
-                _cache[72] || (_cache[72] = _createTextVNode$1("NFO / 扫描", -1))
+                _cache[73] || (_cache[73] = _createTextVNode$1("NFO / 扫描", -1))
               ]),
               _: 1
             }),
             _createVNode$1(_component_v_card_text, null, {
               default: _withCtx$1(() => [
                 _createElementVNode$1("div", _hoisted_7$1, [
-                  _cache[77] || (_cache[77] = _createElementVNode$1("div", { class: "epl-section-title" }, "媒体库扫描范围", -1)),
+                  _cache[78] || (_cache[78] = _createElementVNode$1("div", { class: "epl-section-title" }, "媒体库扫描范围", -1)),
                   _createVNode$1(_component_v_spacer),
                   _createVNode$1(_component_v_btn, {
                     size: "x-small",
@@ -7804,12 +7817,12 @@ return (_ctx, _cache) => {
                         start: "",
                         size: "14"
                       }, {
-                        default: _withCtx$1(() => [...(_cache[73] || (_cache[73] = [
+                        default: _withCtx$1(() => [...(_cache[74] || (_cache[74] = [
                           _createTextVNode$1("mdi-refresh", -1)
                         ]))]),
                         _: 1
                       }),
-                      _cache[74] || (_cache[74] = _createTextVNode$1("刷新 ", -1))
+                      _cache[75] || (_cache[75] = _createTextVNode$1("刷新 ", -1))
                     ]),
                     _: 1
                   }, 8, ["loading"]),
@@ -7825,17 +7838,17 @@ return (_ctx, _cache) => {
                         start: "",
                         size: "14"
                       }, {
-                        default: _withCtx$1(() => [...(_cache[75] || (_cache[75] = [
+                        default: _withCtx$1(() => [...(_cache[76] || (_cache[76] = [
                           _createTextVNode$1("mdi-check-network-outline", -1)
                         ]))]),
                         _: 1
                       }),
-                      _cache[76] || (_cache[76] = _createTextVNode$1("测试全部路径 ", -1))
+                      _cache[77] || (_cache[77] = _createTextVNode$1("测试全部路径 ", -1))
                     ]),
                     _: 1
                   }, 8, ["loading"])
                 ]),
-                _cache[106] || (_cache[106] = _createElementVNode$1("div", {
+                _cache[108] || (_cache[108] = _createElementVNode$1("div", {
                   class: "epl-switch-desc mb-2",
                   style: {"opacity":".7"}
                 }, "勾选要处理的媒体库；其映射后的本地目录自动作为扫描根目录（可多选，跨服务器独立配置映射）。点击下方 Emby / MP 路径可直接浏览该目录", -1)),
@@ -7849,7 +7862,7 @@ return (_ctx, _cache) => {
                   }, [
                     _createElementVNode$1("div", _hoisted_9$1, [
                       _createVNode$1(_component_v_icon, { size: "16" }, {
-                        default: _withCtx$1(() => [...(_cache[78] || (_cache[78] = [
+                        default: _withCtx$1(() => [...(_cache[79] || (_cache[79] = [
                           _createTextVNode$1("mdi-server-network", -1)
                         ]))]),
                         _: 1
@@ -7874,7 +7887,7 @@ return (_ctx, _cache) => {
                             variant: "tonal",
                             class: "ml-2"
                           }, {
-                            default: _withCtx$1(() => [...(_cache[79] || (_cache[79] = [
+                            default: _withCtx$1(() => [...(_cache[80] || (_cache[80] = [
                               _createTextVNode$1("未配置 mapping（用 Emby 原路径）", -1)
                             ]))]),
                             _: 1
@@ -7890,12 +7903,12 @@ return (_ctx, _cache) => {
                             start: "",
                             size: "14"
                           }, {
-                            default: _withCtx$1(() => [...(_cache[80] || (_cache[80] = [
+                            default: _withCtx$1(() => [...(_cache[81] || (_cache[81] = [
                               _createTextVNode$1("mdi-folder-search-outline", -1)
                             ]))]),
                             _: 1
                           }),
-                          _cache[81] || (_cache[81] = _createTextVNode$1("浏览 ", -1))
+                          _cache[82] || (_cache[82] = _createTextVNode$1("浏览 ", -1))
                         ]),
                         _: 1
                       }, 8, ["onClick"])
@@ -7935,7 +7948,7 @@ return (_ctx, _cache) => {
                                   class: "epl-lib-path",
                                   title: l.emby_path || ''
                                 }, [
-                                  _cache[82] || (_cache[82] = _createTextVNode$1(" Emby ", -1)),
+                                  _cache[83] || (_cache[83] = _createTextVNode$1(" Emby ", -1)),
                                   _createElementVNode$1("code", {
                                     class: _normalizeClass(["epl-path-link", { 'epl-path-off': !l.emby_path }]),
                                     title: l.emby_path ? '点击浏览该路径' : 'Emby 未上报 Path',
@@ -7946,7 +7959,7 @@ return (_ctx, _cache) => {
                                   class: "epl-lib-path",
                                   title: l.path || ''
                                 }, [
-                                  _cache[83] || (_cache[83] = _createTextVNode$1(" MP   ", -1)),
+                                  _cache[84] || (_cache[84] = _createTextVNode$1(" MP   ", -1)),
                                   _createElementVNode$1("code", {
                                     class: _normalizeClass(["epl-path-link", { 'epl-path-off': !l.path }]),
                                     title: l.path ? '点击浏览该路径' : '该媒体库未解析到本机路径（检查路径映射）',
@@ -7959,7 +7972,7 @@ return (_ctx, _cache) => {
                                     variant: "text",
                                     onClick: $event => (testLib(l.server_id || g.server_id, l.lib_id))
                                   }, {
-                                    default: _withCtx$1(() => [...(_cache[84] || (_cache[84] = [
+                                    default: _withCtx$1(() => [...(_cache[85] || (_cache[85] = [
                                       _createTextVNode$1("测试", -1)
                                     ]))]),
                                     _: 1
@@ -7969,7 +7982,7 @@ return (_ctx, _cache) => {
                                     variant: "text",
                                     onClick: $event => (browseLib(g, l))
                                   }, {
-                                    default: _withCtx$1(() => [...(_cache[85] || (_cache[85] = [
+                                    default: _withCtx$1(() => [...(_cache[86] || (_cache[86] = [
                                       _createTextVNode$1("浏览", -1)
                                     ]))]),
                                     _: 1
@@ -8008,8 +8021,8 @@ return (_ctx, _cache) => {
                       _: 1
                     }))
                   : _createCommentVNode$1("", true),
-                _cache[107] || (_cache[107] = _createElementVNode$1("div", { class: "epl-section-title mt-2 mb-1" }, "路径映射（Emby Path → 本机 MP 路径）", -1)),
-                _cache[108] || (_cache[108] = _createElementVNode$1("div", {
+                _cache[109] || (_cache[109] = _createElementVNode$1("div", { class: "epl-section-title mt-2 mb-1" }, "路径映射（Emby Path → 本机 MP 路径）", -1)),
+                _cache[110] || (_cache[110] = _createElementVNode$1("div", {
                   class: "epl-switch-desc mb-2",
                   style: {"opacity":".7"}
                 }, "每台服务器各一行（MP 读到几台就显示几行）；未配置的服务器直接使用 Emby 原路径", -1)),
@@ -8046,7 +8059,7 @@ return (_ctx, _cache) => {
                     }, {
                       default: _withCtx$1(() => [
                         _createVNode$1(_component_v_icon, { size: "16" }, {
-                          default: _withCtx$1(() => [...(_cache[86] || (_cache[86] = [
+                          default: _withCtx$1(() => [...(_cache[87] || (_cache[87] = [
                             _createTextVNode$1("mdi-close", -1)
                           ]))]),
                           _: 1
@@ -8057,7 +8070,7 @@ return (_ctx, _cache) => {
                   ]))
                 }), 128)),
                 _createElementVNode$1("div", _hoisted_20, [
-                  _cache[87] || (_cache[87] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
+                  _cache[88] || (_cache[88] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
                     _createElementVNode$1("div", { class: "epl-switch-title" }, "扫描子文件夹"),
                     _createElementVNode$1("div", { class: "epl-switch-desc" }, "递归扫描子目录里的 nfo")
                   ], -1)),
@@ -8069,7 +8082,7 @@ return (_ctx, _cache) => {
                   }, null, 8, ["modelValue"])
                 ]),
                 _createElementVNode$1("div", _hoisted_21, [
-                  _cache[88] || (_cache[88] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
+                  _cache[89] || (_cache[89] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
                     _createElementVNode$1("div", { class: "epl-switch-title" }, "处理单集"),
                     _createElementVNode$1("div", { class: "epl-switch-desc" }, "开：逐集收集演员并入库（翻译范围开着就翻、可写回）；关：只翻节目的主演（剧集/电影本身）—— 各集原文仍会入库供「库」页查看/编辑，只是不参与翻译")
                   ], -1)),
@@ -8082,7 +8095,7 @@ return (_ctx, _cache) => {
                 ]),
                 _createElementVNode$1("div", _hoisted_22, [
                   _createElementVNode$1("div", _hoisted_23, [
-                    _cache[89] || (_cache[89] = _createElementVNode$1("div", { class: "epl-switch-title" }, "集 / 剧演员同步方向", -1)),
+                    _cache[90] || (_cache[90] = _createElementVNode$1("div", { class: "epl-switch-title" }, "集 / 剧演员同步方向", -1)),
                     _createElementVNode$1("div", _hoisted_24, _toDisplayString$1(syncDirDesc()), 1)
                   ]),
                   _createVNode$1(_component_v_select, {
@@ -8100,7 +8113,7 @@ return (_ctx, _cache) => {
                 (config.value.sync_direction === 's2e')
                   ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_25, [
                       _createElementVNode$1("div", _hoisted_26, [
-                        _cache[90] || (_cache[90] = _createElementVNode$1("div", { class: "epl-switch-title" }, "整份覆盖各集名单（剧→集）", -1)),
+                        _cache[91] || (_cache[91] = _createElementVNode$1("div", { class: "epl-switch-title" }, "整份覆盖各集名单（剧→集）", -1)),
                         _createElementVNode$1("div", _hoisted_27, _toDisplayString$1(seriesSyncDesc()), 1)
                       ]),
                       _createVNode$1(_component_v_switch, {
@@ -8112,7 +8125,7 @@ return (_ctx, _cache) => {
                     ]))
                   : _createCommentVNode$1("", true),
                 _createElementVNode$1("div", _hoisted_28, [
-                  _cache[91] || (_cache[91] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
+                  _cache[92] || (_cache[92] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
                     _createElementVNode$1("div", { class: "epl-switch-title" }, "预览模式（不落盘）"),
                     _createElementVNode$1("div", { class: "epl-switch-desc" }, "开：翻译照常自动进行，但不自动写回 nfo（只写库），确认后到「库」页点「全部写回」统一落盘；关：按本卡片下方的「翻译完自动写回」开关决定是否自动落盘")
                   ], -1)),
@@ -8126,7 +8139,7 @@ return (_ctx, _cache) => {
                 _createElementVNode$1("div", _hoisted_29, [
                   _createElementVNode$1("div", _hoisted_30, [
                     _createElementVNode$1("div", _hoisted_31, [
-                      _cache[94] || (_cache[94] = _createTextVNode$1("翻译完自动写回 nfo ", -1)),
+                      _cache[95] || (_cache[95] = _createTextVNode$1("翻译完自动写回 nfo ", -1)),
                       _createVNode$1(_component_v_tooltip, {
                         location: "top",
                         "max-width": "460"
@@ -8137,19 +8150,19 @@ return (_ctx, _cache) => {
                             class: "ml-1",
                             style: {"opacity":".6"}
                           }, tp), {
-                            default: _withCtx$1(() => [...(_cache[92] || (_cache[92] = [
+                            default: _withCtx$1(() => [...(_cache[93] || (_cache[93] = [
                               _createTextVNode$1("mdi-information-outline", -1)
                             ]))]),
                             _: 1
                           }, 16)
                         ]),
                         default: _withCtx$1(() => [
-                          _cache[93] || (_cache[93] = _createTextVNode$1(" 条目里的词条全部翻完（按类型/角色开关、失败清单、池命中综合判定）→ 自动把该条目的 tvshow + 各集 nfo 一起写回； 写回是幂等的：同一条目单飞、内容已是译文不重复落盘、文件被外部替换会重新写、失败自动退避重试（绝不误标成功）。 关闭后翻译只写库，确认后到「库」页点「全部写回」统一落盘；上方「预览模式」开启时同样不自动落盘。 ", -1))
+                          _cache[94] || (_cache[94] = _createTextVNode$1(" 条目里的词条全部翻完（按类型/角色开关、失败清单、池命中综合判定）→ 自动把该条目的 tvshow + 各集 nfo 一起写回； 写回是幂等的：同一条目单飞、内容已是译文不重复落盘、文件被外部替换会重新写、失败自动退避重试（绝不误标成功）。 关闭后翻译只写库，确认后到「库」页点「全部写回」统一落盘；上方「预览模式」开启时同样不自动落盘。 ", -1))
                         ]),
                         _: 1
                       })
                     ]),
-                    _cache[95] || (_cache[95] = _createElementVNode$1("div", { class: "epl-switch-desc" }, "开：条目翻完 → 自动写回该条目 nfo（幂等，失败重试）；关：只写库，手动「全部写回」落盘", -1))
+                    _cache[96] || (_cache[96] = _createElementVNode$1("div", { class: "epl-switch-desc" }, "开：条目翻完 → 自动写回该条目 nfo（幂等，失败重试）；关：只写库，手动「全部写回」落盘", -1))
                   ]),
                   _createVNode$1(_component_v_switch, {
                     modelValue: config.value.auto_writeback,
@@ -8160,7 +8173,7 @@ return (_ctx, _cache) => {
                   }, null, 8, ["modelValue", "disabled"])
                 ]),
                 _createElementVNode$1("div", _hoisted_32, [
-                  _cache[96] || (_cache[96] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
+                  _cache[97] || (_cache[97] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
                     _createElementVNode$1("div", { class: "epl-switch-title" }, "翻译后锁定 Cast"),
                     _createElementVNode$1("div", { class: "epl-switch-desc" }, "写回 nfo 时写入 <lockedfields>Cast</lockedfields> 只锁定演员字段，Emby 重新刮削/刷新时不会覆盖中文名单，剧情/简介/海报等照常更新（新番简介过几天出中文也不受影响）")
                   ], -1)),
@@ -8172,25 +8185,37 @@ return (_ctx, _cache) => {
                   }, null, 8, ["modelValue"])
                 ]),
                 _createElementVNode$1("div", _hoisted_33, [
-                  _cache[97] || (_cache[97] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
-                    _createElementVNode$1("div", { class: "epl-switch-title" }, "写回前 .bak 备份"),
-                    _createElementVNode$1("div", { class: "epl-switch-desc" }, "每次写回 nfo 前自动保留一份 .bak 备份（媒体库里看到的 tvshow.nfo.bak / movie.nfo.bak 就是它）；关闭后不再生成，已生成的 .bak 可手动删除")
+                  _cache[98] || (_cache[98] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
+                    _createElementVNode$1("div", { class: "epl-switch-title" }, "角色译文同步到 Emby 条目"),
+                    _createElementVNode$1("div", { class: "epl-switch-desc" }, "把「第二排角色名」的中文译文写入 Emby 条目级 People[].Role（与第一排同名层级）。只写 nfo 时，Emby 刷新元数据会用它条目级缓存的英文角色名把 nfo 覆盖回去——开启本项后 Emby 自己写 nfo 带的即是中文，不再依赖 Cast 锁能否挡住覆盖。写回后自动执行：每条目 1 次读取，命中才整份回写（只改 Role、不动 Name）；默认关，建议开启")
                   ], -1)),
                   _createVNode$1(_component_v_switch, {
-                    modelValue: config.value.nfo_backup,
-                    "onUpdate:modelValue": _cache[12] || (_cache[12] = $event => ((config.value.nfo_backup) = $event)),
+                    modelValue: config.value.emby_role_sync,
+                    "onUpdate:modelValue": _cache[12] || (_cache[12] = $event => ((config.value.emby_role_sync) = $event)),
                     color: "primary",
                     "hide-details": ""
                   }, null, 8, ["modelValue"])
                 ]),
                 _createElementVNode$1("div", _hoisted_34, [
-                  _cache[98] || (_cache[98] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
+                  _cache[99] || (_cache[99] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
+                    _createElementVNode$1("div", { class: "epl-switch-title" }, "写回前 .bak 备份"),
+                    _createElementVNode$1("div", { class: "epl-switch-desc" }, "每次写回 nfo 前自动保留一份 .bak 备份（媒体库里看到的 tvshow.nfo.bak / movie.nfo.bak 就是它）；关闭后不再生成，已生成的 .bak 可手动删除")
+                  ], -1)),
+                  _createVNode$1(_component_v_switch, {
+                    modelValue: config.value.nfo_backup,
+                    "onUpdate:modelValue": _cache[13] || (_cache[13] = $event => ((config.value.nfo_backup) = $event)),
+                    color: "primary",
+                    "hide-details": ""
+                  }, null, 8, ["modelValue"])
+                ]),
+                _createElementVNode$1("div", _hoisted_35, [
+                  _cache[100] || (_cache[100] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
                     _createElementVNode$1("div", { class: "epl-switch-title" }, "失效宽限期（小时）"),
                     _createElementVNode$1("div", { class: "epl-switch-desc" }, "检测到 nfo 目录消失后先观察这段时间：期内同 ID 新版本入库自动恢复（洗版无缝、不重问 AI），超期仍未恢复才判定为真删除并清理")
                   ], -1)),
                   _createVNode$1(_component_v_text_field, {
                     modelValue: config.value.nfo_dead_grace_hours,
-                    "onUpdate:modelValue": _cache[13] || (_cache[13] = $event => ((config.value.nfo_dead_grace_hours) = $event)),
+                    "onUpdate:modelValue": _cache[14] || (_cache[14] = $event => ((config.value.nfo_dead_grace_hours) = $event)),
                     modelModifiers: { number: true },
                     type: "number",
                     min: "1",
@@ -8202,27 +8227,27 @@ return (_ctx, _cache) => {
                     suffix: "小时"
                   }, null, 8, ["modelValue"])
                 ]),
-                _createElementVNode$1("div", _hoisted_35, [
-                  _cache[99] || (_cache[99] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
+                _createElementVNode$1("div", _hoisted_36, [
+                  _cache[101] || (_cache[101] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
                     _createElementVNode$1("div", { class: "epl-switch-title" }, "定时全量扫库"),
                     _createElementVNode$1("div", { class: "epl-switch-desc" }, "按设定间隔自动全量扫描已选媒体库（断点续扫增量），兜底插件关闭 / 漏接 Webhook 期间的漏入库条目；后台有任务时自动跳过本轮")
                   ], -1)),
                   _createVNode$1(_component_v_switch, {
                     modelValue: config.value.schedule_enabled,
-                    "onUpdate:modelValue": _cache[14] || (_cache[14] = $event => ((config.value.schedule_enabled) = $event)),
+                    "onUpdate:modelValue": _cache[15] || (_cache[15] = $event => ((config.value.schedule_enabled) = $event)),
                     color: "primary",
                     "hide-details": ""
                   }, null, 8, ["modelValue"])
                 ]),
                 (config.value.schedule_enabled)
-                  ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_36, [
-                      _cache[100] || (_cache[100] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
+                  ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_37, [
+                      _cache[102] || (_cache[102] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
                         _createElementVNode$1("div", { class: "epl-switch-title" }, "扫库间隔（小时）"),
                         _createElementVNode$1("div", { class: "epl-switch-desc" }, "默认 24 小时，最小值 1")
                       ], -1)),
                       _createVNode$1(_component_v_text_field, {
                         modelValue: config.value.schedule_interval_hours,
-                        "onUpdate:modelValue": _cache[15] || (_cache[15] = $event => ((config.value.schedule_interval_hours) = $event)),
+                        "onUpdate:modelValue": _cache[16] || (_cache[16] = $event => ((config.value.schedule_interval_hours) = $event)),
                         modelModifiers: { number: true },
                         type: "number",
                         min: "1",
@@ -8235,10 +8260,10 @@ return (_ctx, _cache) => {
                       }, null, 8, ["modelValue"])
                     ]))
                   : _createCommentVNode$1("", true),
-                _createElementVNode$1("div", _hoisted_37, [
-                  _createElementVNode$1("div", _hoisted_38, [
-                    _createElementVNode$1("div", _hoisted_39, [
-                      _cache[103] || (_cache[103] = _createTextVNode$1("探测库 ", -1)),
+                _createElementVNode$1("div", _hoisted_38, [
+                  _createElementVNode$1("div", _hoisted_39, [
+                    _createElementVNode$1("div", _hoisted_40, [
+                      _cache[105] || (_cache[105] = _createTextVNode$1("探测库 ", -1)),
                       _createVNode$1(_component_v_tooltip, {
                         location: "top",
                         "max-width": "460"
@@ -8249,36 +8274,36 @@ return (_ctx, _cache) => {
                             class: "ml-1",
                             style: {"opacity":".6"}
                           }, tp), {
-                            default: _withCtx$1(() => [...(_cache[101] || (_cache[101] = [
+                            default: _withCtx$1(() => [...(_cache[103] || (_cache[103] = [
                               _createTextVNode$1("mdi-information-outline", -1)
                             ]))]),
                             _: 1
                           }, 16)
                         ]),
                         default: _withCtx$1(() => [
-                          _cache[102] || (_cache[102] = _createTextVNode$1(" 定时把 Emby 的清单与插件库对一遍，双向都能发现差异：①正向 —— Emby 有、插件库没有的集/整部新条目 → 自动补翻（关插件期间漏的入库都靠它）；②反向 —— 插件库有、Emby 已没有的集（服务器删了但可能漏接删除事件）→ 自动标记「待恢复」观察期，期间重新入库会自动恢复、到期未回来则清理。每轮先做只读对差（计数没变就直接结束），发现缺口才动。本地文件级兜底（Emby 没刮到、nfo 被改过、写失败重试）靠上面的「定时全量扫库」。「NFO 扫描」只管本地文件、不查 Emby 清单，三者互补。手动跑一轮去仪表盘「运行操作」点「探测库」。 ", -1))
+                          _cache[104] || (_cache[104] = _createTextVNode$1(" 定时把 Emby 的清单与插件库对一遍，双向都能发现差异：①正向 —— Emby 有、插件库没有的集/整部新条目 → 自动补翻（关插件期间漏的入库都靠它）；②反向 —— 插件库有、Emby 已没有的集（服务器删了但可能漏接删除事件）→ 自动标记「待恢复」观察期，期间重新入库会自动恢复、到期未回来则清理。每轮先做只读对差（计数没变就直接结束），发现缺口才动。本地文件级兜底（Emby 没刮到、nfo 被改过、写失败重试）靠上面的「定时全量扫库」。「NFO 扫描」只管本地文件、不查 Emby 清单，三者互补。手动跑一轮去仪表盘「运行操作」点「探测库」。 ", -1))
                         ]),
                         _: 1
                       })
                     ]),
-                    _cache[104] || (_cache[104] = _createElementVNode$1("div", { class: "epl-switch-desc" }, "定时双向对账：Emby 缺的补翻、Emby 已删的标「待恢复」", -1))
+                    _cache[106] || (_cache[106] = _createElementVNode$1("div", { class: "epl-switch-desc" }, "定时双向对账：Emby 缺的补翻、Emby 已删的标「待恢复」", -1))
                   ]),
                   _createVNode$1(_component_v_switch, {
                     modelValue: config.value.probe_enabled,
-                    "onUpdate:modelValue": _cache[16] || (_cache[16] = $event => ((config.value.probe_enabled) = $event)),
+                    "onUpdate:modelValue": _cache[17] || (_cache[17] = $event => ((config.value.probe_enabled) = $event)),
                     color: "primary",
                     "hide-details": ""
                   }, null, 8, ["modelValue"])
                 ]),
                 (config.value.probe_enabled)
-                  ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_40, [
-                      _cache[105] || (_cache[105] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
+                  ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_41, [
+                      _cache[107] || (_cache[107] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
                         _createElementVNode$1("div", { class: "epl-switch-title" }, "探测间隔（分钟）"),
                         _createElementVNode$1("div", { class: "epl-switch-desc" }, "默认 60，最小 10；每轮先做只读对差（计数没变就直接结束），发现差异才处理 —— 补翻每轮上限 200 个文件、反向标记每轮上限 50 集")
                       ], -1)),
                       _createVNode$1(_component_v_text_field, {
                         modelValue: config.value.probe_interval_minutes,
-                        "onUpdate:modelValue": _cache[17] || (_cache[17] = $event => ((config.value.probe_interval_minutes) = $event)),
+                        "onUpdate:modelValue": _cache[18] || (_cache[18] = $event => ((config.value.probe_interval_minutes) = $event)),
                         modelModifiers: { number: true },
                         type: "number",
                         min: "10",
@@ -8306,18 +8331,18 @@ return (_ctx, _cache) => {
         _createVNode$1(_component_v_card_title, { class: "text-subtitle-1" }, {
           default: _withCtx$1(() => [
             _createVNode$1(_component_v_icon, { start: "" }, {
-              default: _withCtx$1(() => [...(_cache[109] || (_cache[109] = [
+              default: _withCtx$1(() => [...(_cache[111] || (_cache[111] = [
                 _createTextVNode$1("mdi-account-search", -1)
               ]))]),
               _: 1
             }),
-            _cache[111] || (_cache[111] = _createTextVNode$1("人名池 ", -1)),
+            _cache[113] || (_cache[113] = _createTextVNode$1("人名池 ", -1)),
             _createVNode$1(_component_v_chip, {
               size: "x-small",
               class: "ml-2",
               variant: "tonal"
             }, {
-              default: _withCtx$1(() => [...(_cache[110] || (_cache[110] = [
+              default: _withCtx$1(() => [...(_cache[112] || (_cache[112] = [
                 _createTextVNode$1("拉取类型为独立设置（不跟随「翻译范围」）；池里已有人名时改设置后可在「人名池」页点「按当前设置重筛池」", -1)
               ]))]),
               _: 1
@@ -8327,7 +8352,7 @@ return (_ctx, _cache) => {
         }),
         _createVNode$1(_component_v_card_text, null, {
           default: _withCtx$1(() => [
-            _cache[120] || (_cache[120] = _createElementVNode$1("div", { class: "epl-switch-row" }, [
+            _cache[122] || (_cache[122] = _createElementVNode$1("div", { class: "epl-switch-row" }, [
               _createElementVNode$1("div", { class: "flex-grow-1" }, [
                 _createElementVNode$1("div", { class: "epl-switch-title" }, "拉取类型（独立）"),
                 _createElementVNode$1("div", { class: "epl-switch-desc" }, [
@@ -8337,10 +8362,10 @@ return (_ctx, _cache) => {
                 ])
               ])
             ], -1)),
-            _createElementVNode$1("div", _hoisted_41, [
+            _createElementVNode$1("div", _hoisted_42, [
               _createVNode$1(_component_v_checkbox_btn, {
                 modelValue: config.value.pool_fetch_types,
-                "onUpdate:modelValue": _cache[18] || (_cache[18] = $event => ((config.value.pool_fetch_types) = $event)),
+                "onUpdate:modelValue": _cache[19] || (_cache[19] = $event => ((config.value.pool_fetch_types) = $event)),
                 value: "Actor",
                 label: "演员（含声优）",
                 density: "compact",
@@ -8348,7 +8373,7 @@ return (_ctx, _cache) => {
               }, null, 8, ["modelValue"]),
               _createVNode$1(_component_v_checkbox_btn, {
                 modelValue: config.value.pool_fetch_types,
-                "onUpdate:modelValue": _cache[19] || (_cache[19] = $event => ((config.value.pool_fetch_types) = $event)),
+                "onUpdate:modelValue": _cache[20] || (_cache[20] = $event => ((config.value.pool_fetch_types) = $event)),
                 value: "GuestStar",
                 label: "客串",
                 density: "compact",
@@ -8356,7 +8381,7 @@ return (_ctx, _cache) => {
               }, null, 8, ["modelValue"]),
               _createVNode$1(_component_v_checkbox_btn, {
                 modelValue: config.value.pool_fetch_types,
-                "onUpdate:modelValue": _cache[20] || (_cache[20] = $event => ((config.value.pool_fetch_types) = $event)),
+                "onUpdate:modelValue": _cache[21] || (_cache[21] = $event => ((config.value.pool_fetch_types) = $event)),
                 value: "Director",
                 label: "导演",
                 density: "compact",
@@ -8364,7 +8389,7 @@ return (_ctx, _cache) => {
               }, null, 8, ["modelValue"]),
               _createVNode$1(_component_v_checkbox_btn, {
                 modelValue: config.value.pool_fetch_types,
-                "onUpdate:modelValue": _cache[21] || (_cache[21] = $event => ((config.value.pool_fetch_types) = $event)),
+                "onUpdate:modelValue": _cache[22] || (_cache[22] = $event => ((config.value.pool_fetch_types) = $event)),
                 value: "Writer",
                 label: "编剧",
                 density: "compact",
@@ -8372,14 +8397,14 @@ return (_ctx, _cache) => {
               }, null, 8, ["modelValue"]),
               _createVNode$1(_component_v_checkbox_btn, {
                 modelValue: config.value.pool_fetch_types,
-                "onUpdate:modelValue": _cache[22] || (_cache[22] = $event => ((config.value.pool_fetch_types) = $event)),
+                "onUpdate:modelValue": _cache[23] || (_cache[23] = $event => ((config.value.pool_fetch_types) = $event)),
                 value: "Producer",
                 label: "制片",
                 density: "compact",
                 "hide-details": ""
               }, null, 8, ["modelValue"])
             ]),
-            _cache[121] || (_cache[121] = _createElementVNode$1("div", { class: "epl-switch-row" }, [
+            _cache[123] || (_cache[123] = _createElementVNode$1("div", { class: "epl-switch-row" }, [
               _createElementVNode$1("div", { class: "flex-grow-1" }, [
                 _createElementVNode$1("div", { class: "epl-switch-title" }, "拉取来源"),
                 _createElementVNode$1("div", { class: "epl-switch-desc" }, "仅已选媒体库（遍历库条目的 People，快）／ 全库 Person（/Persons 全量，慢）")
@@ -8387,7 +8412,7 @@ return (_ctx, _cache) => {
             ], -1)),
             _createVNode$1(_component_v_radio_group, {
               modelValue: config.value.pool_fetch_scope,
-              "onUpdate:modelValue": _cache[23] || (_cache[23] = $event => ((config.value.pool_fetch_scope) = $event)),
+              "onUpdate:modelValue": _cache[24] || (_cache[24] = $event => ((config.value.pool_fetch_scope) = $event)),
               density: "compact",
               "hide-details": "",
               inline: "",
@@ -8405,7 +8430,7 @@ return (_ctx, _cache) => {
               ]),
               _: 1
             }, 8, ["modelValue"]),
-            _cache[122] || (_cache[122] = _createElementVNode$1("div", { class: "epl-switch-row mt-3" }, [
+            _cache[124] || (_cache[124] = _createElementVNode$1("div", { class: "epl-switch-row mt-3" }, [
               _createElementVNode$1("div", { class: "flex-grow-1" }, [
                 _createElementVNode$1("div", { class: "epl-switch-title" }, "类型未知的人物是否保留？"),
                 _createElementVNode$1("div", { class: "epl-switch-desc" }, "类型未知（Emby 关系里取不到职位）≠ 演员，列表显示为「未分类」；保留时「按当前设置重筛池」不会删除它们")
@@ -8413,7 +8438,7 @@ return (_ctx, _cache) => {
             ], -1)),
             _createVNode$1(_component_v_radio_group, {
               modelValue: config.value.pool_keep_unknown,
-              "onUpdate:modelValue": _cache[24] || (_cache[24] = $event => ((config.value.pool_keep_unknown) = $event)),
+              "onUpdate:modelValue": _cache[25] || (_cache[25] = $event => ((config.value.pool_keep_unknown) = $event)),
               density: "compact",
               "hide-details": "",
               inline: "",
@@ -8431,21 +8456,21 @@ return (_ctx, _cache) => {
               ]),
               _: 1
             }, 8, ["modelValue"]),
-            _createElementVNode$1("div", _hoisted_42, [
-              _cache[112] || (_cache[112] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
+            _createElementVNode$1("div", _hoisted_43, [
+              _cache[114] || (_cache[114] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
                 _createElementVNode$1("div", { class: "epl-switch-title" }, "人名池翻译总开关"),
                 _createElementVNode$1("div", { class: "epl-switch-desc" }, "关闭后，池里 pending 的人名不再交给 Worker 翻译（已翻/已同步的条目不受影响）。池条目是否翻译由本开关独立决定")
               ], -1)),
               _createVNode$1(_component_v_switch, {
                 modelValue: config.value.pool_translation_enabled,
-                "onUpdate:modelValue": _cache[25] || (_cache[25] = $event => ((config.value.pool_translation_enabled) = $event)),
+                "onUpdate:modelValue": _cache[26] || (_cache[26] = $event => ((config.value.pool_translation_enabled) = $event)),
                 color: "primary",
                 "hide-details": "",
                 disabled: !aiOn.value
               }, null, 8, ["modelValue", "disabled"])
             ]),
-            _createElementVNode$1("div", _hoisted_43, [
-              _cache[113] || (_cache[113] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
+            _createElementVNode$1("div", _hoisted_44, [
+              _cache[115] || (_cache[115] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
                 _createElementVNode$1("div", { class: "epl-switch-title" }, "自动翻译新拉取的人名"),
                 _createElementVNode$1("div", { class: "epl-switch-desc" }, [
                   _createTextVNode$1("本开关只负责"),
@@ -8457,14 +8482,14 @@ return (_ctx, _cache) => {
               ], -1)),
               _createVNode$1(_component_v_switch, {
                 modelValue: config.value.pool_auto_translate,
-                "onUpdate:modelValue": _cache[26] || (_cache[26] = $event => ((config.value.pool_auto_translate) = $event)),
+                "onUpdate:modelValue": _cache[27] || (_cache[27] = $event => ((config.value.pool_auto_translate) = $event)),
                 color: "primary",
                 "hide-details": "",
                 disabled: !config.value.pool_translation_enabled || !aiOn.value
               }, null, 8, ["modelValue", "disabled"])
             ]),
-            _createElementVNode$1("div", _hoisted_44, [
-              _cache[114] || (_cache[114] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
+            _createElementVNode$1("div", _hoisted_45, [
+              _cache[116] || (_cache[116] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
                 _createElementVNode$1("div", { class: "epl-switch-title" }, "拉取时用 TMDB 刮削补译"),
                 _createElementVNode$1("div", { class: "epl-switch-desc" }, [
                   _createTextVNode$1("仅对 Emby 当前名非中文的人物：TMDB 有中文别名 → 中文名入池记为 tmdb 来源（繁体在拉取环节即繁转简，一律简体），再由同步流程统一写回 Emby；中文简介/头像即时写回 Emby（简介含锁定）。没有中文名的留给 AI 翻译。已缝合官方「演职人员刮削」，开启后可停用 personmeta 插件。"),
@@ -8473,15 +8498,15 @@ return (_ctx, _cache) => {
               ], -1)),
               _createVNode$1(_component_v_switch, {
                 modelValue: config.value.pool_tmdb_fill,
-                "onUpdate:modelValue": _cache[27] || (_cache[27] = $event => ((config.value.pool_tmdb_fill) = $event)),
+                "onUpdate:modelValue": _cache[28] || (_cache[28] = $event => ((config.value.pool_tmdb_fill) = $event)),
                 color: "primary",
                 "hide-details": ""
               }, null, 8, ["modelValue"])
             ]),
-            _createElementVNode$1("div", _hoisted_45, [
-              _createElementVNode$1("div", _hoisted_46, [
-                _createElementVNode$1("div", _hoisted_47, [
-                  _cache[117] || (_cache[117] = _createTextVNode$1("用 TMDB 演职人员表补「第二排角色名」 ", -1)),
+            _createElementVNode$1("div", _hoisted_46, [
+              _createElementVNode$1("div", _hoisted_47, [
+                _createElementVNode$1("div", _hoisted_48, [
+                  _cache[119] || (_cache[119] = _createTextVNode$1("用 TMDB 演职人员表补「第二排角色名」 ", -1)),
                   _createVNode$1(_component_v_tooltip, {
                     location: "top",
                     "max-width": "460"
@@ -8492,36 +8517,36 @@ return (_ctx, _cache) => {
                         class: "ml-1",
                         style: {"opacity":".6"}
                       }, tp), {
-                        default: _withCtx$1(() => [...(_cache[115] || (_cache[115] = [
+                        default: _withCtx$1(() => [...(_cache[117] || (_cache[117] = [
                           _createTextVNode$1("mdi-information-outline", -1)
                         ]))]),
                         _: 1
                       }, 16)
                     ]),
                     default: _withCtx$1(() => [
-                      _cache[116] || (_cache[116] = _createTextVNode$1(" 豆瓣等来源的 NFO「第二排」（角色名）常为空或只有中文，导致翻译链拿不到英文原文而翻不了； 开启后：按条目的 TMDB ID 拉取演职人员表，用 TMDB 的英文角色名（character）回填这些空/非英文的角色名， 再交给翻译链翻成中文。仅作用于「第二排角色名」范围（受下方「翻译范围 → 第二排角色名」及 Actor/客串等开关约束）； 已有英文角色名的条目不受影响。默认关闭。 ", -1))
+                      _cache[118] || (_cache[118] = _createTextVNode$1(" 豆瓣等来源的 NFO「第二排」（角色名）常为空或只有中文，导致翻译链拿不到英文原文而翻不了； 开启后：按条目的 TMDB ID 拉取演职人员表，用 TMDB 的英文角色名（character）回填这些空/非英文的角色名， 再交给翻译链翻成中文。仅作用于「第二排角色名」范围（受下方「翻译范围 → 第二排角色名」及 Actor/客串等开关约束）； 已有英文角色名的条目不受影响。默认关闭。 ", -1))
                     ]),
                     _: 1
                   })
                 ]),
-                _cache[118] || (_cache[118] = _createElementVNode$1("div", { class: "epl-switch-desc" }, "开：入库/扫描（含 Webhook）时用 TMDB credits 的英文角色名回填空/非英文角色名再翻；关：保持 NFO 原样 需开启下方「翻译范围 → 第二排角色名」（或「全部类型」），否则不生效", -1))
+                _cache[120] || (_cache[120] = _createElementVNode$1("div", { class: "epl-switch-desc" }, "开：入库/扫描（含 Webhook）时用 TMDB credits 的英文角色名回填空/非英文角色名再翻；关：保持 NFO 原样 需开启下方「翻译范围 → 第二排角色名」（或「全部类型」），否则不生效", -1))
               ]),
               _createVNode$1(_component_v_switch, {
                 modelValue: config.value.pool_tmdb_credits,
-                "onUpdate:modelValue": _cache[28] || (_cache[28] = $event => ((config.value.pool_tmdb_credits) = $event)),
+                "onUpdate:modelValue": _cache[29] || (_cache[29] = $event => ((config.value.pool_tmdb_credits) = $event)),
                 color: "primary",
                 "hide-details": "",
                 disabled: !config.value.translate_role && !config.value.translate_all
               }, null, 8, ["modelValue", "disabled"])
             ]),
-            _createElementVNode$1("div", _hoisted_48, [
-              _cache[119] || (_cache[119] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
+            _createElementVNode$1("div", _hoisted_49, [
+              _cache[121] || (_cache[121] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
                 _createElementVNode$1("div", { class: "epl-switch-title" }, "人名池翻译完成后自动同步 Emby"),
                 _createElementVNode$1("div", { class: "epl-switch-desc" }, "关闭时（默认），翻译只写池，需到「人名池 → 批量同步」手动同步到 Emby；开启后池内待翻全部翻完即自动同步（区别于批量翻译弹窗里一次性的「翻译完成后自动同步」勾选）")
               ], -1)),
               _createVNode$1(_component_v_switch, {
                 modelValue: config.value.pool_auto_sync,
-                "onUpdate:modelValue": _cache[29] || (_cache[29] = $event => ((config.value.pool_auto_sync) = $event)),
+                "onUpdate:modelValue": _cache[30] || (_cache[30] = $event => ((config.value.pool_auto_sync) = $event)),
                 color: "primary",
                 "hide-details": "",
                 disabled: !aiOn.value
@@ -8541,18 +8566,18 @@ return (_ctx, _cache) => {
         _createVNode$1(_component_v_card_title, { class: "text-subtitle-1" }, {
           default: _withCtx$1(() => [
             _createVNode$1(_component_v_icon, { start: "" }, {
-              default: _withCtx$1(() => [...(_cache[123] || (_cache[123] = [
+              default: _withCtx$1(() => [...(_cache[125] || (_cache[125] = [
                 _createTextVNode$1("mdi-account-multiple-outline", -1)
               ]))]),
               _: 1
             }),
-            _cache[125] || (_cache[125] = _createTextVNode$1("翻译范围 ", -1)),
+            _cache[127] || (_cache[127] = _createTextVNode$1("翻译范围 ", -1)),
             _createVNode$1(_component_v_chip, {
               size: "x-small",
               class: "ml-2",
               variant: "tonal"
             }, {
-              default: _withCtx$1(() => [...(_cache[124] || (_cache[124] = [
+              default: _withCtx$1(() => [...(_cache[126] || (_cache[126] = [
                 _createTextVNode$1("翻哪排 × 翻哪些类型 × 每类型翻几个", -1)
               ]))]),
               _: 1
@@ -8569,7 +8594,7 @@ return (_ctx, _cache) => {
               class: "mb-2",
               style: {"font-size":"12px"}
             }, {
-              default: _withCtx$1(() => [...(_cache[126] || (_cache[126] = [
+              default: _withCtx$1(() => [...(_cache[128] || (_cache[128] = [
                 _createTextVNode$1(" 采集 ≠ 翻译：扫描照常采集入库，本卡片只决定「翻译什么」。下面的", -1),
                 _createElementVNode$1("b", null, "类型 + 人数同时对第一排人名与第二排角色名生效", -1),
                 _createTextVNode$1(" —— 例如「关第一排 + 开第二排 + 只勾演员」，就只翻演员饰演的角色名。 ", -1)
@@ -8585,34 +8610,34 @@ return (_ctx, _cache) => {
                   class: "mb-2",
                   style: {"font-size":"12px"}
                 }, {
-                  default: _withCtx$1(() => [...(_cache[127] || (_cache[127] = [
+                  default: _withCtx$1(() => [...(_cache[129] || (_cache[129] = [
                     _createTextVNode$1(" AI 翻译总开关（LLM）已关闭：本卡片的翻译相关开关暂不可操作；到「基础设置」重新开启「AI 翻译（LLM）」后立即恢复（无需保存）。 ", -1)
                   ]))]),
                   _: 1
                 }))
               : _createCommentVNode$1("", true),
-            _cache[139] || (_cache[139] = _createElementVNode$1("div", { class: "epl-section-title mb-1" }, "① 翻哪排", -1)),
-            _createElementVNode$1("div", _hoisted_49, [
-              _cache[128] || (_cache[128] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
+            _cache[141] || (_cache[141] = _createElementVNode$1("div", { class: "epl-section-title mb-1" }, "① 翻哪排", -1)),
+            _createElementVNode$1("div", _hoisted_50, [
+              _cache[130] || (_cache[130] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
                 _createElementVNode$1("div", { class: "epl-switch-title" }, "第一排：人物姓名"),
                 _createElementVNode$1("div", { class: "epl-switch-desc" }, "演员 / 导演等「人」的姓名（Person 数据仍照常采集并交给人名池）")
               ], -1)),
               _createVNode$1(_component_v_switch, {
                 modelValue: config.value.translate_person,
-                "onUpdate:modelValue": _cache[30] || (_cache[30] = $event => ((config.value.translate_person) = $event)),
+                "onUpdate:modelValue": _cache[31] || (_cache[31] = $event => ((config.value.translate_person) = $event)),
                 color: "primary",
                 "hide-details": "",
                 disabled: !aiOn.value
               }, null, 8, ["modelValue", "disabled"])
             ]),
-            _createElementVNode$1("div", _hoisted_50, [
-              _cache[129] || (_cache[129] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
+            _createElementVNode$1("div", _hoisted_51, [
+              _cache[131] || (_cache[131] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
                 _createElementVNode$1("div", { class: "epl-switch-title" }, "第二排：角色名"),
                 _createElementVNode$1("div", { class: "epl-switch-desc" }, "人物饰演的角色名（如 \"Jiro Yakuin (voice)\" → 药院次郎）；关闭后角色名不翻译、也不参与写回等待")
               ], -1)),
               _createVNode$1(_component_v_switch, {
                 modelValue: config.value.translate_role,
-                "onUpdate:modelValue": _cache[31] || (_cache[31] = $event => ((config.value.translate_role) = $event)),
+                "onUpdate:modelValue": _cache[32] || (_cache[32] = $event => ((config.value.translate_role) = $event)),
                 color: "primary",
                 "hide-details": "",
                 disabled: !aiOn.value
@@ -8622,8 +8647,8 @@ return (_ctx, _cache) => {
               class: "my-2",
               style: {"opacity":".35"}
             }),
-            _cache[140] || (_cache[140] = _createElementVNode$1("div", { class: "epl-section-title mb-1" }, "② 翻哪些类型 + 每个文件翻几个", -1)),
-            _cache[141] || (_cache[141] = _createElementVNode$1("div", {
+            _cache[142] || (_cache[142] = _createElementVNode$1("div", { class: "epl-section-title mb-1" }, "② 翻哪些类型 + 每个文件翻几个", -1)),
+            _cache[143] || (_cache[143] = _createElementVNode$1("div", {
               class: "epl-switch-desc mb-2",
               style: {"opacity":".8"}
             }, [
@@ -8637,14 +8662,14 @@ return (_ctx, _cache) => {
               _createElementVNode$1("b", null, "角色名"),
               _createTextVNode$1("；数字只在「待翻」里数，已翻完的不占名额。")
             ], -1)),
-            _createElementVNode$1("div", _hoisted_51, [
-              _cache[130] || (_cache[130] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
+            _createElementVNode$1("div", _hoisted_52, [
+              _cache[132] || (_cache[132] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
                 _createElementVNode$1("div", { class: "epl-switch-title" }, "演员 Actor"),
                 _createElementVNode$1("div", { class: "epl-switch-desc" }, "主演 / 声优")
               ], -1)),
               _createVNode$1(_component_v_text_field, {
                 modelValue: config.value.actor_limit,
-                "onUpdate:modelValue": _cache[32] || (_cache[32] = $event => ((config.value.actor_limit) = $event)),
+                "onUpdate:modelValue": _cache[33] || (_cache[33] = $event => ((config.value.actor_limit) = $event)),
                 modelModifiers: { number: true },
                 type: "number",
                 min: "0",
@@ -8658,20 +8683,20 @@ return (_ctx, _cache) => {
               }, null, 8, ["modelValue", "disabled"]),
               _createVNode$1(_component_v_switch, {
                 modelValue: config.value.translate_actor,
-                "onUpdate:modelValue": _cache[33] || (_cache[33] = $event => ((config.value.translate_actor) = $event)),
+                "onUpdate:modelValue": _cache[34] || (_cache[34] = $event => ((config.value.translate_actor) = $event)),
                 color: "primary",
                 "hide-details": "",
                 disabled: config.value.translate_all || !aiOn.value
               }, null, 8, ["modelValue", "disabled"])
             ]),
-            _createElementVNode$1("div", _hoisted_52, [
-              _cache[131] || (_cache[131] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
+            _createElementVNode$1("div", _hoisted_53, [
+              _cache[133] || (_cache[133] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
                 _createElementVNode$1("div", { class: "epl-switch-title" }, "客串 / 配角 GuestStar"),
                 _createElementVNode$1("div", { class: "epl-switch-desc" }, "单集 NFO 里大部分出场人员都是客串")
               ], -1)),
               _createVNode$1(_component_v_text_field, {
                 modelValue: config.value.guest_limit,
-                "onUpdate:modelValue": _cache[34] || (_cache[34] = $event => ((config.value.guest_limit) = $event)),
+                "onUpdate:modelValue": _cache[35] || (_cache[35] = $event => ((config.value.guest_limit) = $event)),
                 modelModifiers: { number: true },
                 type: "number",
                 min: "0",
@@ -8685,20 +8710,20 @@ return (_ctx, _cache) => {
               }, null, 8, ["modelValue", "disabled"]),
               _createVNode$1(_component_v_switch, {
                 modelValue: config.value.translate_guest_star,
-                "onUpdate:modelValue": _cache[35] || (_cache[35] = $event => ((config.value.translate_guest_star) = $event)),
+                "onUpdate:modelValue": _cache[36] || (_cache[36] = $event => ((config.value.translate_guest_star) = $event)),
                 color: "primary",
                 "hide-details": "",
                 disabled: config.value.translate_all || !aiOn.value
               }, null, 8, ["modelValue", "disabled"])
             ]),
-            _createElementVNode$1("div", _hoisted_53, [
-              _cache[132] || (_cache[132] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
+            _createElementVNode$1("div", _hoisted_54, [
+              _cache[134] || (_cache[134] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
                 _createElementVNode$1("div", { class: "epl-switch-title" }, "导演 Director"),
                 _createElementVNode$1("div", { class: "epl-switch-desc" }, "导演")
               ], -1)),
               _createVNode$1(_component_v_text_field, {
                 modelValue: config.value.director_limit,
-                "onUpdate:modelValue": _cache[36] || (_cache[36] = $event => ((config.value.director_limit) = $event)),
+                "onUpdate:modelValue": _cache[37] || (_cache[37] = $event => ((config.value.director_limit) = $event)),
                 modelModifiers: { number: true },
                 type: "number",
                 min: "0",
@@ -8712,20 +8737,20 @@ return (_ctx, _cache) => {
               }, null, 8, ["modelValue", "disabled"]),
               _createVNode$1(_component_v_switch, {
                 modelValue: config.value.translate_director,
-                "onUpdate:modelValue": _cache[37] || (_cache[37] = $event => ((config.value.translate_director) = $event)),
+                "onUpdate:modelValue": _cache[38] || (_cache[38] = $event => ((config.value.translate_director) = $event)),
                 color: "primary",
                 "hide-details": "",
                 disabled: config.value.translate_all || !aiOn.value
               }, null, 8, ["modelValue", "disabled"])
             ]),
-            _createElementVNode$1("div", _hoisted_54, [
-              _cache[133] || (_cache[133] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
+            _createElementVNode$1("div", _hoisted_55, [
+              _cache[135] || (_cache[135] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
                 _createElementVNode$1("div", { class: "epl-switch-title" }, "编剧 / 制片人 Writer"),
                 _createElementVNode$1("div", { class: "epl-switch-desc" }, "编剧 / 制片人等非演员人员（共用一个人数）")
               ], -1)),
               _createVNode$1(_component_v_text_field, {
                 modelValue: config.value.writer_limit,
-                "onUpdate:modelValue": _cache[38] || (_cache[38] = $event => ((config.value.writer_limit) = $event)),
+                "onUpdate:modelValue": _cache[39] || (_cache[39] = $event => ((config.value.writer_limit) = $event)),
                 modelModifiers: { number: true },
                 type: "number",
                 min: "0",
@@ -8742,13 +8767,13 @@ return (_ctx, _cache) => {
                 color: "primary",
                 "hide-details": "",
                 disabled: config.value.translate_all || !aiOn.value,
-                "onUpdate:modelValue": _cache[39] || (_cache[39] = v => { config.value.translate_writer = v; config.value.translate_producer = v; })
+                "onUpdate:modelValue": _cache[40] || (_cache[40] = v => { config.value.translate_writer = v; config.value.translate_producer = v; })
               }, null, 8, ["model-value", "disabled"])
             ]),
-            _createElementVNode$1("div", _hoisted_55, [
-              _createElementVNode$1("div", _hoisted_56, [
-                _createElementVNode$1("div", _hoisted_57, [
-                  _cache[136] || (_cache[136] = _createTextVNode$1("全部类型翻译 ", -1)),
+            _createElementVNode$1("div", _hoisted_56, [
+              _createElementVNode$1("div", _hoisted_57, [
+                _createElementVNode$1("div", _hoisted_58, [
+                  _cache[138] || (_cache[138] = _createTextVNode$1("全部类型翻译 ", -1)),
                   _createVNode$1(_component_v_tooltip, {
                     location: "top",
                     "max-width": "420"
@@ -8759,42 +8784,42 @@ return (_ctx, _cache) => {
                         class: "ml-1",
                         style: {"opacity":".6"}
                       }, tp), {
-                        default: _withCtx$1(() => [...(_cache[134] || (_cache[134] = [
+                        default: _withCtx$1(() => [...(_cache[136] || (_cache[136] = [
                           _createTextVNode$1("mdi-information-outline", -1)
                         ]))]),
                         _: 1
                       }, 16)
                     ]),
                     default: _withCtx$1(() => [
-                      _cache[135] || (_cache[135] = _createTextVNode$1(" 这是**运行期覆盖**开关：开启时忽略上方各类型开关（所有职位的人名 + 角色名都翻）， 但不会改写你已保存的类型选择；关闭后自动恢复之前的选择（无需重新勾选）。 ", -1))
+                      _cache[137] || (_cache[137] = _createTextVNode$1(" 这是**运行期覆盖**开关：开启时忽略上方各类型开关（所有职位的人名 + 角色名都翻）， 但不会改写你已保存的类型选择；关闭后自动恢复之前的选择（无需重新勾选）。 ", -1))
                     ]),
                     _: 1
                   })
                 ]),
-                _cache[137] || (_cache[137] = _createElementVNode$1("div", { class: "epl-switch-desc" }, "开启 = 覆盖所有类型与两排（人数上限仍生效）；关闭后恢复上方原选择（不再永久改写）", -1))
+                _cache[139] || (_cache[139] = _createElementVNode$1("div", { class: "epl-switch-desc" }, "开启 = 覆盖所有类型与两排（人数上限仍生效）；关闭后恢复上方原选择（不再永久改写）", -1))
               ]),
               _createVNode$1(_component_v_switch, {
                 modelValue: config.value.translate_all,
-                "onUpdate:modelValue": _cache[40] || (_cache[40] = $event => ((config.value.translate_all) = $event)),
+                "onUpdate:modelValue": _cache[41] || (_cache[41] = $event => ((config.value.translate_all) = $event)),
                 color: "primary",
                 "hide-details": "",
                 disabled: !aiOn.value
               }, null, 8, ["modelValue", "disabled"])
             ]),
-            _createElementVNode$1("div", _hoisted_58, [
-              _cache[138] || (_cache[138] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
+            _createElementVNode$1("div", _hoisted_59, [
+              _cache[140] || (_cache[140] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
                 _createElementVNode$1("div", { class: "epl-switch-title" }, "重译已有中文名"),
                 _createElementVNode$1("div", { class: "epl-switch-desc" }, "对已是中文的人名/角色名强制重新翻译")
               ], -1)),
               _createVNode$1(_component_v_switch, {
                 modelValue: config.value.overwrite_chinese,
-                "onUpdate:modelValue": _cache[41] || (_cache[41] = $event => ((config.value.overwrite_chinese) = $event)),
+                "onUpdate:modelValue": _cache[42] || (_cache[42] = $event => ((config.value.overwrite_chinese) = $event)),
                 color: "primary",
                 "hide-details": "",
                 disabled: !aiOn.value
               }, null, 8, ["modelValue", "disabled"])
             ]),
-            _cache[142] || (_cache[142] = _createElementVNode$1("div", {
+            _cache[144] || (_cache[144] = _createElementVNode$1("div", {
               class: "epl-switch-desc mt-2",
               style: {"opacity":".75"}
             }, "提示：数字按「每个文件各自算前 N 个」（电影 nfo / 剧 tvshow.nfo / 各集 episode.nfo 各自计数，电影与剧共用同一套数字），按「人」计、两排共用；只数「待翻」的，已翻完的不占名额；0/留空 = 不限。", -1))
@@ -8812,12 +8837,12 @@ return (_ctx, _cache) => {
         _createVNode$1(_component_v_card_title, { class: "text-subtitle-1" }, {
           default: _withCtx$1(() => [
             _createVNode$1(_component_v_icon, { start: "" }, {
-              default: _withCtx$1(() => [...(_cache[143] || (_cache[143] = [
+              default: _withCtx$1(() => [...(_cache[145] || (_cache[145] = [
                 _createTextVNode$1("mdi-robot", -1)
               ]))]),
               _: 1
             }),
-            _cache[144] || (_cache[144] = _createTextVNode$1("LLM 设置", -1))
+            _cache[146] || (_cache[146] = _createTextVNode$1("LLM 设置", -1))
           ]),
           _: 1
         }),
@@ -8829,7 +8854,7 @@ return (_ctx, _cache) => {
             }, [
               _createVNode$1(_component_v_select, {
                 modelValue: config.value.llm_mode,
-                "onUpdate:modelValue": _cache[42] || (_cache[42] = $event => ((config.value.llm_mode) = $event)),
+                "onUpdate:modelValue": _cache[43] || (_cache[43] = $event => ((config.value.llm_mode) = $event)),
                 items: llmModes,
                 "item-title": "text",
                 "item-value": "value",
@@ -8843,17 +8868,17 @@ return (_ctx, _cache) => {
                 ? (_openBlock$1(), _createElementBlock$1(_Fragment$1, { key: 0 }, [
                     _createVNode$1(_component_v_text_field, {
                       modelValue: config.value.llm_base_url,
-                      "onUpdate:modelValue": _cache[43] || (_cache[43] = $event => ((config.value.llm_base_url) = $event)),
+                      "onUpdate:modelValue": _cache[44] || (_cache[44] = $event => ((config.value.llm_base_url) = $event)),
                       label: "API 地址",
                       placeholder: "https://api.example.com/v1",
                       density: "compact",
                       variant: "outlined",
                       class: "mb-2"
                     }, null, 8, ["modelValue"]),
-                    _createElementVNode$1("div", _hoisted_60, [
+                    _createElementVNode$1("div", _hoisted_61, [
                       _createVNode$1(_component_v_text_field, {
                         modelValue: config.value.llm_api_key,
-                        "onUpdate:modelValue": _cache[44] || (_cache[44] = $event => ((config.value.llm_api_key) = $event)),
+                        "onUpdate:modelValue": _cache[45] || (_cache[45] = $event => ((config.value.llm_api_key) = $event)),
                         label: "API Key",
                         type: "password",
                         density: "compact",
@@ -8875,7 +8900,7 @@ return (_ctx, _cache) => {
                       }, 8, ["disabled", "title"]),
                       _createVNode$1(_component_v_text_field, {
                         modelValue: config.value.llm_model,
-                        "onUpdate:modelValue": _cache[45] || (_cache[45] = $event => ((config.value.llm_model) = $event)),
+                        "onUpdate:modelValue": _cache[46] || (_cache[46] = $event => ((config.value.llm_model) = $event)),
                         label: "模型名称",
                         density: "compact",
                         variant: "outlined",
@@ -8883,7 +8908,7 @@ return (_ctx, _cache) => {
                       }, null, 8, ["modelValue"]),
                       _createVNode$1(_component_v_text_field, {
                         modelValue: config.value.llm_timeout,
-                        "onUpdate:modelValue": _cache[46] || (_cache[46] = $event => ((config.value.llm_timeout) = $event)),
+                        "onUpdate:modelValue": _cache[47] || (_cache[47] = $event => ((config.value.llm_timeout) = $event)),
                         modelModifiers: { number: true },
                         label: "超时(秒)",
                         type: "number",
@@ -8894,41 +8919,41 @@ return (_ctx, _cache) => {
                         style: {"width":"120px"}
                       }, null, 8, ["modelValue"])
                     ]),
-                    _createElementVNode$1("div", _hoisted_61, [
-                      _cache[145] || (_cache[145] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
+                    _createElementVNode$1("div", _hoisted_62, [
+                      _cache[147] || (_cache[147] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
                         _createElementVNode$1("div", { class: "epl-switch-title" }, "使用代理"),
                         _createElementVNode$1("div", { class: "epl-switch-desc" }, "公网 API / 走系统代理的场景开启")
                       ], -1)),
                       _createVNode$1(_component_v_switch, {
                         modelValue: config.value.use_proxy,
-                        "onUpdate:modelValue": _cache[47] || (_cache[47] = $event => ((config.value.use_proxy) = $event)),
+                        "onUpdate:modelValue": _cache[48] || (_cache[48] = $event => ((config.value.use_proxy) = $event)),
                         color: "primary",
                         "hide-details": ""
                       }, null, 8, ["modelValue"])
                     ]),
-                    _createElementVNode$1("div", _hoisted_62, [
-                      _cache[146] || (_cache[146] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
+                    _createElementVNode$1("div", _hoisted_63, [
+                      _cache[148] || (_cache[148] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
                         _createElementVNode$1("div", { class: "epl-switch-title" }, "关闭 SSL 校验"),
                         _createElementVNode$1("div", { class: "epl-switch-desc" }, "内网自签证书的中转端点（https 握手失败）时开启")
                       ], -1)),
                       _createVNode$1(_component_v_switch, {
                         "model-value": !config.value.llm_verify_ssl,
-                        "onUpdate:modelValue": _cache[48] || (_cache[48] = v => { config.value.llm_verify_ssl = !v; }),
+                        "onUpdate:modelValue": _cache[49] || (_cache[49] = v => { config.value.llm_verify_ssl = !v; }),
                         color: "warning",
                         "hide-details": ""
                       }, null, 8, ["model-value"])
                     ])
                   ], 64))
-                : (_openBlock$1(), _createElementBlock$1("div", _hoisted_63, " 使用 MoviePilot 系统 LLM 设置（LLM_BASE_URL / LLM_API_KEY / LLM_MODEL），插件内无需填写。 ")),
+                : (_openBlock$1(), _createElementBlock$1("div", _hoisted_64, " 使用 MoviePilot 系统 LLM 设置（LLM_BASE_URL / LLM_API_KEY / LLM_MODEL），插件内无需填写。 ")),
               _createVNode$1(_component_v_divider, {
                 class: "my-3",
                 style: {"opacity":".35"}
               }),
-              _cache[174] || (_cache[174] = _createElementVNode$1("div", { class: "epl-section-title mb-1" }, "思考与请求", -1)),
-              _createElementVNode$1("div", _hoisted_64, [
-                _createElementVNode$1("div", _hoisted_65, [
-                  _createElementVNode$1("div", _hoisted_66, [
-                    _cache[161] || (_cache[161] = _createTextVNode$1("禁用模型深度思考 ", -1)),
+              _cache[176] || (_cache[176] = _createElementVNode$1("div", { class: "epl-section-title mb-1" }, "思考与请求", -1)),
+              _createElementVNode$1("div", _hoisted_65, [
+                _createElementVNode$1("div", _hoisted_66, [
+                  _createElementVNode$1("div", _hoisted_67, [
+                    _cache[163] || (_cache[163] = _createTextVNode$1("禁用模型深度思考 ", -1)),
                     _createVNode$1(_component_v_tooltip, {
                       location: "top",
                       "max-width": "460"
@@ -8939,41 +8964,41 @@ return (_ctx, _cache) => {
                           class: "ml-1",
                           style: {"opacity":".6"}
                         }, tp), {
-                          default: _withCtx$1(() => [...(_cache[147] || (_cache[147] = [
+                          default: _withCtx$1(() => [...(_cache[149] || (_cache[149] = [
                             _createTextVNode$1("mdi-information-outline", -1)
                           ]))]),
                           _: 1
                         }, 16)
                       ]),
                       default: _withCtx$1(() => [
-                        _cache[148] || (_cache[148] = _createTextVNode$1(" 思考型模型（DeepSeek 系默认就开思考、默认强度 high）会先把推理过程写一大段，把 max_tokens 全烧在思考上，导致正文为空或输出被截断（finish_reason=length），插件只能反复折半重试、白烧额度。", -1)),
-                        _cache[149] || (_cache[149] = _createElementVNode$1("br", null, null, -1)),
-                        _cache[150] || (_cache[150] = _createTextVNode$1(" 开启后：无论用什么模型，请求都会带上「关闭思考」参数（不填自定义时，内置依次尝试：", -1)),
-                        _cache[151] || (_cache[151] = _createElementVNode$1("code", null, "{\"thinking\":{\"type\":\"disabled\"}}", -1)),
-                        _cache[152] || (_cache[152] = _createTextVNode$1(" → ", -1)),
-                        _cache[153] || (_cache[153] = _createElementVNode$1("code", null, "{\"reasoning_effort\":\"none\"}", -1)),
+                        _cache[150] || (_cache[150] = _createTextVNode$1(" 思考型模型（DeepSeek 系默认就开思考、默认强度 high）会先把推理过程写一大段，把 max_tokens 全烧在思考上，导致正文为空或输出被截断（finish_reason=length），插件只能反复折半重试、白烧额度。", -1)),
+                        _cache[151] || (_cache[151] = _createElementVNode$1("br", null, null, -1)),
+                        _cache[152] || (_cache[152] = _createTextVNode$1(" 开启后：无论用什么模型，请求都会带上「关闭思考」参数（不填自定义时，内置依次尝试：", -1)),
+                        _cache[153] || (_cache[153] = _createElementVNode$1("code", null, "{\"thinking\":{\"type\":\"disabled\"}}", -1)),
                         _cache[154] || (_cache[154] = _createTextVNode$1(" → ", -1)),
-                        _cache[155] || (_cache[155] = _createElementVNode$1("code", null, "{\"reasoning_effort\":\"minimal\"}", -1)),
+                        _cache[155] || (_cache[155] = _createElementVNode$1("code", null, "{\"reasoning_effort\":\"none\"}", -1)),
                         _cache[156] || (_cache[156] = _createTextVNode$1(" → ", -1)),
-                        _cache[157] || (_cache[157] = _createElementVNode$1("code", null, "chat_template_kwargs", -1)),
-                        _cache[158] || (_cache[158] = _createTextVNode$1("，前一种被端点拒绝或没关掉思考就自动换下一种）。", -1)),
-                        _cache[159] || (_cache[159] = _createElementVNode$1("br", null, null, -1)),
-                        _cache[160] || (_cache[160] = _createTextVNode$1(" 若你的服务商不认内置写法，请在下方「自定义参数」里直接填官方推荐的写法。 ", -1))
+                        _cache[157] || (_cache[157] = _createElementVNode$1("code", null, "{\"reasoning_effort\":\"minimal\"}", -1)),
+                        _cache[158] || (_cache[158] = _createTextVNode$1(" → ", -1)),
+                        _cache[159] || (_cache[159] = _createElementVNode$1("code", null, "chat_template_kwargs", -1)),
+                        _cache[160] || (_cache[160] = _createTextVNode$1("，前一种被端点拒绝或没关掉思考就自动换下一种）。", -1)),
+                        _cache[161] || (_cache[161] = _createElementVNode$1("br", null, null, -1)),
+                        _cache[162] || (_cache[162] = _createTextVNode$1(" 若你的服务商不认内置写法，请在下方「自定义参数」里直接填官方推荐的写法。 ", -1))
                       ]),
                       _: 1
                     })
                   ]),
-                  _cache[162] || (_cache[162] = _createElementVNode$1("div", { class: "epl-switch-desc" }, "默认开：无论什么模型都不让它深度思考，直接出结果；写法不兼容会自动换下一种，不会报错", -1))
+                  _cache[164] || (_cache[164] = _createElementVNode$1("div", { class: "epl-switch-desc" }, "默认开：无论什么模型都不让它深度思考，直接出结果；写法不兼容会自动换下一种，不会报错", -1))
                 ]),
                 _createVNode$1(_component_v_switch, {
                   modelValue: config.value.llm_thinking_off,
-                  "onUpdate:modelValue": _cache[49] || (_cache[49] = $event => ((config.value.llm_thinking_off) = $event)),
+                  "onUpdate:modelValue": _cache[50] || (_cache[50] = $event => ((config.value.llm_thinking_off) = $event)),
                   color: "primary",
                   "hide-details": ""
                 }, null, 8, ["modelValue"])
               ]),
-              _createElementVNode$1("div", _hoisted_67, [
-                _cache[163] || (_cache[163] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
+              _createElementVNode$1("div", _hoisted_68, [
+                _cache[165] || (_cache[165] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
                   _createElementVNode$1("div", { class: "epl-switch-title" }, "自定义关闭思考参数（JSON，留空=用内置）"),
                   _createElementVNode$1("div", { class: "epl-switch-desc" }, [
                     _createTextVNode$1("各家写法不同，填了就只按你填的这一个发（不再试内置的）。例：DeepSeek 官方 "),
@@ -8987,7 +9012,7 @@ return (_ctx, _cache) => {
                 ], -1)),
                 _createVNode$1(_component_v_text_field, {
                   modelValue: config.value.llm_thinking_params,
-                  "onUpdate:modelValue": _cache[50] || (_cache[50] = $event => ((config.value.llm_thinking_params) = $event)),
+                  "onUpdate:modelValue": _cache[51] || (_cache[51] = $event => ((config.value.llm_thinking_params) = $event)),
                   density: "compact",
                   variant: "outlined",
                   "hide-details": "",
@@ -8996,14 +9021,14 @@ return (_ctx, _cache) => {
                   disabled: !config.value.llm_thinking_off
                 }, null, 8, ["modelValue", "disabled"])
               ]),
-              _createElementVNode$1("div", _hoisted_68, [
-                _cache[164] || (_cache[164] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
+              _createElementVNode$1("div", _hoisted_69, [
+                _cache[166] || (_cache[166] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
                   _createElementVNode$1("div", { class: "epl-switch-title" }, "请求间隔（秒）"),
                   _createElementVNode$1("div", { class: "epl-switch-desc" }, "两次请求之间至少隔多久，唯一的限速项（已合并原「最小请求间隔」与「最大 RPM」）。3 秒 ≈ 每分钟最多 20 次；想做到「每分钟最多 5 次」就填 12。留空或 0 = 不额外限速")
                 ], -1)),
                 _createVNode$1(_component_v_text_field, {
                   modelValue: config.value.llm_min_interval,
-                  "onUpdate:modelValue": _cache[51] || (_cache[51] = $event => ((config.value.llm_min_interval) = $event)),
+                  "onUpdate:modelValue": _cache[52] || (_cache[52] = $event => ((config.value.llm_min_interval) = $event)),
                   modelModifiers: { number: true },
                   type: "number",
                   min: "0",
@@ -9016,10 +9041,10 @@ return (_ctx, _cache) => {
                   suffix: "秒"
                 }, null, 8, ["modelValue"])
               ]),
-              _createElementVNode$1("div", _hoisted_69, [
-                _createElementVNode$1("div", _hoisted_70, [
-                  _createElementVNode$1("div", _hoisted_71, [
-                    _cache[169] || (_cache[169] = _createTextVNode$1("TPM 令牌预算（每分钟，0 = 不限制） ", -1)),
+              _createElementVNode$1("div", _hoisted_70, [
+                _createElementVNode$1("div", _hoisted_71, [
+                  _createElementVNode$1("div", _hoisted_72, [
+                    _cache[171] || (_cache[171] = _createTextVNode$1("TPM 令牌预算（每分钟，0 = 不限制） ", -1)),
                     _createVNode$1(_component_v_tooltip, {
                       location: "top",
                       "max-width": "440"
@@ -9030,25 +9055,25 @@ return (_ctx, _cache) => {
                           class: "ml-1",
                           style: {"opacity":".6"}
                         }, tp), {
-                          default: _withCtx$1(() => [...(_cache[165] || (_cache[165] = [
+                          default: _withCtx$1(() => [...(_cache[167] || (_cache[167] = [
                             _createTextVNode$1("mdi-information-outline", -1)
                           ]))]),
                           _: 1
                         }, 16)
                       ]),
                       default: _withCtx$1(() => [
-                        _cache[166] || (_cache[166] = _createTextVNode$1(" 你的服务商明示「TPM 每分钟令牌上限」时填这里：插件发每个请求前会估算 「近 60 秒已用令牌 + 本次请求令牌」，超出预算就先等窗口滑出再发， 避免「429 限流 → 重试 → 再 429 → 熔断」的循环。", -1)),
-                        _cache[167] || (_cache[167] = _createElementVNode$1("br", null, null, -1)),
-                        _cache[168] || (_cache[168] = _createTextVNode$1(" 不知道填多少就留 0（不限制），配合「请求间隔」即可；估算值 = 提示词长度 ÷ 2 + 输出上限。 ", -1))
+                        _cache[168] || (_cache[168] = _createTextVNode$1(" 你的服务商明示「TPM 每分钟令牌上限」时填这里：插件发每个请求前会估算 「近 60 秒已用令牌 + 本次请求令牌」，超出预算就先等窗口滑出再发， 避免「429 限流 → 重试 → 再 429 → 熔断」的循环。", -1)),
+                        _cache[169] || (_cache[169] = _createElementVNode$1("br", null, null, -1)),
+                        _cache[170] || (_cache[170] = _createTextVNode$1(" 不知道填多少就留 0（不限制），配合「请求间隔」即可；估算值 = 提示词长度 ÷ 2 + 输出上限。 ", -1))
                       ]),
                       _: 1
                     })
                   ]),
-                  _cache[170] || (_cache[170] = _createElementVNode$1("div", { class: "epl-switch-desc" }, "按估算令牌限速：近 1 分钟累计超过预算先等待再发，显著减少 TPM 限流；0 = 不限制", -1))
+                  _cache[172] || (_cache[172] = _createElementVNode$1("div", { class: "epl-switch-desc" }, "按估算令牌限速：近 1 分钟累计超过预算先等待再发，显著减少 TPM 限流；0 = 不限制", -1))
                 ]),
                 _createVNode$1(_component_v_text_field, {
                   modelValue: config.value.llm_tpm_budget,
-                  "onUpdate:modelValue": _cache[52] || (_cache[52] = $event => ((config.value.llm_tpm_budget) = $event)),
+                  "onUpdate:modelValue": _cache[53] || (_cache[53] = $event => ((config.value.llm_tpm_budget) = $event)),
                   modelModifiers: { number: true },
                   type: "number",
                   min: "0",
@@ -9060,10 +9085,10 @@ return (_ctx, _cache) => {
                   placeholder: "0"
                 }, null, 8, ["modelValue"])
               ]),
-              _createElementVNode$1("div", _hoisted_72, [
+              _createElementVNode$1("div", _hoisted_73, [
                 _createVNode$1(_component_v_text_field, {
                   modelValue: config.value.max_people_per_batch,
-                  "onUpdate:modelValue": _cache[53] || (_cache[53] = $event => ((config.value.max_people_per_batch) = $event)),
+                  "onUpdate:modelValue": _cache[54] || (_cache[54] = $event => ((config.value.max_people_per_batch) = $event)),
                   modelModifiers: { number: true },
                   label: "单批最多翻译条数",
                   type: "number",
@@ -9075,7 +9100,7 @@ return (_ctx, _cache) => {
                 }, null, 8, ["modelValue"]),
                 _createVNode$1(_component_v_select, {
                   modelValue: config.value.translate_batching,
-                  "onUpdate:modelValue": _cache[54] || (_cache[54] = $event => ((config.value.translate_batching) = $event)),
+                  "onUpdate:modelValue": _cache[55] || (_cache[55] = $event => ((config.value.translate_batching) = $event)),
                   items: [
               { text: '按作品分批（同一作品合并，上下文质量优先）', value: 'per_title' },
               { text: '全局聚合（跨作品合并、更省请求，每条词条仍携带作品上下文）', value: 'global' },
@@ -9093,8 +9118,8 @@ return (_ctx, _cache) => {
                 class: "my-3",
                 style: {"opacity":".35"}
               }),
-              _createElementVNode$1("div", _hoisted_73, [
-                _cache[173] || (_cache[173] = _createElementVNode$1("div", { class: "epl-switch-title" }, "AI 提示词", -1)),
+              _createElementVNode$1("div", _hoisted_74, [
+                _cache[175] || (_cache[175] = _createElementVNode$1("div", { class: "epl-switch-title" }, "AI 提示词", -1)),
                 _createVNode$1(_component_v_spacer),
                 _createVNode$1(_component_v_btn, {
                   size: "small",
@@ -9106,19 +9131,19 @@ return (_ctx, _cache) => {
                       start: "",
                       size: "14"
                     }, {
-                      default: _withCtx$1(() => [...(_cache[171] || (_cache[171] = [
+                      default: _withCtx$1(() => [...(_cache[173] || (_cache[173] = [
                         _createTextVNode$1("mdi-restore", -1)
                       ]))]),
                       _: 1
                     }),
-                    _cache[172] || (_cache[172] = _createTextVNode$1("填默认提示词 ", -1))
+                    _cache[174] || (_cache[174] = _createTextVNode$1("填默认提示词 ", -1))
                   ]),
                   _: 1
                 })
               ]),
               _createVNode$1(_component_v_textarea, {
                 modelValue: config.value.prompt_template,
-                "onUpdate:modelValue": _cache[55] || (_cache[55] = $event => ((config.value.prompt_template) = $event)),
+                "onUpdate:modelValue": _cache[56] || (_cache[56] = $event => ((config.value.prompt_template) = $event)),
                 rows: "4",
                 density: "compact",
                 variant: "outlined",
@@ -9126,7 +9151,7 @@ return (_ctx, _cache) => {
                 hint: "留空使用内置默认提示词；可自行调整要求 LLM 怎么翻人名/角色名",
                 placeholder: "你是一位专业的影视人名翻译专家，只返回 JSON……"
               }, null, 8, ["modelValue"])
-            ], 10, _hoisted_59)
+            ], 10, _hoisted_60)
           ]),
           _: 1
         })
@@ -9141,39 +9166,39 @@ return (_ctx, _cache) => {
         _createVNode$1(_component_v_card_title, { class: "text-subtitle-1" }, {
           default: _withCtx$1(() => [
             _createVNode$1(_component_v_icon, { start: "" }, {
-              default: _withCtx$1(() => [...(_cache[175] || (_cache[175] = [
+              default: _withCtx$1(() => [...(_cache[177] || (_cache[177] = [
                 _createTextVNode$1("mdi-webhook", -1)
               ]))]),
               _: 1
             }),
-            _cache[176] || (_cache[176] = _createTextVNode$1("Webhook 入库", -1))
+            _cache[178] || (_cache[178] = _createTextVNode$1("Webhook 入库", -1))
           ]),
           _: 1
         }),
         _createVNode$1(_component_v_card_text, null, {
           default: _withCtx$1(() => [
-            _createElementVNode$1("div", _hoisted_74, [
-              _cache[177] || (_cache[177] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
+            _createElementVNode$1("div", _hoisted_75, [
+              _cache[179] || (_cache[179] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
                 _createElementVNode$1("div", { class: "epl-switch-title" }, "启用 Webhook 入库"),
                 _createElementVNode$1("div", { class: "epl-switch-desc" }, " 关闭后：不接收新 Webhook / 不排队 / 不处理 / 不通知（已有挂起事件不丢失，重新开启可继续）。但：NFO 扫描 / 探测库仍继续有效。 ")
               ], -1)),
               _createVNode$1(_component_v_switch, {
                 modelValue: config.value.webhook_enabled,
-                "onUpdate:modelValue": _cache[56] || (_cache[56] = $event => ((config.value.webhook_enabled) = $event)),
+                "onUpdate:modelValue": _cache[57] || (_cache[57] = $event => ((config.value.webhook_enabled) = $event)),
                 color: "success",
                 "hide-details": ""
               }, null, 8, ["modelValue"])
             ]),
             (config.value.webhook_enabled)
               ? (_openBlock$1(), _createElementBlock$1(_Fragment$1, { key: 0 }, [
-                  _createElementVNode$1("div", _hoisted_75, [
-                    _cache[178] || (_cache[178] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
+                  _createElementVNode$1("div", _hoisted_76, [
+                    _cache[180] || (_cache[180] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
                       _createElementVNode$1("div", { class: "epl-switch-title" }, "入库延迟（秒）"),
                       _createElementVNode$1("div", { class: "epl-switch-desc" }, "Emby 入库后等多少秒再翻译，给刮削留时间")
                     ], -1)),
                     _createVNode$1(_component_v_text_field, {
                       modelValue: config.value.webhook_delay,
-                      "onUpdate:modelValue": _cache[57] || (_cache[57] = $event => ((config.value.webhook_delay) = $event)),
+                      "onUpdate:modelValue": _cache[58] || (_cache[58] = $event => ((config.value.webhook_delay) = $event)),
                       modelModifiers: { number: true },
                       type: "number",
                       min: "0",
@@ -9185,8 +9210,8 @@ return (_ctx, _cache) => {
                       suffix: "秒"
                     }, null, 8, ["modelValue"])
                   ]),
-                  _createElementVNode$1("div", _hoisted_76, [
-                    _cache[179] || (_cache[179] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
+                  _createElementVNode$1("div", _hoisted_77, [
+                    _cache[181] || (_cache[181] = _createElementVNode$1("div", { class: "flex-grow-1" }, [
                       _createElementVNode$1("div", { class: "epl-switch-title" }, "整剧全收（包含旧集）"),
                       _createElementVNode$1("div", { class: "epl-switch-desc" }, [
                         _createTextVNode$1(" 关（默认）：Emby 发「整部剧」事件时"),
@@ -9204,7 +9229,7 @@ return (_ctx, _cache) => {
                     ], -1)),
                     _createVNode$1(_component_v_switch, {
                       modelValue: config.value.series_ingest_all,
-                      "onUpdate:modelValue": _cache[58] || (_cache[58] = $event => ((config.value.series_ingest_all) = $event)),
+                      "onUpdate:modelValue": _cache[59] || (_cache[59] = $event => ((config.value.series_ingest_all) = $event)),
                       color: "primary",
                       "hide-details": ""
                     }, null, 8, ["modelValue"])
@@ -9217,7 +9242,7 @@ return (_ctx, _cache) => {
                   density: "compact",
                   style: {"font-size":"12px"}
                 }, {
-                  default: _withCtx$1(() => [...(_cache[180] || (_cache[180] = [
+                  default: _withCtx$1(() => [...(_cache[182] || (_cache[182] = [
                     _createTextVNode$1(" Webhook 已关闭：新入库事件不会接收。NFO 扫描 / 探测库仍可发现新条目。 ", -1)
                   ]))]),
                   _: 1
@@ -9228,7 +9253,7 @@ return (_ctx, _cache) => {
       ]),
       _: 1
     }),
-    _createElementVNode$1("div", _hoisted_77, [
+    _createElementVNode$1("div", _hoisted_78, [
       _createVNode$1(_component_v_tooltip, {
         text: "真实调用一次 1 词翻译，检测 LLM 地址/密钥/模型是否可用（地址缺 /v1 会自动尝试）",
         location: "top"
@@ -9245,12 +9270,12 @@ return (_ctx, _cache) => {
                 start: "",
                 size: "18"
               }, {
-                default: _withCtx$1(() => [...(_cache[181] || (_cache[181] = [
+                default: _withCtx$1(() => [...(_cache[183] || (_cache[183] = [
                   _createTextVNode$1("mdi-flash-outline", -1)
                 ]))]),
                 _: 1
               }),
-              _cache[182] || (_cache[182] = _createTextVNode$1("测试连接 ", -1))
+              _cache[184] || (_cache[184] = _createTextVNode$1("测试连接 ", -1))
             ]),
             _: 1
           }, 16, ["loading", "disabled"])
@@ -9268,19 +9293,19 @@ return (_ctx, _cache) => {
             start: "",
             size: "18"
           }, {
-            default: _withCtx$1(() => [...(_cache[183] || (_cache[183] = [
+            default: _withCtx$1(() => [...(_cache[185] || (_cache[185] = [
               _createTextVNode$1("mdi-content-save-outline", -1)
             ]))]),
             _: 1
           }),
-          _cache[184] || (_cache[184] = _createTextVNode$1("保存配置 ", -1))
+          _cache[186] || (_cache[186] = _createTextVNode$1("保存配置 ", -1))
         ]),
         _: 1
       }, 8, ["loading"])
     ]),
     _createVNode$1(_component_v_dialog, {
       modelValue: browseDlg.value,
-      "onUpdate:modelValue": _cache[60] || (_cache[60] = $event => ((browseDlg).value = $event)),
+      "onUpdate:modelValue": _cache[61] || (_cache[61] = $event => ((browseDlg).value = $event)),
       "max-width": "720",
       scrollable: ""
     }, {
@@ -9293,7 +9318,7 @@ return (_ctx, _cache) => {
                   start: "",
                   size: "18"
                 }, {
-                  default: _withCtx$1(() => [...(_cache[185] || (_cache[185] = [
+                  default: _withCtx$1(() => [...(_cache[187] || (_cache[187] = [
                     _createTextVNode$1("mdi-folder-search-outline", -1)
                   ]))]),
                   _: 1
@@ -9303,11 +9328,11 @@ return (_ctx, _cache) => {
                 _createVNode$1(_component_v_btn, {
                   size: "x-small",
                   variant: "text",
-                  onClick: _cache[59] || (_cache[59] = $event => (browseDlg.value = false))
+                  onClick: _cache[60] || (_cache[60] = $event => (browseDlg.value = false))
                 }, {
                   default: _withCtx$1(() => [
                     _createVNode$1(_component_v_icon, { size: "16" }, {
-                      default: _withCtx$1(() => [...(_cache[186] || (_cache[186] = [
+                      default: _withCtx$1(() => [...(_cache[188] || (_cache[188] = [
                         _createTextVNode$1("mdi-close", -1)
                       ]))]),
                       _: 1
@@ -9326,7 +9351,7 @@ return (_ctx, _cache) => {
             }),
             _createVNode$1(_component_v_card_text, { style: {"max-height":"440px"} }, {
               default: _withCtx$1(() => [
-                _createElementVNode$1("div", _hoisted_78, [
+                _createElementVNode$1("div", _hoisted_79, [
                   _createVNode$1(_component_v_btn, {
                     size: "x-small",
                     variant: "tonal",
@@ -9338,12 +9363,12 @@ return (_ctx, _cache) => {
                         start: "",
                         size: "14"
                       }, {
-                        default: _withCtx$1(() => [...(_cache[187] || (_cache[187] = [
+                        default: _withCtx$1(() => [...(_cache[189] || (_cache[189] = [
                           _createTextVNode$1("mdi-arrow-up", -1)
                         ]))]),
                         _: 1
                       }),
-                      _cache[188] || (_cache[188] = _createTextVNode$1("返回上级 ", -1))
+                      _cache[190] || (_cache[190] = _createTextVNode$1("返回上级 ", -1))
                     ]),
                     _: 1
                   }, 8, ["disabled"]),
@@ -9358,12 +9383,12 @@ return (_ctx, _cache) => {
                         start: "",
                         size: "14"
                       }, {
-                        default: _withCtx$1(() => [...(_cache[189] || (_cache[189] = [
+                        default: _withCtx$1(() => [...(_cache[191] || (_cache[191] = [
                           _createTextVNode$1("mdi-refresh", -1)
                         ]))]),
                         _: 1
                       }),
-                      _cache[190] || (_cache[190] = _createTextVNode$1("刷新 ", -1))
+                      _cache[192] || (_cache[192] = _createTextVNode$1("刷新 ", -1))
                     ]),
                     _: 1
                   }, 8, ["loading"]),
@@ -9377,12 +9402,12 @@ return (_ctx, _cache) => {
                         start: "",
                         size: "14"
                       }, {
-                        default: _withCtx$1(() => [...(_cache[191] || (_cache[191] = [
+                        default: _withCtx$1(() => [...(_cache[193] || (_cache[193] = [
                           _createTextVNode$1("mdi-check-network-outline", -1)
                         ]))]),
                         _: 1
                       }),
-                      _cache[192] || (_cache[192] = _createTextVNode$1("测试访问 ", -1))
+                      _cache[194] || (_cache[194] = _createTextVNode$1("测试访问 ", -1))
                     ]),
                     _: 1
                   }),
@@ -9404,7 +9429,7 @@ return (_ctx, _cache) => {
                     variant: "tonal",
                     color: "warning"
                   }, {
-                    default: _withCtx$1(() => [...(_cache[193] || (_cache[193] = [
+                    default: _withCtx$1(() => [...(_cache[195] || (_cache[195] = [
                       _createTextVNode$1("只读", -1)
                     ]))]),
                     _: 1
@@ -9425,7 +9450,7 @@ return (_ctx, _cache) => {
                       _: 1
                     }))
                   : _createCommentVNode$1("", true),
-                _createElementVNode$1("div", _hoisted_79, [
+                _createElementVNode$1("div", _hoisted_80, [
                   (_openBlock$1(true), _createElementBlock$1(_Fragment$1, null, _renderList$1(browse.value.entries, (e) => {
                     return (_openBlock$1(), _createElementBlock$1("div", {
                       key: e.name,
@@ -9441,12 +9466,12 @@ return (_ctx, _cache) => {
                         ]),
                         _: 2
                       }, 1032, ["color"]),
-                      _createElementVNode$1("span", _hoisted_81, _toDisplayString$1(e.name), 1),
-                      _createElementVNode$1("span", _hoisted_82, _toDisplayString$1(e.is_dir ? '' : fmtSize(e.size)), 1)
-                    ], 10, _hoisted_80))
+                      _createElementVNode$1("span", _hoisted_82, _toDisplayString$1(e.name), 1),
+                      _createElementVNode$1("span", _hoisted_83, _toDisplayString$1(e.is_dir ? '' : fmtSize(e.size)), 1)
+                    ], 10, _hoisted_81))
                   }), 128)),
                   (!browse.value.entries.length && !browse.value.loading)
-                    ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_83, "（空目录）"))
+                    ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_84, "（空目录）"))
                     : _createCommentVNode$1("", true)
                 ])
               ]),
@@ -9463,7 +9488,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const Settings = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-08ce107d"]]);
+const Settings = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-23505441"]]);
 
 const {createTextVNode:_createTextVNode,resolveComponent:_resolveComponent,withCtx:_withCtx,createVNode:_createVNode,createElementVNode:_createElementVNode,renderList:_renderList,Fragment:_Fragment,openBlock:_openBlock,createElementBlock:_createElementBlock,toDisplayString:_toDisplayString,createBlock:_createBlock,createCommentVNode:_createCommentVNode,resolveDynamicComponent:_resolveDynamicComponent,KeepAlive:_KeepAlive} = await importShared('vue');
 

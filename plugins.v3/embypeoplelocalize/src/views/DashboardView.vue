@@ -605,7 +605,7 @@ onUnmounted(() => {
             </v-btn>
           </template>
         </v-tooltip>
-        <v-tooltip location="top" max-width="300" :text="poolFetchHint || '把 Emby 的 Person 拉进人名池（翻译一次全局复用）：按设置页「翻译范围」的人名类型开关拉取；拉取期间入库事件自动排队'">
+        <v-tooltip location="top" max-width="300" :text="poolFetchHint || '把 Emby 的 Person 拉进人名池（翻译一次全局复用）：来源跟随设置页「拉取来源」（仅已选媒体库 / 全库 Person，不能在此临时改）；要临时改本次来源请到「人名池」页的「拉取人名」弹窗'">
           <template #activator="{ props: tp }">
             <v-btn size="small" color="info" variant="flat" :disabled="poolFetchDisabled" :loading="poolFetchBusy" v-bind="tp" @click="startPoolFetch">
               <v-icon start size="18">mdi-account-arrow-down-outline</v-icon>{{ poolFetchLabel() }}

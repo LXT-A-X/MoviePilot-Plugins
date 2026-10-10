@@ -546,14 +546,22 @@ class EmbyClient:
 
     _ITEM_FIELDS = ("People,LockedFields,Id,Name,ProductionYear,PremiereDate,Type,MediaType,Path,"
                     "SeriesName,ParentIndexNumber,IndexNumber,SeasonNumber,EpisodeNumber")
+    # v4.6.114（issue #5）：需要**整份回写**条目（写 People[].Role）时用的更宽字段集 ——
+    # 回写是把取到的 DTO 整份 POST 回去，取少了就可能把没取到的元数据清掉，故多带常用字段。
+    _ITEM_FIELDS_UPDATE = (_ITEM_FIELDS + ",ProviderIds,Overview,Genres,Studios,Tags,Taglines,"
+                           "OfficialRating,CustomRating,CommunityRating,RunTimeTicks,SortName,"
+                           "OriginalTitle,DateCreated,SeriesId,ImageTags,BackdropImageTags")
 
-    def fetch_item_status(self, item_id: str) -> tuple:
+    def fetch_item_status(self, item_id: str, fields: Optional[str] = None) -> tuple:
         """获取条目详情 + **存在性三态**（v4.6.98 · P1-01）—— 返回 `(status, data)`。
 
         - `(ITEM_FOUND, {...})`      条目存在；
         - `(ITEM_NOT_FOUND, None)`   Emby 明确回答不存在（404）—— 唯一可作「已删除」依据；
         - `(ITEM_UNAVAILABLE, None)` 无 user_id / 超时 / 401 / 500 / 响应非法 / 客户端不可用
                                     → **状态未知**，调用方不得据此判定容器已删除。
+
+        fields（v4.6.114）：可显式指定要取的字段（默认 `_ITEM_FIELDS`）。需要**整份回写**
+        条目时请传更宽的字段集（见 `_ITEM_FIELDS_UPDATE`），避免回写时丢掉未取到的元数据。
         """
         _iid = str(item_id or "").strip()
         if not _iid:
@@ -566,7 +574,7 @@ class EmbyClient:
             logger.warning("[EmbyClient] 无 user_id → 条目存在性未知（按 UNAVAILABLE 处理，不当作已删除）")
             return ITEM_UNAVAILABLE, None
         return self._get_status(f"/Users/{user_id}/Items/{_iid}",
-                                params={"Fields": self._ITEM_FIELDS})
+                                params={"Fields": str(fields or self._ITEM_FIELDS)})
 
     def fetch_item(self, item_id: str) -> Optional[dict]:
         """获取条目完整详情（包含 Emby 实际的季集字段 ParentIndexNumber/IndexNumber）。
@@ -579,6 +587,66 @@ class EmbyClient:
         except Exception:
             return None
         return _d if _st == ITEM_FOUND else None
+
+    def update_item_roles(self, item_id: str, role_map: dict) -> tuple:
+        """把**第二排角色译文**写入 Emby 条目级 `People[].Role`（v4.6.114 · issue #5）
+        → `(status, changed)`，status ∈ ok / noop / no_people / not_found / unavailable / failed。
+
+        为什么需要它：第一排走 `rename_person` 改的是 **Person 实体**（服务器级），
+        Emby 之后写 nfo 的 `<name>` 取自 Person，所以中文名稳定；而第二排此前**只写 nfo
+        文件**，Emby 刷新元数据时会用它条目级缓存的英文 Role 把 nfo 覆盖回去 →
+        插件里译好了、用户看到的还是英文。写到条目级 People[].Role 后，Emby 自己
+        写 nfo 带的即是中文，也不再依赖 `Cast` 锁能否挡住覆盖。
+
+        安全约定（与 `rename_person` 同一条教训）：
+        - 只在 `People[].Role` 文本**精确命中** role_map 时才改；一个都没命中 → noop，
+          **不发写请求**；
+        - 有改动才 `POST /emby/Items/{id}` **整份回传**（用 `_ITEM_FIELDS_UPDATE` 取得的
+          完整 DTO）—— 稀疏 DTO 会清空 Overview / LockedFields / 图片等元数据；
+        - 只改 `Role`，**绝不动 `Name`**（避免与 Person 实体改名互相打架）；
+        - 同一条目内重复 Role（如 3×`Partygoer`）一次全改。
+        """
+        _iid = str(item_id or "").strip()
+        if not _iid:
+            return "noop", 0
+        if not isinstance(role_map, dict) or not role_map:
+            return "noop", 0
+        _map = {str(k).strip(): str(v).strip()
+                for k, v in role_map.items()
+                if str(k).strip() and str(v).strip() and str(k).strip() != str(v).strip()}
+        if not _map:
+            return "noop", 0
+        try:
+            _st, _d = self.fetch_item_status(_iid, fields=self._ITEM_FIELDS_UPDATE)
+        except Exception as e:
+            logger.warning(f"[EmbyClient] 读取条目详情失败（角色同步中止）{_iid}: {e}")
+            return "unavailable", 0
+        if _st == ITEM_NOT_FOUND:
+            return "not_found", 0
+        if _st != ITEM_FOUND or not isinstance(_d, dict):
+            return "unavailable", 0
+        _people = _d.get("People")
+        if not isinstance(_people, list) or not _people:
+            return "no_people", 0
+        _changed = 0
+        for _p in _people:
+            if not isinstance(_p, dict):
+                continue
+            _r = str(_p.get("Role") or "").strip()
+            if not _r:
+                continue
+            _new = _map.get(_r)
+            if _new and _new != _r:
+                _p["Role"] = _new
+                _changed += 1
+        if not _changed:
+            return "noop", 0
+        try:
+            if self._post(f"/emby/Items/{_iid}", _d):
+                return "ok", _changed
+        except Exception as e:
+            logger.warning(f"[EmbyClient] 写回条目角色失败 {_iid}: {e}")
+        return "failed", 0
 
     def close(self) -> None:
         """释放底层 requests 会话（连接池）—— 批量任务一次性创建的

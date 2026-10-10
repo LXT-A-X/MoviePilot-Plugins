@@ -96,6 +96,11 @@ CFG_SCHEDULE_INTERVAL_HOURS = "schedule_interval_hours"
 CFG_OVERWRITE_CHINESE = "overwrite_chinese"
 CFG_LOCK_CAST = "lock_cast"
 CFG_EMBY_NAME_SYNC = "emby_name_sync"
+# v4.6.114（issue #5）：把第二排角色译文写入 Emby **条目级 People[].Role**（默认关）。
+# 第一排走 Person 实体改名（服务器级）所以稳定；第二排此前只写 nfo，会被 Emby 用条目级
+# 缓存的英文 Role 覆盖回去。开启后与第一排同层级，Emby 自己写 nfo 带的即是中文。
+CFG_EMBY_ROLE_SYNC = "emby_role_sync"
+DEFAULT_EMBY_ROLE_SYNC = False
 CFG_PROBE_ENABLED = "probe_enabled"                    # 开关（默认关）
 CFG_PROBE_INTERVAL_MINUTES = "probe_interval_minutes"  # 间隔（分钟，默认 60，下限 10）
 CFG_WEBHOOK_DELAY = "webhook_delay"

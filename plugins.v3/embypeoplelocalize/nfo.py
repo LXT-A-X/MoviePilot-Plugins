@@ -415,13 +415,37 @@ class NfoDoc:
         except Exception:
             return 0
 
+    def _lock_field_names(self) -> List[str]:
+        """解析 <lockedfields> → 字段名列表（v4.6.114）。
+
+        **三种分隔符都认**：Emby 原生写的是竖线 `|`（实测文件里就是
+        `Cast|Cast|Cast|Cast`），历史版本插件写的是逗号 `,`，个别工具写分号 `;`。
+        此前只按 `,` / `;` 切分 → `Cast|Cast|Cast|Cast` 被当成**一个**未知字段名
+        → 既认不出「Cast 已锁定」（诊断误报「未锁定」），又会再追加一次 Cast。
+        """
+        try:
+            if self.root is None:
+                return []
+            lf = self.root.find("lockedfields")
+            if lf is None:
+                return []
+            cur = (lf.text or "").strip()
+            if not cur:
+                return []
+            return [x.strip() for x in re.split(r"[|,;]", cur) if x.strip()]
+        except Exception:
+            return []
+
     def set_lock(self, lock: bool = True) -> bool:
         """字段级锁定：在 <lockedfields> 中追加 Cast（演员），让 Emby/Jellyfin
         重新刮削/刷新元数据时不覆盖已翻译的中文演员名单，但剧情/简介/海报等
         其他字段照常可更新（新番简介过几天出中文也不受影响）。
         改为大写「Cast」（Emby 原生 nfo 写法；实测小写 cast 不被
-        Emby 识别、会被刮削重写清除）—— 已有任何大小写形态的 cast 时保持原样，
-        不再覆写大小写。
+        Emby 识别、会被刮削重写清除）。
+
+        v4.6.114：分隔符统一为 Emby 原生的 `|`（此前追加时写逗号，Emby 按 `|`
+        切分会把 `Movie,Cast` 当成一个字段名 → 锁根本不生效）；同时**去重**
+        （`Cast|Cast|Cast|Cast` 归一为 `Cast`）；已有 Cast 且无需归一化时不动文件。
         :return: 是否发生 XML 变更（触发保存判定）
         """
         if self.root is None:
@@ -429,35 +453,27 @@ class NfoDoc:
         if not lock:
             return False  # 关闭时不动文件（已锁的保留，需要手动/后续解锁）
         lf = self.root.find("lockedfields")
-        want = "Cast"
+        seen, uniq = set(), []
+        for n in self._lock_field_names():
+            _k = n.lower()
+            if _k in seen:
+                continue
+            seen.add(_k)
+            uniq.append(n)
+        if "cast" not in seen:
+            uniq.append("Cast")
+        newv = "|".join(uniq)
+        cur = (lf.text or "").strip() if lf is not None else ""
         if lf is None:
             lf = ET.Element("lockedfields")
-            lf.text = want
             self.root.insert(0, lf)
-            return True
-        cur = (lf.text or "").strip()
-        names = [x.strip() for x in cur.replace(";", ",").split(",") if x.strip()]
-        if any(n.lower() == "cast" for n in names):
-            return False  # 已有锁（任意大小写），保持原样
-        names.append(want)
-        newv = ",".join(names)
         if newv != cur:
             lf.text = newv
             return True
         return False
 
     def is_cast_locked(self) -> bool:
-        try:
-            if self.root is None:
-                return False
-            lf = self.root.find("lockedfields")
-            if lf is None:
-                return False
-            cur = (lf.text or "").strip()
-            names = [x.strip() for x in cur.replace(";", ",").split(",") if x.strip()]
-            return any(n.lower() == "cast" for n in names)
-        except Exception:
-            return False
+        return any(n.lower() == "cast" for n in self._lock_field_names())
 
     def save(self, backup: bool = True, dry_run: bool = False, lock_cast: bool = False) -> bool:
         global _last_save_error

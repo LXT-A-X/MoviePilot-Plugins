@@ -86,7 +86,11 @@ const poolDataOpBlockedHint = computed(() => {
   if (poolTaskRunning.value) return '人名池任务（拉取/同步）进行中，请先「终止」或等待完成后再操作'
   return ''
 })
-const scope = ref('libraries')
+// v4.6.114（issue #4）：来源拆成两个 ref，**不再共用一个**
+//   scopeCfg   = 设置页「拉取来源」配置值（只由 /status 回填，供弹窗打开时做初值）
+//   fetchScope = 拉取弹窗**本次**选择的覆盖值（弹窗局部 state，轮询绝不改写它）
+const scopeCfg = ref('libraries')
+const fetchScope = ref('libraries')
 
 // 出现清单（懒加载，只展示不编辑）
 const occOpen = ref('')
@@ -223,7 +227,10 @@ async function loadStatus() {
     fetchState.value = d.fetch || {}
     txState.value = d.tx || {}
     poolTaskRunning.value = !!d.running
-    if (d.scope) scope.value = d.scope
+    // v4.6.114（issue #4）：只回填**配置值**，绝不碰弹窗里的本次选择（fetchScope）
+    // —— 此前二者是同一个 ref，3 秒轮询一回填就把用户刚选的来源冲掉
+    //（`scope`/`scope_cfg` 分别是「最近一次任务实际来源」与「设置页配置值」）
+    if (d.scope_cfg || d.scope) scopeCfg.value = d.scope_cfg || d.scope
     // v4.6.70：同步统一任务守卫（/pool/status 已附 is_running + tasks 快照）
     guard.loadStatus(d)
   } catch (e) { /* 静默 */ }
@@ -530,6 +537,9 @@ async function refetchOne(r) {
 
 // ── 拉取 ──
 function openFetch() {
+  // v4.6.114（issue #4）：打开时用当前配置值初始化「本次覆盖」，
+  // 之后只有用户自己能动它（轮询不再回填）
+  fetchScope.value = scopeCfg.value || 'libraries'
   fetchDlg.value = true
 }
 
@@ -537,7 +547,7 @@ async function doFetch() {
   if (!guard.check('拉取人名')) return   // v4.6.70：统一守卫
   busy.value = true
   try {
-    const d = await api.post(props.api, '/pool/fetch', { scope: scope.value })
+    const d = await api.post(props.api, '/pool/fetch', { scope: fetchScope.value })
     notify(d?.message || '拉取已启动', 'success')
     fetchDlg.value = false
     fetchState.value = { running: true, total: 0, done: 0, current: '准备中…' }
@@ -845,10 +855,12 @@ onBeforeUnmount(() => {
         <div class="epl-dlg-title">拉取人名</div>
         <div class="epl-dlg-body">
           <div class="epl-dlg-tip">拉取类型跟随设置页「翻译范围」的人名类型开关（不再单独设置）。人物类型优先从 Emby People 关系获取；无法确定类型的全库 Person 不参与按类型筛选，建议使用「已选媒体库」范围。</div>
-          <v-radio-group v-model="scope" density="compact" hide-details class="epl-dlg-radio">
+          <v-radio-group v-model="fetchScope" density="compact" hide-details class="epl-dlg-radio">
             <v-radio value="libraries" label="仅已选媒体库中的 Person（推荐，快）"></v-radio>
             <v-radio value="all" label="全库 Person（/Persons 全量，慢）"></v-radio>
           </v-radio-group>
+          <!-- v4.6.114（issue #4）：明确「弹窗选择 = 本次覆盖」，与仪表盘入口（跟随设置页）区分 -->
+          <div class="epl-dlg-tip">此处选择仅本次拉取生效，不改设置页配置；仪表盘的「拉取人名」按钮则始终跟随设置页「拉取来源」。</div>
         </div>
         <div class="epl-dlg-acts">
           <v-btn variant="text" @click="fetchDlg = false">取消</v-btn>
