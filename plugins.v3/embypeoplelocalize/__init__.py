@@ -100,7 +100,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
     plugin_name = "Emby 演职人员中文化"
     plugin_desc = "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回；拉取人名时可用 TMDB 刮削补中文名/简介/头像"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/embypeoplelocalize.png"
-    plugin_version = "4.6.107"
+    plugin_version = "4.6.108"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "embypeoplelocalize_"
@@ -1777,17 +1777,29 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             data = data or {}
             _types = data.get("types")
             if not isinstance(_types, list) or not _types:
-                _types = self._pool_fetch_trans_types()
+                # v4.6.108（LIB-016）：白名单取**「翻译范围」的类型开关**（与接口语义 / 按钮文案一致）。
+                # 此前取的是「拉取类型」（_pool_fetch_trans_types，默认只有 演员+声优）——
+                # 两个口径不同：用户开着「客串」时，客串行会被误判成「类型不符」。
+                _tr_now = self._collect_trans_types().get("translate", {}) or {}
+                _types = [t for t, k in self.TX_TYPE_SWITCH.items() if bool(_tr_now.get(k))]
             _types = [str(t).strip() for t in _types if str(t).strip()]
+            if not _types:
+                # 白名单为空 = 一个类型开关都没开：此时「全都类型不符」会把池清空，
+                # 明确拒绝而不是静默删库。
+                return {"success": False,
+                        "message": "当前「翻译范围」一个类型开关都没开 —— 重筛会把池清空，已拒绝。请先勾选要保留的类型"}
             _keep_unknown = data.get("keep_unknown")
             if _keep_unknown is None:
                 _keep_unknown = bool(getattr(self, "_pool_keep_unknown", True))
             else:
                 _keep_unknown = bool(_keep_unknown)
             dbm = getattr(self, "_name_map_db", None) or NameMapDb()
+            # v4.6.108（LIB-016）：include_no_id=True —— 扫描入库的「无 Emby Person ID 缓存行」
+            # 此前**不参与**重筛（旧实现只清带 ID 的池管理条目），于是从「客串」门禁漏进来的
+            # 导演/编剧/制片缓存行点多少次重筛都清不掉；现在一并按类型白名单清理。
             _n = dbm.remove_non_matching_types(plugin_id=self.__class__.__name__, allowed_types=_types,
-                                               keep_unknown=_keep_unknown)
-            self._push_log("INFO", f"人名池重筛完成：按「翻译范围」类型（{'、'.join(_types) or '空'}）不匹配的 {_n} 个条目已移出池")
+                                               keep_unknown=_keep_unknown, include_no_id=True)
+            self._push_log("INFO", f"人名池重筛完成：按「翻译范围」类型（{'、'.join(_types)}）不匹配的 {_n} 个条目已移出池")
             return {"success": True, "message": f"已按当前设置重筛：移除 {_n} 个类型不符的人名", "data": {"removed": _n}}
         except Exception as e:
             return {"success": False, "message": str(e)}
@@ -3708,6 +3720,23 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         except Exception:
             return {}
 
+    def _tx_switch_key(self, person_type: str) -> str:
+        """Emby 原始职位 → 翻译类型开关键（actor/guest/director/writer/producer）。
+        大小写不敏感（NFO 里可能写 "actor" / "Actor"）；未知职位返回 ""（由调用方兜底）。
+        v4.6.108（LIB-016）：扫描入池的门禁要用**真实职位**去查开关，故单独抽出，
+        避免各处各写一套映射导致「门禁用 A、落库用 B」的不一致。"""
+        _t = str(person_type or "").strip()
+        if not _t:
+            return ""
+        _k = self.TX_TYPE_SWITCH.get(_t)
+        if _k:
+            return _k
+        _tl = _t.lower()
+        for _kk, _vv in self.TX_TYPE_SWITCH.items():
+            if _kk.lower() == _tl:
+                return _vv
+        return ""
+
     def _tx_type_enabled(self, person_type: str, scope: str = "") -> bool:
         """该人物类型是否在翻译范围内（翻译 worker 收词条 / 写回就绪判定共用同一口径）。
         需同时满足 —— 目标范围含第一排(person)、
@@ -5571,6 +5600,16 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             a_type = (_ty.text or "").strip() if _ty is not None and _ty.text else "Actor"
             _is_guest = a_type.lower() not in ("actor", "voiceactor", "star")
             _kind = "guest" if _is_guest else "actor"
+            # v4.6.108（LIB-016 · 入池门禁漏洞）：门禁必须按**这个人的真实职位**去查开关。
+            # 此前一律用 _kind —— 只要不是演员类就算「客串」，于是 Emby 把导演/编剧/制片写成
+            # `<actor><type>Director</type></actor>`（非常常见）时，**只要开着「客串」，
+            # 导演/编剧/制片就会被一并收进人名池**，而落库的 person_type 仍是
+            # Director/Writer/Producer → 池里显示「导演/编剧/制片」，翻译时又按类型开关
+            # （这几个开关没开）被跳过、永远翻不掉（用户实测：只开「演员 + 客串」，
+            # 池里却混进 制片/导演/编剧，并永久挂着「剩余 2 条」）。
+            # 现在按真实职位取开关键（Actor→actor / Director→director / Producer→producer …），
+            # 只有职位未知时才退回原来的「演员类=actor / 其它=guest」兜底。
+            _sw_key = self._tx_switch_key(a_type) or _kind
             if not n and not r:
                 continue
             if _credits_map and (not r or not any("a" <= _c.lower() <= "z" for _c in r)):
@@ -5589,7 +5628,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             # 入池只受「类型开关 + 第一排总开关」约束（v4.6.48）——
             # 「翻译人数上限」是「翻译阶段每文件前 N 个」的量，不决定「收不收进池」；
             # 上限填 0 只是不翻该类型，不应导致扫描后池空（用户实测困惑点）。
-            if _pool_on and n and bool(_tr.get(_kind)):
+            if _pool_on and n and bool(_tr.get(_sw_key)):
                 _pool_entries.append({"original": n, "zh": person_map.get(n, ""),
                                       "person_type": a_type, "source": "scan"})
         simple_type = {"director": "Director", "writer": "Writer", "credits": "Producer", "producer": "Producer"}
@@ -7352,6 +7391,35 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                     "message": "任务正在运行中，请先「终止」或等待完成后，再进行此操作"}
         return None
 
+    def _clear_transient_stop_bits(self) -> None:
+        """停止位自愈复位（v4.6.108 · LIB-015）。
+
+        「终止」(`_api_stop` → `_request_task_stop`) 会置 `_stop_requested` 与各任务的
+        停止位（`_scan_stop` / `_tx_stop` / `_wb_stop` / `_pool_stop` / `_probe_stop`）——
+        这些位只表示「请当前这轮停下来」，**但没有任何地方在停完之后把它们复位**。
+        而 `_task_state()` 把 `_stop_requested` / `_wb_stop` 当作 STOPPING，于是：
+
+            终止 → STOPPING → data_mutation_locked 恒为 True
+                 → 所有「开始新任务 / 改数据」都被 `_task_busy_msg()` 拦住
+                   （连保存配置都会提示「任务运行中」）
+                 → 而能复位停止位的 `_launch_*` 又被这个门拦着 → 死锁，只能重启插件。
+
+        用户实测日志正是：17:03:03 已「归还消费许可」→ 26 秒后 17:03:29 保存配置仍判
+        「任务运行中，下个任务生效」。
+
+        现在由 `_task_state()` 在「确认没有任何任务在跑、也没有未归还的翻译许可」时调用本方法，
+        把这些**请求位**复位回待命态（不清 `_tx_requested` —— 它由翻译线程自己归还）。
+        """
+        try:
+            self._stop_requested = False
+            self._scan_stop = False
+            self._tx_stop = False
+            self._wb_stop = False
+            self._pool_stop = False
+            self._probe_stop = False
+        except Exception:
+            pass
+
     def _task_state(self) -> dict:
         """统一任务状态（v4.6.73 · 报告第十五节）—— 单一状态 + 是否锁数据变更。
 
@@ -7365,6 +7433,13 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             _wb = self._task_running("writeback")
             _pool = self._task_running("pool")
             _probe = self._task_running("probe")
+            # v4.6.108（LIB-015）：停止位自愈 —— 确认「没有任何任务在跑、也没有未归还的翻译许可」
+            # （= 各 worker 都已收到并消化了停止请求）就把停止位复位，状态回到 IDLE，
+            # 否则会永久卡在 STOPPING、把后续所有启动/改数据操作都锁死（详见本方法上方说明）。
+            if not (_scan or _tx or _wb or _pool or _probe
+                    or bool(getattr(self, "_tx_requested", False))
+                    or bool(getattr(self, "_pool_pulling", False))):
+                self._clear_transient_stop_bits()
             _stopping = bool(getattr(self, "_stop_requested", False) or getattr(self, "_wb_stop", False))
             if _stopping:
                 _state = "STOPPING"

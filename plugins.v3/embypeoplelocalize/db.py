@@ -4329,15 +4329,19 @@ class NameMapDb:
             return []
 
     def remove_non_matching_types(self, *, plugin_id: str, allowed_types: list,
-                                  keep_unknown: bool = True, db: Optional[Any] = None) -> int:
-        """按类型白名单重筛池 —— 删除「池管理条目」（有 emby_person_id）中类型不在白名单的行；
-        普通缓存行（无 ID）不动（它们由翻译范围开关控制）。
+                                  keep_unknown: bool = True, include_no_id: bool = False,
+                                  db: Optional[Any] = None) -> int:
+        """按类型白名单重筛池 —— 删除类型不在白名单的行。
+        默认只处理「池管理条目」（有 emby_person_id）；`include_no_id=True` 时**连扫描入库的
+        无 ID 缓存行一起处理**（v4.6.108 · LIB-016：扫描曾把导演/编剧/制片顺着「客串」门禁
+        收进池，落成无 ID 缓存行，旧实现跳过它们 → 用户点多少次「重筛池」都清不掉）。
         类型未知（person_types 为空且 person_type 为空）≠ Actor，单列「未分类」态。
         keep_unknown=True（默认，§十）保留未分类条目；False 时未分类同样按白名单过滤（删除）。"""
         allow = {str(t or "").strip() for t in (allowed_types or []) if str(t or "").strip()}
         try:
             rows = _q("SELECT id, person_type, person_types FROM name_map WHERE plugin_id=? "
-                      "AND name_type='person' AND emby_person_id<>''", (plugin_id,))
+                      "AND name_type='person'" + ("" if include_no_id else " AND emby_person_id<>''"),
+                      (plugin_id,))
             _del = []
             for r in rows:
                 try:
