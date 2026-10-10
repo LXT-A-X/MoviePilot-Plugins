@@ -198,7 +198,8 @@ CREATE TABLE IF NOT EXISTS translate_jobs (
     finished_at TEXT DEFAULT '',
     next_retry_at TEXT DEFAULT '',
     error_message TEXT DEFAULT '',
-    payload TEXT DEFAULT ''          -- JSON：force 任务的条目范围（items/terms/scope）等
+    payload TEXT DEFAULT '',         -- JSON：force 任务的条目范围（items/terms/scope）等
+    cfg_snapshot TEXT DEFAULT ''     -- JSON：任务创建时的完整配置快照（v4.6.113 · P1-04 重启恢复用）
 );
 CREATE INDEX IF NOT EXISTS idx_tjobs_status ON translate_jobs (plugin_id, status, created_at);
 -- 翻译任务逐词条明细（v4.6.62 · 第 24 节）—— 精确重试与进度追溯：
@@ -245,7 +246,7 @@ CREATE TABLE IF NOT EXISTS translate_job_batches (
 CREATE INDEX IF NOT EXISTS idx_tjob_batches ON translate_job_batches (plugin_id, job_id, batch_id);
 """
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 # 「词条 × 条目」明细对上限（v4.6.61 唯一快照用）—— 防超大库下一次拉取过多行；
 # 触顶时快照按已取部分统计（日志 debug 提示），日常规模远小于该值。
@@ -760,6 +761,11 @@ def migrate() -> int:
                "ON media_identity_alias (plugin_id, server_id, provider, provider_id)")
             _x("CREATE INDEX IF NOT EXISTS idx_media_alias_old "
                "ON media_identity_alias (plugin_id, old_media_id)")
+        if cur_v < 13:
+            # v4.6.113（P1-04）：translate_jobs 补 cfg_snapshot 列 —— 任务创建时的完整配置快照，
+            # 供重启恢复时沿用原任务的翻译范围 / 人数上限 / 写回策略（而不是套用重启后的当前配置）。
+            # 旧库无损：新列默认空（旧任务无快照 → 恢复时按「无快照」处理，回退当前配置）。
+            _ensure_columns("translate_jobs", [("cfg_snapshot", "TEXT DEFAULT ''")])
     except Exception as e:
         logger.error(f"[DB] 迁移 v{cur_v} → v{SCHEMA_VERSION} 失败（版本号未更新，下次启动重试）: {e}")
         return cur_v
@@ -836,8 +842,14 @@ def _media_strong_sql(*, item_id: str = "", media_provider: str = "", media_id: 
 
 
 def _weak_sql(*, series_name: str = "", title: str = "", season_num=None,
-              episode_num=None) -> tuple:
-    """构造「弱匹配」片段（剧名 + 季集 / 标题）—— 仅用于候选计数与「唯一候选」清观察期。"""
+              episode_num=None, allow_title_only: bool = True) -> tuple:
+    """构造「弱匹配」片段（剧名 + 季集 / 标题）—— 仅用于候选计数与「唯一候选」清观察期。
+
+    v4.6.113（P2）：新增 `allow_title_only` —— **禁止仅凭标题认领 Folder**。
+    Folder 没有稳定的剧名/媒体身份，标题（文件夹名）极易撞名，仅凭标题弱匹配会把
+    陌生文件夹误判为「插件管理过的候选」。传入 False 时，无 series_name 则不再退化为
+    纯标题匹配（返回空片段 → 不产生候选）。
+    """
     _ep = ""
     _epa: list = []
     if season_num is not None:
@@ -851,7 +863,7 @@ def _weak_sql(*, series_name: str = "", title: str = "", season_num=None,
     if series_name:
         conds.append("(series_name=?" + _ep + ")")
         args += [str(series_name)] + list(_epa)
-    if title and not series_name:
+    if title and not series_name and allow_title_only:
         conds.append("(title=?)")
         args.append(str(title))
     if not conds:
@@ -1528,15 +1540,24 @@ class PeopleDb:
 
     def episode_pairs_under_prefix(self, *, plugin_id: str, path_prefix: str,
                                    server_id: Optional[str] = None,
-                                   db: Optional[Any] = None) -> list:
+                                   include_legacy: bool = True,
+                                   db: Optional[Any] = None) -> Optional[list]:
         """某目录前缀下、带季集信息的记录 → 去重升序的 [(season, episode), ...]。
 
         v4.6.85：容器级删除事件但容器**仍在 Emby**（内容变动）时，用它和 Emby 实际的
-        集列表做差集，只把真正消失的那几集进观察期（不再整树标记）。"""
+        集列表做差集，只把真正消失的那几集进观察期（不再整树标记）。
+
+        v4.6.113（P2）：
+        · 新增 `include_legacy` —— 让**读取范围与写入范围一致**：多服务器环境传 False
+          （只命中 `server_id=?`），避免把空来源 legacy 行算作当前服务器候选，造成
+          「差集基于不属于当前服务器的数据」或探测与写入结果不一致。
+        · **数据库查询失败返回 None（≠ 空列表）** —— 调用方据此区分「查询出错」与
+          「库里确实没有带季集的记录」，不得把前者当成「无可标记」。
+        """
         _p = _npath(path_prefix).rstrip("/")
         if not _p:
             return []
-        _sc, _scp = _scope_sql_soft(server_id)
+        _sc, _scp = _scope_sql_soft(server_id, include_legacy)
         try:
             rows = _q("SELECT DISTINCT season_num, episode_num FROM person WHERE plugin_id=? "
                       "AND season_num IS NOT NULL AND episode_num IS NOT NULL "
@@ -1549,8 +1570,9 @@ class PeopleDb:
                 except Exception:
                     pass
             return sorted(set(out))
-        except Exception:
-            return []
+        except Exception as e:
+            logger.warning(f"[DB] episode_pairs_under_prefix 查询失败（返回 None，调用方须按「查询不可信」处理）: {e}")
+            return None
 
     def mark_deleted_episodes_by_prefix(self, *, plugin_id: str, path_prefix: str, pairs: list,
                                         deleted_ts: float = None,
@@ -1923,7 +1945,8 @@ class PeopleDb:
                     media_provider: str = "", media_id: str = "",
                     series_media_id: str = "", nfo_path: str = "",
                     season_num=None, episode_num=None, series_name: str = "",
-                    title: str = "", db: Optional[Any] = None) -> dict:
+                    title: str = "", is_folder: bool = False,
+                    include_legacy: bool = True, db: Optional[Any] = None) -> dict:
         """「插件是否管理过该媒体」探测（v4.6.76 · 规范 §二/§三）—— **删除事件的第一道门禁**。
 
         Webhook 收到删除事件 ≠ 插件管理过该媒体：「选定媒体库」只说明路径属于用户选的库。
@@ -1931,10 +1954,16 @@ class PeopleDb:
           {"managed": bool, "match_type": emby_item_id/provider/item_id/series_media/
            path/series_episode/alias/none, "matched_rows": N, "ambiguous": bool}
         完全没有命中 → managed=False（调用方必须静默忽略，不建事件/不通知/不写库）。
+
+        v4.6.113（P2）：
+        · 新增 `include_legacy` —— 与写入侧同一口径（多服务器传 False），避免把空来源
+          legacy 行当作当前服务器的候选，造成探测与写入范围不一致 / 无用 ambiguous 事件。
+        · 新增 `is_folder` —— Folder 没有稳定媒体身份，**禁止仅凭标题弱匹配认领**
+          （避免陌生文件夹因标题撞名产生无意义的待确认事件）。
         """
         out = {"managed": False, "match_type": "none", "matched_rows": 0,
                "ambiguous": False, "status": "ok"}
-        _sc, _scp = _scope_sql_soft(server_id)
+        _sc, _scp = _scope_sql_soft(server_id, include_legacy)
 
         def _fail() -> dict:
             """v4.6.98（P1-04）：数据库查询失败 → **不得伪装成「未管理」**。
@@ -1995,8 +2024,10 @@ class PeopleDb:
             if _r is not None:
                 return _r
         # 6) 弱匹配（剧名 + 季集 / 标题）—— 只用于候选判断，不直接认领
+        # v4.6.113（P2）：Folder 禁止仅凭标题弱匹配（无 series_name 时不再退化为纯标题）
         _wcond, _wargs = _weak_sql(series_name=series_name, title=title,
-                                   season_num=season_num, episode_num=episode_num)
+                                   season_num=season_num, episode_num=episode_num,
+                                   allow_title_only=(not bool(is_folder)))
         if _wcond:
             try:
                 r = _q1("SELECT COUNT(*) c FROM (SELECT DISTINCT COALESCE(server_id,'') s, "
@@ -2669,8 +2700,10 @@ class PeopleDb:
                 return out
 
             return {"names": _mk(_q(_nsql, _np)), "roles": _mk(_q(_rsql, _rp))}
-        except Exception:
-            return {"names": [], "roles": []}
+        except Exception as e:
+            # v4.6.113（P2）：查询失败返回 error 标记（≠ 空结果），调用方须报错而非当作「无待翻」。
+            logger.warning(f"[DB] force_item_occurrences 查询失败（返回 error 标记）: {e}")
+            return {"names": [], "roles": [], "error": str(e)}
 
     def pending_terms_full(self, *, plugin_id: str, scan_mode: Optional[str] = None,
                            limits: Optional[dict] = None,
@@ -2718,8 +2751,11 @@ class PeopleDb:
                 return out
 
             return {"names": _rows(_n_rows), "roles": _rows(_r_rows)}
-        except Exception:
-            return {"names": [], "roles": []}
+        except Exception as e:
+            # v4.6.113（P2）：数据库查询失败**不得伪装成「无待翻」**——
+            # 追加 error 标记，调用方据此报错（UI/日志显示错误）而不是当作 0 待翻。
+            logger.warning(f"[DB] pending_terms_full 查询失败（返回 error 标记，不当作无待翻）: {e}")
+            return {"names": [], "roles": [], "error": str(e)}
 
     def _pending_kind_sql(self, plugin_id: str, scope: str = "",
                           limits: Optional[dict] = None, column: str = "name_before",
@@ -4684,21 +4720,26 @@ class TranslateJobDb:
                "translated_count", "failed_count", "llm_request_count",
                "rate_limit_count", "quota_error_count", "remaining_count",
                "writeback_pending_count", "started_at", "finished_at",
-               "next_retry_at", "error_message", "payload")
+               "next_retry_at", "error_message", "payload", "cfg_snapshot")
 
     def create(self, *, plugin_id: str, job_id: str, job_type: str = "auto",
                source: str = "both", scope: str = "both", batch_mode: str = "",
                batch_size: int = 0, item_count: int = 0, term_count: int = 0,
-               payload: str = "", db: Optional[Any] = None) -> bool:
-        """新建 Job（同 id 已存在则不覆盖，幂等）。"""
+               payload: str = "", cfg_snapshot: str = "", db: Optional[Any] = None) -> bool:
+        """新建 Job（同 id 已存在则不覆盖，幂等）。
+
+        cfg_snapshot（v4.6.113 · P1-04）：任务创建时的完整配置快照 JSON —— 重启恢复时
+        据此沿用原任务的翻译范围 / 人数上限 / 写回策略。
+        """
         try:
             _x("INSERT INTO translate_jobs (id, plugin_id, job_type, source, scope, status, "
-               "batch_mode, batch_size, item_count, term_count, created_at, payload) "
-               "VALUES (?,?,?,?,?,'queued',?,?,?,?,?,?) "
+               "batch_mode, batch_size, item_count, term_count, created_at, payload, cfg_snapshot) "
+               "VALUES (?,?,?,?,?,'queued',?,?,?,?,?,?,?) "
                "ON CONFLICT(id) DO NOTHING",
                (str(job_id), plugin_id, str(job_type or "auto"), str(source or "both"),
                 str(scope or "both"), str(batch_mode or ""), int(batch_size or 0),
-                int(item_count or 0), int(term_count or 0), _now(), str(payload or "")))
+                int(item_count or 0), int(term_count or 0), _now(), str(payload or ""),
+                str(cfg_snapshot or "")))
             return True
         except Exception as e:
             logger.warning(f"[JobDb] create 失败: {e}")

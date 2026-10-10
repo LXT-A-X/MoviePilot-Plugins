@@ -155,15 +155,47 @@ class EmbyClient:
             logger.debug(f"[EmbyClient] 图片拉取异常 {url}: {e}")
             return None
 
+    @staticmethod
+    def _parse_items_page(_r: Any) -> tuple:
+        """解析 Emby `/Items` 分页响应 → `(ok, items, total, reason)`（v4.6.113 · P1-01）。
+
+        HTTP 200 **不等于**「查询成功」—— Emby 在异常状态下可能返回 `{}` / 半截 JSON /
+        结构不对的响应。严格校验响应结构，任一不满足即视为「查询不可信」：
+          · 响应必须是 JSON 对象，`Items` 必须存在且为 list；
+          · `TotalRecordCount` 必须存在、可解析为非负整数。
+        缺字段 / 类型不对 → ok=False，调用方必须按 UNAVAILABLE 处理 ——
+        绝不能把它当成「空剧集 / 空列表」而据此批量标记整季失效。
+        """
+        if not isinstance(_r, dict):
+            return False, [], 0, "response_not_object"
+        if not isinstance(_r.get("Items"), list):
+            return False, [], 0, "items_missing_or_not_list"
+        if "TotalRecordCount" not in _r:
+            return False, [], 0, "total_missing"
+        _raw_total = _r.get("TotalRecordCount")
+        if isinstance(_raw_total, bool):
+            return False, [], 0, "total_not_number"
+        try:
+            total = int(_raw_total)
+        except Exception:
+            return False, [], 0, "total_not_number"
+        if total < 0:
+            return False, [], 0, "total_negative"
+        return True, list(_r.get("Items") or []), total, ""
+
     def get_series_episodes_status(self, series_id: str, limit: int = 200) -> tuple:
         """拉取整剧单集 + **枚举完整性三态**（v4.6.99 · P1-01）→ `(status, items, reason)`。
 
         · `ITEM_FOUND`       请求成功且**分页完整**（items 可信，可能为空列表）
         · `ITEM_NOT_FOUND`   Emby 明确 404（剧不存在）
-        · `ITEM_UNAVAILABLE` 超时 / 401 / 403 / 500 / 无 user_id / 响应非法 / **分页不完整**
+        · `ITEM_UNAVAILABLE` 超时 / 401 / 403 / 500 / 无 user_id / **响应结构非法** / **分页不完整**
 
         「请求失败返回空列表」绝不等于「整季/整剧没有剧集」——删除处理据此避免把
         仍然存在的季/剧误判为「全部消失」而批量标记观察期。
+
+        v4.6.113（P1-01）：每页响应都经 `_parse_items_page` 严格校验（`Items` 必须是
+        list、`TotalRecordCount` 必须存在且有效）—— Emby 返回 HTTP 200 但 JSON 为 `{}`
+        时按 UNAVAILABLE 处理，不再误报「可信空剧集列表」。
         """
         _sid = str(series_id or "").strip()
         if not _sid:
@@ -191,25 +223,24 @@ class EmbyClient:
                     return ITEM_NOT_FOUND, [], "http_404"
                 if _st != ITEM_FOUND:
                     return ITEM_UNAVAILABLE, out, f"http_error_at_{start}"
-                _r = _r or {}
-                items = _r.get("Items") or []
-                try:
-                    total = int(_r.get("TotalRecordCount") or 0)
-                except Exception:
-                    total = 0
+                # v4.6.113（P1-01）：严格校验响应结构（Items 必须 list、总数必须有效）
+                _ok, items, total, _why = self._parse_items_page(_r)
+                if not _ok:
+                    return ITEM_UNAVAILABLE, out, f"bad_response_{_why}_at_{start}"
                 if not items:
                     # 本页为空：只有「已到末尾」才算完整；服务器声称还有 = 分页异常
                     if start >= total:
                         return ITEM_FOUND, out, ""
                     return ITEM_UNAVAILABLE, out, f"empty_page_but_total_{total}_at_{start}"
+                if total == 0:
+                    # 声称总数为 0 却返回了条目 → 自相矛盾 → 不可信
+                    return ITEM_UNAVAILABLE, out, f"total_zero_but_items_at_{start}"
                 out.extend(items)
                 start += len(items)
+                if start >= total:
+                    return ITEM_FOUND, out, ""
                 if len(items) < page:
-                    if total and start < total:
-                        return ITEM_UNAVAILABLE, out, f"short_page_{start}/{total}"
-                    return ITEM_FOUND, out, ""
-                if total and start >= total:
-                    return ITEM_FOUND, out, ""
+                    return ITEM_UNAVAILABLE, out, f"short_page_{start}/{total}"
         except Exception as e:
             logger.warning(f"[EmbyClient] 拉取剧集单集异常 {series_id}: {e}")
             return ITEM_UNAVAILABLE, out, "exception"
@@ -235,6 +266,10 @@ class EmbyClient:
 
         data 恒为 `{"Items": [...], "TotalRecordCount": n}`（失败时为空结构）。
         供「季容器集列表枚举」等需要判断枚举是否可信的场景使用。
+
+        v4.6.113（P1-01）：响应结构经 `_parse_items_page` 严格校验 —— HTTP 200 但
+        `Items` 缺失/不是 list、`TotalRecordCount` 缺失/非法时一律返回 UNAVAILABLE，
+        不再把异常响应当成「可信空列表」。
         """
         _empty = {"Items": [], "TotalRecordCount": 0}
         try:
@@ -248,12 +283,10 @@ class EmbyClient:
             return ITEM_NOT_FOUND, dict(_empty), "http_404"
         if _st != ITEM_FOUND:
             return ITEM_UNAVAILABLE, dict(_empty), "http_error"
-        _r = _r or {}
-        try:
-            _total = int(_r.get("TotalRecordCount") or 0)
-        except Exception:
-            _total = 0
-        return ITEM_FOUND, {"Items": _r.get("Items") or [], "TotalRecordCount": _total}, ""
+        _ok, _items, _total, _why = self._parse_items_page(_r)
+        if not _ok:
+            return ITEM_UNAVAILABLE, dict(_empty), f"bad_response_{_why}"
+        return ITEM_FOUND, {"Items": _items, "TotalRecordCount": _total}, ""
 
     def query_items(self, params: Optional[dict] = None) -> Dict[str, Any]:
         """通用条目查询（探测入库用）—— 支持 ParentId/IncludeItemTypes/Fields/
@@ -332,24 +365,45 @@ class EmbyClient:
             logger.warning(f"[EmbyClient] 查找同名 Person 失败 {nm}: {e}")
             return []
 
-    def get_person_by_id(self, person_id: str) -> Optional[dict]:
-        """按 Person ID 查询实体 —— 判定「ID 是否仍有效」。
-        ID 仍能取到 → rename 失败应记失败、禁止按名字回退（防误改同名人物）；
-        取不到（已删除/失效）才允许回退。返回 {Id,Name,ProviderIds} 或 None。"""
+    def get_person_status(self, person_id: str) -> tuple:
+        """按 Person ID 查询实体 + **三态**（v4.6.113 · P1-03）→ `(status, person, reason)`。
+
+        只有 `ITEM_NOT_FOUND`（Emby 明确 404）才代表「ID 确实已不存在」——
+        此时才允许调用方按名字回退改名；`ITEM_UNAVAILABLE`（超时 / 401 / 403 / 500 /
+        响应非法 / 无 user_id / 响应无有效 Id）一律按「状态未知」处理：
+        调用方必须**停止自动改名、等待重试**，绝不能把「暂时查不到」当成「人物已删除」，
+        否则会退化为按名字匹配到同名他人（误改）。"""
         pid = str(person_id or "").strip()
         if not pid:
-            return None
+            return ITEM_NOT_FOUND, None, "empty_person_id"
         try:
             uid = self._get_user_id()
-            path = f"/Users/{uid}/Items/{pid}" if uid else f"/emby/Items/{pid}"
-            it = self._get(path, {"Fields": "ProviderIds"})
-            it = it or {}
-            if str(it.get("Id") or "").strip():
-                return {"Id": str(it.get("Id") or ""), "Name": str(it.get("Name") or ""),
-                        "ProviderIds": it.get("ProviderIds") or {}}
-        except Exception as e:
-            logger.debug(f"[EmbyClient] 按 ID 查 Person 失败 {pid}: {e}")
-        return None
+        except Exception:
+            uid = None
+        if not uid:
+            return ITEM_UNAVAILABLE, None, "no_user_id"
+        _st, _r = self._get_status(f"/Users/{uid}/Items/{pid}", {"Fields": "ProviderIds"})
+        if _st == ITEM_NOT_FOUND:
+            return ITEM_NOT_FOUND, None, "http_404"
+        if _st != ITEM_FOUND:
+            return ITEM_UNAVAILABLE, None, "http_error"
+        if not isinstance(_r, dict) or not str(_r.get("Id") or "").strip():
+            # HTTP 200 但没有有效 Id → 结构异常：按「状态未知」处理（不当作已删除）
+            return ITEM_UNAVAILABLE, None, "bad_response"
+        return ITEM_FOUND, {"Id": str(_r.get("Id") or ""), "Name": str(_r.get("Name") or ""),
+                            "ProviderIds": _r.get("ProviderIds") or {}}, ""
+
+    def get_person_by_id(self, person_id: str) -> Optional[dict]:
+        """按 Person ID 查询实体（兼容包装）—— 返回 {Id,Name,ProviderIds} 或 None。
+
+        ⚠️ 返回 None 无法区分「确实不存在」与「查询失败」。需要区分时请用
+        `get_person_status()`（v4.6.113 · P1-03 三态）。
+        """
+        try:
+            _st, _p, _ = self.get_person_status(person_id)
+        except Exception:
+            return None
+        return _p if _st == ITEM_FOUND else None
 
     def rename_person(self, person_id: str, new_name: str,
                       provider_ids: Optional[dict] = None) -> bool:
@@ -359,26 +413,33 @@ class EmbyClient:
         Emby POST /Items/{id} 按「整份对象」覆盖式保存：只提交稀疏 DTO
         （Id/Name/Type/ProviderIds）会清空 Overview / LockedFields / 图片 /
         其它 ProviderIds 等属性。因此必须先 GET 完整 Person DTO，仅覆盖 Name
-        后整份回写；provider_ids 仅作取不到完整 DTO 时的兜底。"""
+        后整份回写。
+
+        v4.6.113（P1-02，数据安全）：**移除稀疏 DTO 兜底** —— 此前「完整 DTO 取不到
+        或整份回写失败」时会退化为只含 Id/Name/Type/ProviderIds 的最小对象再试。
+        该兜底一旦生效（例如完整详情读取因网络/鉴权/服务器错误失败），即使改名成功
+        也可能清空人物的 Overview / LockedFields / 图片等元数据 —— 属于不可接受的数据
+        丢失风险。现在：只有成功取得完整对象、且完整回写成功才返回 True；读取或完整
+        保存失败即返回 False（交由上层记失败 / 重试），**不再猜测精简提交一定安全**。
+        `provider_ids` 参数仅为兼容旧调用签名保留，不再用于任何回退提交。"""
         pid = str(person_id or "").strip()
         nn = str(new_name or "").strip()
         if not pid or not nn:
             return False
         try:
             detail = self.get_person_detail(pid)
-            if isinstance(detail, dict) and detail:
-                detail["Name"] = nn
-                if self._post(f"/emby/Items/{pid}", detail):
-                    return True
-            # 兜底：完整 DTO 取不到（或整份回写失败）时退化为最小 DTO（含 provider_ids）
-            body = {"Id": pid, "Name": nn, "Type": "Person",
-                    "ProviderIds": provider_ids or {}}
-            if self._post(f"/emby/Items/{pid}", body):
-                return True
-            # 个别版本对 ProviderIds 校验严格 → 去掉再试一次
-            return bool(self._post(f"/emby/Items/{pid}", {"Id": pid, "Name": nn, "Type": "Person"}))
         except Exception as e:
-            logger.warning(f"[EmbyClient] 重命名 Person 失败 {pid}: {e}")
+            logger.warning(f"[EmbyClient] 重命名 Person 中止：读取完整详情异常 {pid}: {e}")
+            return False
+        if not (isinstance(detail, dict) and detail):
+            logger.warning(f"[EmbyClient] 重命名 Person 中止：未取得完整 DTO {pid} "
+                           f"（不提交稀疏对象，避免清空元数据；将按失败处理等待重试）")
+            return False
+        try:
+            detail["Name"] = nn
+            return bool(self._post(f"/emby/Items/{pid}", detail))
+        except Exception as e:
+            logger.warning(f"[EmbyClient] 重命名 Person 失败（完整回写）{pid}: {e}")
             return False
 
     def get_person_detail(self, person_id: str) -> Optional[dict]:

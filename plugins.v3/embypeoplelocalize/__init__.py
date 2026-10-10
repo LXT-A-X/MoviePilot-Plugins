@@ -100,7 +100,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
     plugin_name = "Emby 演职人员中文化"
     plugin_desc = "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回；拉取人名时可用 TMDB 刮削补中文名/简介/头像"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/embypeoplelocalize.png"
-    plugin_version = "4.6.111"
+    plugin_version = "4.6.112"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "embypeoplelocalize_"
@@ -220,6 +220,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
     _tx_cfg_snapshot: object = None
     # v4.6.99（报告 P1-03 D）：快照版本 —— 旧任务恢复时据此按明确规则迁移，缺字段不静默套用新配置
     TX_SNAPSHOT_VERSION: int = 2
+    # v4.6.113（P2）：重启恢复队列 —— 多个未完成强制重翻任务**逐个**恢复（各保留自己的 job/范围/条目）
+    _tx_recover_queue: object = None
     # v4.6.103（TMDB-1/2）：TMDB 无效 ID 负缓存 TTL（秒）。宿主 TmdbApi 对 404/异常一律
     # 吞掉返回空，插件无法区分「确实没有」与「请求失败」；负结果在 TTL 内跳过重试，避免
     # 每轮扫描/每次拉池都重打同一个坏 ID。TTL 过期自动重试 —— 网络抖动不会永久毒化。
@@ -229,6 +231,14 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
     _tx_autosync_res: object = None
     _tx_batch: int = 30                # 当前批大小（context_length 超限自动折半，成功后再放大）
     _tx_batch_max: int = 30
+    # v4.6.112（GH#3-6）：本会话「已验证不超长」的批大小上限 —— 上下文超长折半后记录，
+    # 之后放大不超过它，避免「折半 → 放大 → 又超长」来回抖动（每次抖动白烧一个请求）。
+    _tx_batch_safe: int = 30
+    # v4.6.112（GH#3-7）：待翻候选队列缓存（每 Job 跑一次全表 SQL + 游标向前推进）。
+    # 此前**每一轮**都要重跑全表聚合再过滤上万条，只为挑 30 条 —— 报告者 1.4 万待翻时
+    # 「两次请求之间隔 10~55 秒」主要就是这个。
+    TX_OCC_CACHE_TTL: float = 30.0
+    _tx_occ_cache: object = None
     _rate_limited_until: float = 0.0   # 429 熔断窗口（窗口内暂停消费，词条留 DB）
     _rl_strikes: int = 0               # 连续限流次数（60→120→240→600 指数退避）
     _pool_lu_cache: object = None      # 人名池查表缓存（60s 或写池后失效）—— 全局翻译记忆
@@ -1590,15 +1600,27 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         if _pid:
             if cli.rename_person(_pid, _target):
                 return {"ok": True, "reason": "已同步", "person_id": _pid}
-            _still = None
+            # v4.6.113（P1-03）：ID 状态**三态**判定 —— 只有 Emby 明确回答「不存在」
+            # 才允许按名字回退；「查询失败 / 服务器不可用」一律按「状态未知」处理：
+            # 停止自动改名、不按名字回退，等待重试（避免把「暂时查不到」误当成「已删除」
+            # 而按名字匹配到同名他人）。
+            _pst, _pinfo, _preason = ITEM_UNAVAILABLE, None, "query_failed"
             try:
-                _still = cli.get_person_by_id(_pid)
-            except Exception:
-                _still = None
-            if _still and str(_still.get("Id") or "").strip():
+                _pst, _pinfo, _preason = cli.get_person_status(_pid)
+            except Exception as _pe:
+                _pst, _pinfo, _preason = ITEM_UNAVAILABLE, None, f"exception:{_pe}"
+            if _pst == ITEM_FOUND:
                 self._warn_once(f"pool:id-rename-fail:{_pid}",
                                 f"[Pool] PersonId {_pid}（{_orig}）改名失败但 ID 仍有效 → 记失败，不按名字回退")
                 return {"ok": False, "reason": "Emby 改名接口失败（Person ID 仍有效，已阻止按名字回退以免误改同名人物）"}
+            if _pst == ITEM_UNAVAILABLE:
+                self._warn_once(f"pool:id-unknown:{_pid}",
+                                f"[Pool] PersonId {_pid}（{_orig}）状态无法确认（{_preason}）"
+                                f"→ 停止自动改名、不按名字回退，等待重试")
+                return {"ok": False,
+                        "reason": f"无法确认 Person ID 是否仍有效（{_preason}）：已停止自动改名、"
+                                  f"未按名字回退，请稍后重试"}
+            # ITEM_NOT_FOUND：ID 确实已不存在 → 才允许按名字回退（仅唯一候选）
             self._warn_once(f"pool:id-stale:{_pid}",
                             f"[Pool] PersonId {_pid}（{_orig}）已失效 → 允许按名字回退（仅唯一候选）")
         return self._resolve_rename_by_name(cli, name_original=_orig, target=_target, tag="Pool")
@@ -2454,6 +2476,12 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                     except Exception:
                         pass
                 if not bool(getattr(self, "_tx_requested", False)):
+                    # v4.6.113（P2）：空闲时启动下一个待恢复的强制重翻任务（逐个恢复，
+                    # 每个任务保留自己的 job_id / 范围 / 条目）
+                    if getattr(self, "_tx_recover_queue", None):
+                        self._tx_recover_pump()
+                        if bool(getattr(self, "_tx_requested", False)):
+                            continue
                     _ev.wait(2.0); _ev.clear(); continue
                 if not bool(getattr(self, "_tx_permit_logged", False)):
                     self._tx_permit_logged = True
@@ -2494,7 +2522,9 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                                        "person_index": o.get("person_index") or 0,
                                        "kind": ("role" if o["kind"] == "role" else "person"),
                                        "person_type": o.get("person_type")}
-                                      for o in self._tx_occurrences(pid)]
+                                      # v4.6.112（GH#3-7）：复用候选队列（同一份全表结果），
+                                      # 不再为「登记 Job 词条」多跑一次全表聚合
+                                      for o in (self._tx_occ_queue(pid).get("occs") or [])]
                             self._tx_register_job_terms(_trows)
                         except Exception:
                             pass
@@ -3129,6 +3159,12 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 # v4.6.102：去掉旧的 `len(_pending) >= _size` 条件 —— 缩批路径下 _pending 已被
                 # 改写，该条件在最后一批恒为假，导致批大小永远爬不回去。
                 _cap = max(1, int(getattr(self, "_tx_batch_max", 0) or self.TX_BATCH))
+                # v4.6.112（GH#3-6）：放大不超过「本会话已验证不超长的上限」，避免
+                # 「折半 → 放大 → 又超长」来回抖动（每次抖动白烧一个请求）。
+                try:
+                    _cap = max(self.TX_BATCH_MIN, min(_cap, int(getattr(self, "_tx_batch_safe", 0) or _cap)))
+                except Exception:
+                    pass
                 if _size < _cap and not _missing:
                     _size = min(_cap, max(_size + 1, _size * 2))
                     self._tx_batch = _size
@@ -3139,6 +3175,14 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 if _size > self.TX_BATCH_MIN:
                     _size = max(self.TX_BATCH_MIN, _size // 2)
                     self._tx_batch = _size
+                    # v4.6.112（GH#3-6）：记下本会话「已验证不超长」的上限（取更保守者），
+                    # 放大时不越过它 —— 否则会「折半 → 放大 → 又超长」来回抖动白烧请求。
+                    try:
+                        self._tx_batch_safe = max(
+                            self.TX_BATCH_MIN,
+                            min(int(getattr(self, "_tx_batch_safe", 0) or _size), _size))
+                    except Exception:
+                        pass
                     logger.warning(f"[Translate] 上下文超长 → 批次折半为 {_size} 条重试（本会话沿用该批大小）")
                     continue
                 _bad = _chunk[0]
@@ -3267,10 +3311,31 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
 
     def _tx_scope(self) -> str:
         """本次翻译/写回目标范围 —— person / role / both。
+
         临时任务字段（self._tx_target_scope），默认 both；「批量翻译」可临时覆盖，
-        不改动全局配置（§三十）。"""
+        不改动全局配置（§三十）。
+
+        v4.6.113（P1-04）：**任务运行期间优先读任务快照的 scope** —— 任务一旦启动，
+        其范围即冻结；运行中新的自动触发 / 并发请求不得改变当前任务的范围
+        （`self._tx_target_scope` 仅在无快照时才作为实时值使用）。
+        """
+        _snap = getattr(self, "_tx_cfg_snapshot", None)
+        if isinstance(_snap, dict):
+            _ss = str(_snap.get("scope") or "").strip().lower()
+            if _ss in ("person", "role", "both"):
+                return _ss
         _s = str(getattr(self, "_tx_target_scope", "both") or "both").strip().lower()
         return _s if _s in ("person", "role", "both") else "both"
+
+    def _tx_batching_mode(self) -> str:
+        """分批模式（per_title / global）—— 任务运行期间取 Job Snapshot（v4.6.113 · P1-04）：
+        运行中改「分批方式」不影响当前任务（新设置从下一个任务生效）。"""
+        _snap = getattr(self, "_tx_cfg_snapshot", None)
+        if isinstance(_snap, dict) and _snap.get("batching"):
+            _b = str(_snap.get("batching")).strip().lower()
+            if _b:
+                return _b
+        return str(getattr(self, "_translate_batching", "per_title") or "per_title").strip().lower()
 
     def _tx_scope_allows(self, kind: str, scope: str = "") -> bool:
         """当前目标范围是否包含某排 —— person=第一排人名 / role=第二排角色。
@@ -3377,6 +3442,9 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         episode_num/person_index/person_type/title。
         """
         _out: List[dict] = []
+        # v4.6.113（P2）：数据库读取错误标记 —— 供候选队列 / 翻译轮次区分
+        # 「查询失败」与「确实没有待翻」，绝不把前者伪装成「本轮没有工作」。
+        self._tx_occ_err = ""
         try:
             _db = getattr(self, "_people_db", None)
             if _db is None:
@@ -3393,6 +3461,10 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 _raw = _db.pending_terms_full(plugin_id=pid, limits=_lim,
                                               disabled_types=disabled, only_pending=True,
                                               exclude_episodes=_ex_ep) or {}
+            if isinstance(_raw, dict) and _raw.get("error"):
+                self._tx_occ_err = str(_raw.get("error"))
+                logger.warning(f"[Translate] 待翻词条读取失败（数据库错误，非「无可翻条目」）: {self._tx_occ_err}")
+                return _out
             for _kind, _key in (("person", "names"), ("role", "roles")):
                 for r in (_raw.get(_key) or []):
                     _t = str((r or {}).get("term") or "").strip()
@@ -3409,8 +3481,44 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                     _o["occ_id"] = self._tx_occ_id(_o)
                     _out.append(_o)
         except Exception as _e:
-            logger.debug(f"[Translate] 取 occurrence 失败: {_e}")
+            # v4.6.113（P2）：异常同样登记为错误标记（≠ 空的「无可翻条目」）
+            self._tx_occ_err = str(_e)
+            logger.warning(f"[Translate] 取 occurrence 失败（数据库/查询错误，非「无可翻条目」）: {_e}")
         return _out
+
+    def _tx_occ_queue(self, pid: str, force: bool = False) -> dict:
+        """本 Job 的待翻候选队列（v4.6.112 · GH#3-7）—— 缓存全表 SQL 结果 + 游标。
+
+        GH#3-7：此前 `_translate_pending_round` **每一轮**都调 `_tx_occurrences()` ——
+        对整张 person 表跑两次（name / role 各一次）窗口聚合，再在 Python 里把上万条
+        逐条过滤，最后只挑「单批最多翻译条数」（默认 30）条。1.4 万待翻时等于
+        「每翻 30 条就全表扫两遍」，报告者实测两次请求之间要等 10~55 秒，主要就是这个。
+
+        现在：全表 SQL 每 Job 只跑一次（TTL 到期 / 队列走完时再刷新），轮次只在一个
+        游标上向前推进 —— 每轮真正过滤的条目数从 O(全部待翻) 降到 O(本轮要的条数)。
+
+        缓存失效条件：Job 变化、pid 变化、TTL(30s) 到期、游标走完（force 重建）。
+        刷新是安全的：已翻的词条 SQL 不会再返回；失败待重试的会再次出现（正好重试）。
+        """
+        _now = time.time()
+        _c = getattr(self, "_tx_occ_cache", None)
+        _jid = str(getattr(self, "_tx_job_id", "") or "")
+        _ok = (isinstance(_c, dict)
+               and str(_c.get("pid") or "") == str(pid)
+               and str(_c.get("jid") or "") == _jid
+               and (_now - float(_c.get("ts") or 0.0)) < float(self.TX_OCC_CACHE_TTL))
+        if force or not _ok:
+            # v4.6.113（P2）：一并带上数据库读取错误标记（供轮次区分「查询失败」与「确无待翻」）
+            _occs = self._tx_occurrences(pid)
+            _c = {"pid": str(pid), "jid": _jid, "ts": _now,
+                  "occs": _occs, "i": 0,
+                  "error": str(getattr(self, "_tx_occ_err", "") or "")}
+            self._tx_occ_cache = _c
+            if force:
+                logger.debug(f"[Translate] 待翻候选队列重建：{len(_c.get('occs') or [])} 条")
+                if _c.get("error"):
+                    logger.warning(f"[Translate] 候选队列重建时数据库读取失败（非「无待翻」）：{_c['error']}")
+        return _c
 
     def _tx_job_flush_attempts(self) -> int:
         """把 LLM 层的每次 HTTP attempt 落进 translate_job_batches（v4.6.64 · P1-5/P1-6）——
@@ -3493,6 +3601,15 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         self._tx_job_dedup_in = 0
         self._tx_job_dedup_uniq = 0
         self._tx_job_by_kind = None
+        # v4.6.112（GH#3-5）：每个 Job 开始消费时把批大小复位到配置上限 ——
+        # 否则上一个任务因上下文超长折半后的批大小会被新任务继承
+        # （报告者实测：「重载插件或重新保存设置后短暂回到 30，很快又掉回去」）。
+        try:
+            _m = max(1, int(getattr(self, "_tx_batch_max", 0) or self.TX_BATCH))
+            self._tx_batch = _m
+            self._tx_batch_safe = _m
+        except Exception:
+            pass
 
     def _tx_job_set(self, status: str, **fields) -> None:
         """更新当前 Job 状态（内存 + SQLite 双写，v4.6.61）—— 无 job / 异常时静默。"""
@@ -3508,17 +3625,49 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         except Exception:
             pass
 
+    def _tx_recover_pump(self) -> None:
+        """重启恢复队列泵（v4.6.113 · P2）—— **一次只恢复一个**未完成强制重翻任务：
+        仅当当前没有正在运行的任务时才启动下一个，保证每个任务保留**自己的**
+        job_id / 目标范围 / 条目 / 配置快照（不再把多个旧任务汇总并归到第一个任务）。"""
+        try:
+            _q = getattr(self, "_tx_recover_queue", None) or []
+            if not _q:
+                return
+            if bool(getattr(self, "_tx_requested", False)):
+                return   # 当前任务仍在跑 → 等它结束后由 worker 再泵
+            _it = _q.pop(0)
+            self._tx_recover_queue = _q
+            _snap = _it.get("snapshot")
+            if isinstance(_snap, dict) and _snap:
+                self._tx_cfg_snapshot = _snap
+            self._tx_request_consume(source="library", items=list(_it.get("items") or []),
+                                     scope=str(_it.get("scope") or "both"),
+                                     resume_job_id=str(_it.get("job_id") or ""))
+            logger.info(f"[TranslateJob] 重启恢复：重新入队 job={_it.get('job_id')} "
+                        f"scope={_it.get('scope')} items={len(_it.get('items') or [])}"
+                        f"（剩余待恢复 {len(_q)} 个）")
+        except Exception as _e:
+            logger.debug(f"[TranslateJob] 重启恢复泵失败（非致命）: {_e}")
+
     def _tx_job_recover(self) -> None:
         """进程重启恢复（v4.6.61 · P1-6）—— 未完成的 Job 标记 interrupted；
-        「重新翻译」（force）的 payload 重新入队并唤醒 worker（不再静默丢任务）。"""
+        「重新翻译」（force）的 payload 重新入队并唤醒 worker（不再静默丢任务）。
+
+        v4.6.113（P2 · P1-04）：**逐个恢复**多个未完成的强制重翻任务 ——
+        每个任务保留自己的 job_id / 范围 / 条目 / 配置快照，放入恢复队列，由
+        `_tx_recover_pump()` 一次启动一个（不再把多个任务汇总成第一个的任务）。
+        """
         try:
             _pid = self.__class__.__name__
             _stale = self._tx_job_db().mark_stale(plugin_id=_pid) or []
             if not _stale:
                 return
-            _restored_items: List[str] = []
-            _resume_job = ""
-            _resume_scope = "both"
+            _jobs = getattr(self, "_tx_force_jobs", None)
+            if _jobs is None:
+                _jobs = {}
+                self._tx_force_jobs = _jobs
+            _queue = list(getattr(self, "_tx_recover_queue", None) or [])
+            _n_force = 0
             for _row in _stale:
                 if str(_row.get("job_type") or "") != "force":
                     continue
@@ -3528,26 +3677,30 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                     _payload = {}
                 if not isinstance(_payload, dict) or not _payload:
                     continue
-                _jobs = getattr(self, "_tx_force_jobs", None)
-                if _jobs is None:
-                    _jobs = {}
-                    self._tx_force_jobs = _jobs
+                _items: List[str] = []
                 for _iid, _job in _payload.items():
                     _iid = str(_iid or "").strip()
                     if _iid and isinstance(_job, dict):
                         _jobs.setdefault(_iid, _job)
-                        _restored_items.append(_iid)
-                if _restored_items and not _resume_job:
-                    _resume_job = str(_row.get("id") or "")
-                    _resume_scope = str(_row.get("scope") or "both")
+                        _items.append(_iid)
+                if not _items:
+                    continue
+                try:
+                    _snap = json.loads(str(_row.get("cfg_snapshot") or "") or "{}")
+                except Exception:
+                    _snap = {}
+                _queue.append({"job_id": str(_row.get("id") or ""),
+                               "scope": str(_row.get("scope") or "both"),
+                               "items": _items,
+                               "snapshot": (_snap if isinstance(_snap, dict) else {})})
+                _n_force += 1
+            self._tx_recover_queue = _queue
             logger.info(f"[TranslateJob] 重启恢复：{len(_stale)} 个未完成任务已标记 interrupted"
-                        + (f"，其中重新翻译 {len(_restored_items)} 个条目已重新入队（job={_resume_job}）"
-                           if _restored_items else "（常规任务：待翻词条仍在库中，下一次许可自动续翻）"))
+                        + (f"，其中 {_n_force} 个强制重翻任务已分别入队待恢复"
+                           if _n_force else "（常规任务：待翻词条仍在库中，下一次许可自动续翻）"))
             self._push_log("INFO", f"翻译任务重启恢复：{len(_stale)} 个中断任务已登记"
-                                   + (f"，重新翻译 {len(_restored_items)} 个条目已恢复入队" if _restored_items else ""))
-            if _restored_items:
-                self._tx_request_consume(source="library", items=_restored_items,
-                                         scope=_resume_scope, resume_job_id=_resume_job)
+                                   + (f"，{_n_force} 个重新翻译任务已分别恢复入队" if _n_force else ""))
+            self._tx_recover_pump()
         except Exception as _e:
             logger.debug(f"[TranslateJob] 重启恢复失败（非致命）: {_e}")
 
@@ -3578,40 +3731,50 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             _new_t = {str(x).strip() for x in terms if str(x or "").strip()}
             _cur_t = set(getattr(self, "_tx_only_terms", None) or ())
             self._tx_only_terms = (_cur_t | _new_t) if _cur_t else _new_t
+        # v4.6.113（P1-04）：判定「已有正在运行 / 已冻结快照的任务」—— 此时本次（并发 /
+        # 自动触发）请求**不得覆盖**当前任务的配置快照（范围 / 人数上限 / 写回策略 / 分批模式
+        # 一律保持创建时冻结）；恢复既有 Job（resume_job_id 非空）时沿用调用方已设置的快照。
+        _running_snap = (isinstance(getattr(self, "_tx_cfg_snapshot", None), dict)
+                         and (bool(getattr(self, "_tx_requested", False))
+                              or bool(str(resume_job_id or "").strip())))
         self._tx_requested = True
         self._tx_stop = False
         # v4.6.76（规范 §十三 · Job Snapshot）：任务创建时**冻结**翻译相关配置 ——
         # 运行中用户改设置（第一排/第二排开关、类型开关、处理单集、TMDB 补译…）
         # 不得影响正在跑的任务；新设置从下一个任务生效。
-        try:
-            # v4.6.99（报告 P1-03 A）：快照覆盖本任务**真正依赖**的设置，而不只是类型开关；
-            # 并带上 version，供旧任务恢复时按明确规则迁移（缺字段不静默套用新配置）。
-            # 注意：这里**直接读实时配置**（不经 _tx_limits_by_level / _tx_exclude_episodes），
-            # 避免赋值前拿到「上一个任务的旧快照」造成跨任务串味。
-            _ctt = self._collect_trans_types() or {}
-            _tt = dict(_ctt.get("translate", {}) or {})
-            _one = dict(_ctt.get("limits", {}) or {})
-            self._tx_cfg_snapshot = {
-                "version": int(getattr(self, "TX_SNAPSHOT_VERSION", 2) or 2),
-                "person": bool(_tt.get("person", True)),
-                "role": bool(_tt.get("role", True)),
-                "types": _tt,
-                "exclude_episodes": (not bool(getattr(self, "_nfo_include_episodes", False))),
-                "scope": str(getattr(self, "_tx_target_scope", "both") or "both"),
-                # 人数上限（每文件每类型前 N）—— 运行中改设置不得影响本任务
-                "limits": {"movie": dict(_one), "tvshow": dict(_one), "episode": dict(_one)},
-                "tmdb_credits": bool(getattr(self, "_pool_tmdb_credits", False)),
-                "tmdb_fill": bool(getattr(self, "_pool_tmdb_fill", True)),
-                "auto_writeback": bool(getattr(self, "_auto_writeback", True)),
-                "nfo_preview": bool(getattr(self, "_nfo_preview", False)),
-                "batching": str(getattr(self, "_translate_batching", "per_title") or "per_title"),
-                "batch_size": int(getattr(self, "_tx_batch", 0) or 0),
-                "libraries": [str(x) for x in (getattr(self, "_libraries", None) or [])],
-                "servers": sorted(self._configured_server_keys()),
-                "llm_model": str(getattr(self, "_llm_model", "") or ""),
-            }
-        except Exception:
-            self._tx_cfg_snapshot = None
+        if _running_snap:
+            logger.debug("[Translate] 并发/恢复请求：沿用当前任务配置快照"
+                         "（不覆盖运行中任务的冻结配置，新设置下一个任务生效）")
+        else:
+            try:
+                # v4.6.99（报告 P1-03 A）：快照覆盖本任务**真正依赖**的设置，而不只是类型开关；
+                # 并带上 version，供旧任务恢复时按明确规则迁移（缺字段不静默套用新配置）。
+                # 注意：这里**直接读实时配置**（不经 _tx_limits_by_level / _tx_exclude_episodes），
+                # 避免赋值前拿到「上一个任务的旧快照」造成跨任务串味。
+                _ctt = self._collect_trans_types() or {}
+                _tt = dict(_ctt.get("translate", {}) or {})
+                _one = dict(_ctt.get("limits", {}) or {})
+                self._tx_cfg_snapshot = {
+                    "version": int(getattr(self, "TX_SNAPSHOT_VERSION", 2) or 2),
+                    "person": bool(_tt.get("person", True)),
+                    "role": bool(_tt.get("role", True)),
+                    "types": _tt,
+                    "exclude_episodes": (not bool(getattr(self, "_nfo_include_episodes", False))),
+                    "scope": str(getattr(self, "_tx_target_scope", "both") or "both"),
+                    # 人数上限（每文件每类型前 N）—— 运行中改设置不得影响本任务
+                    "limits": {"movie": dict(_one), "tvshow": dict(_one), "episode": dict(_one)},
+                    "tmdb_credits": bool(getattr(self, "_pool_tmdb_credits", False)),
+                    "tmdb_fill": bool(getattr(self, "_pool_tmdb_fill", True)),
+                    "auto_writeback": bool(getattr(self, "_auto_writeback", True)),
+                    "nfo_preview": bool(getattr(self, "_nfo_preview", False)),
+                    "batching": str(getattr(self, "_translate_batching", "per_title") or "per_title"),
+                    "batch_size": int(getattr(self, "_tx_batch", 0) or 0),
+                    "libraries": [str(x) for x in (getattr(self, "_libraries", None) or [])],
+                    "servers": sorted(self._configured_server_keys()),
+                    "llm_model": str(getattr(self, "_llm_model", "") or ""),
+                }
+            except Exception:
+                self._tx_cfg_snapshot = None
         # v4.6.61（P0-4 → P1-6 · Job 持久化）：每轮任务一个 job_id；
         # 常规许可 = auto、带 items/terms = force（重新翻译）—— 均落 SQLite（translate_jobs），
         # force 的 payload 供重启恢复；resume_job_id 非空 = 恢复既有 Job（不新建行）。
@@ -3638,7 +3801,11 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                     batch_size=int(getattr(self, "_tx_batch", 0) or 0),
                     item_count=len(set(self._tx_scope_items or ())),
                     term_count=len(set(self._tx_only_terms or ())),
-                    payload=str(payload or ""))
+                    payload=str(payload or ""),
+                    # v4.6.113（P1-04）：把创建时的完整配置快照持久化进任务库 ——
+                    # 重启恢复时据此沿用原任务的翻译范围 / 人数上限 / 写回策略。
+                    cfg_snapshot=(json.dumps(self._tx_cfg_snapshot, ensure_ascii=False)
+                                  if isinstance(getattr(self, "_tx_cfg_snapshot", None), dict) else ""))
             except Exception:
                 pass
         self._tx_wake()
@@ -3732,6 +3899,16 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                     _ap = _pdb.pending_terms_full(plugin_id=_pid, limits=_limits,
                                                   disabled_types=_disabled, only_pending=False,
                                                   exclude_episodes=_ex_ep) or {}
+                # v4.6.113（P2）：数据库读取失败 ≠ 「无待翻」—— 上报错误供 UI/日志显示，
+                # 绝不静默把「查询失败」当成「剩余 0 / 本轮没有工作」。
+                _db_err = ""
+                for _rr in (_np, _ap):
+                    if isinstance(_rr, dict) and _rr.get("error"):
+                        _db_err = str(_rr.get("error"))
+                        break
+                if _db_err:
+                    _out["error"] = _db_err
+                    logger.warning(f"[Translate] 待翻快照读取失败（数据库错误，非「无待翻」）: {_db_err}")
 
                 def _collect(_pairs, _is_role: bool, _skip_zh: bool, _use_scope: bool):
                     """扫一遍「词条 × 条目」对 → (词条集合, 条目集合, {条目键: 明细})"""
@@ -3951,33 +4128,62 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             # 避免「点单条重翻」把整库待翻词条一起翻掉（i1 修复）。
             return {"did": False}
         _only_terms = set(getattr(self, "_tx_only_terms", None) or ())
+        # v4.6.112（GH#3-1/GH#3-7）：先算出「本轮要收多少条」= 设置页「单批最多翻译条数」，
+        # 再按需从候选队列取够即止 —— 不再「把上万条全过滤一遍，最后只挑 30 条」。
+        _batch = max(1, int(getattr(self, "_tx_batch_max", 0) or self.TX_BATCH))
+
+        def _accept(_o: dict) -> bool:
+            """逐条过滤（与原先 for 循环里的条件逐字一致，只是改成「取够即停」时按需调用）。"""
+            _t = str(_o.get("text") or "")
+            if _only_terms and _t not in _only_terms:
+                return False
+            if int(skip.get(_t, 0) or 0) >= self.TX_SKIP_AFTER:
+                return False
+            if self._skip_no_translate(_t):
+                return False
+            if not _only_terms:
+                # v4.6.102（P0·缺陷3）：本会话已确认「无需翻译」→ 不再重发（省一次请求）；
+                # 「无任何可译内容」（如 "M"）直接登记，不占单批名额、不触缩批重试。
+                # 手动单选重翻（_only_terms 非空）时放行，保证人工重翻不被拦。
+                if _t in self._tx_noop_terms_set():
+                    return False
+                if self._tx_untranslatable(_t):
+                    self._tx_noop_terms_set().add(_t)
+                    return False
+            if _o.get("kind") == "role":
+                return bool(_take_role and self._tx_role_type_enabled(_o.get("person_type")))
+            return bool(_take_person and self._tx_type_enabled(_o.get("person_type")))
+
         try:
-            # v4.6.64：以 occurrence 为单位收词（不按原文字符串去重）—— 同名分属不同作品互不影响
-            for _o in self._tx_occurrences(pid):
-                _t = str(_o.get("text") or "")
-                if _only_terms and _t not in _only_terms:
-                    continue
-                if int(skip.get(_t, 0) or 0) >= self.TX_SKIP_AFTER:
-                    continue
-                if self._skip_no_translate(_t):
-                    continue
-                if not _only_terms:
-                    # v4.6.102（P0·缺陷3）：本会话已确认「无需翻译」→ 不再重发（省一次请求）；
-                    # 「无任何可译内容」（如 "M"）直接登记，不占单批名额、不触缩批重试。
-                    # 手动单选重翻（_only_terms 非空）时放行，保证人工重翻不被拦。
-                    if _t in self._tx_noop_terms_set():
-                        continue
-                    if self._tx_untranslatable(_t):
-                        self._tx_noop_terms_set().add(_t)
-                        continue
-                if _o.get("kind") == "role":
-                    if not (_take_role and self._tx_role_type_enabled(_o.get("person_type"))):
-                        continue
+            # v4.6.112（GH#3-7）：候选队列 + 游标 —— 全表 SQL 每 Job 跑一次即可（见 _tx_occ_queue），
+            # 每轮只沿游标向后过滤到「取够本轮条数」为止（原先每轮过滤全部待翻词条）。
+            # 本次来源不含库内（如「人名池 · 批量翻译」）时**整段跳过** —— 那些行本就会
+            # 被 _accept 全判否，跳过可省掉每轮一次无用的全量遍历。
+            if _take_person or _take_role:
+                def _fill_from(_q: dict) -> None:
+                    _lst = _q.get("occs") or []
+                    _i = int(_q.get("i") or 0)
+                    while _i < len(_lst) and len(_occs) < _batch:
+                        if _accept(_lst[_i]):
+                            _occs.append(_lst[_i])
+                        _i += 1
+                    _q["i"] = _i
+
+                _q = self._tx_occ_queue(pid)
+                if _q.get("error"):
+                    # v4.6.113（P2）：数据库读取失败 → **不得当作「真的没有可翻条目」**；
+                    # 记错误标记、本轮跳过库内收词（等待重试），避免 UI / 日志误报「空轮」。
+                    self._tx_occ_err = str(_q.get("error"))
+                    logger.warning(f"[Translate] 本轮跳过库内收词：待翻读取数据库错误"
+                                   f"（非「无可翻条目」）：{_q['error']}")
                 else:
-                    if not (_take_person and self._tx_type_enabled(_o.get("person_type"))):
-                        continue
-                _occs.append(_o)
+                    _fill_from(_q)
+                    if not _occs and int(_q.get("i") or 0) >= len(_q.get("occs") or []):
+                        # 队列走完仍取不到 → 重建一次（新入库 / 失败待重试的词条会重新出现）；
+                        # 重建后还是空，才认为「真的没有可翻条目」。
+                        _fill_from(self._tx_occ_queue(pid, force=True))
         except Exception as e:
+            self._tx_occ_err = str(e)
             logger.warning(f"[Translate] 读取人物库待翻失败: {e}")
         # 人名池待翻（池管理条目：有原文无译文）
         pool_rows: List[dict] = []
@@ -4088,12 +4294,13 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             logger.debug(f"[Translate] 角色记忆命中失败（非致命）: {_rme}")
         if not _occs and not _role_mem_hits:
             return {"did": False}
-        _batch = max(1, int(getattr(self, "_tx_batch", 0) or self.TX_BATCH))
+        # _batch 已在收词前算好（= 设置页「单批最多翻译条数」，与分块大小 _tx_batch 解耦）
         _combined = self._tx_pick_batch(_occs, _batch)
         _pool_lu = self._pool_lookup_cached()
         # 分批模式：per_title（同作品分组，各组带作品名）/ global（一次聚合；因已 occurrence 化，
         # 每条自带 title/item_id，跨作品同名也不会串译）
-        _batching = str(getattr(self, "_translate_batching", "per_title") or "per_title").strip().lower()
+        # v4.6.113（P1-04）：任务期间取 Job Snapshot 的分批模式（运行中改设置不影响当前任务）
+        _batching = self._tx_batching_mode()
         _nr = {"hits": {}, "llm": {}, "llm_zhc": set(), "noop": {}, "failed": [], "deferred": []}
         _rr = {"hits": {}, "llm": {}, "llm_zhc": set(), "noop": {}, "failed": [], "deferred": []}
         # v4.6.75（规范 §四-3/§十-3）：本轮「送 LLM 输入 → 去重后唯一」累计（按作品分组时累加）
@@ -5067,8 +5274,11 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 return _t, _y
 
             # 两排体检（仅提示，不改数据）：第一排缺中文名 / 第二排缺英文角色名（拆可补·补不了）
-            # 另统计：第二排无原文角色名（NFO 未提供角色名）—— 天然跳过 AI，只计数
-            _hc = {"row1": set(), "row2_ok": set(), "row2_miss": set(), "row2_norole": set()}
+            # 另统计：第二排无原文角色名（NFO 未提供角色名）—— v4.6.112 起再按「该演员有没有
+            # <tmdbid>」拆两支：有的可开「TMDB 角色回填」补出英文角色名（不是「无法翻译」），
+            # 没有的才是真的补不了。此前一律写成「无法翻译」，误导用户。
+            _hc = {"row1": set(), "row2_ok": set(), "row2_miss": set(),
+                   "row2_norole": set(), "row2_norole_ok": set()}
 
             def _mark_health(_doc, _ns, _rs):
                 for _n in (_ns or ()):
@@ -5081,14 +5291,15 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                         _rv = (_re.text or "").strip() if _re is not None and _re.text else ""
                         _ne = _ac.find("name")
                         _nv = (_ne.text or "").strip() if _ne is not None and _ne.text else ""
+                        _ae = _ac.find("tmdbid")
+                        _av = (_ae.text or "").strip() if _ae is not None and _ae.text else ""
                         if not _rv:
                             if _nv:
-                                _hc["row2_norole"].add(_nv)
+                                # 有演员 tmdbid → 「TMDB 角色回填」可补；无 → 真补不了
+                                (_hc["row2_norole_ok"] if _av else _hc["row2_norole"]).add(_nv)
                             continue
                         if any("a" <= _c.lower() <= "z" for _c in _rv):
                             continue
-                        _ae = _ac.find("tmdbid")
-                        _av = (_ae.text or "").strip() if _ae is not None and _ae.text else ""
                         (_hc["row2_ok"] if _av else _hc["row2_miss"]).add((_nv, _rv))
                 except Exception:
                     pass
@@ -5145,9 +5356,16 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                     _health_lines.append(f"🩺 第二排：{_r2_ok + _r2_miss} 个角色缺英文名"
                                          f"（可补 {_r2_ok} / 无 tmdbid 补不了 {_r2_miss}；TMDB 角色回填已关）")
                 _r2_norole = len(_hc["row2_norole"])
+                _r2_norole_ok = len(_hc["row2_norole_ok"])
                 _want_role = bool(getattr(self, "_translate_role", True) or getattr(self, "_translate_all", False))
-                if _r2_norole and _want_role:
-                    _health_lines.append(f"🩺 第二排：{_r2_norole} 个角色 NFO 未提供角色名，无法翻译")
+                if (_r2_norole or _r2_norole_ok) and _want_role:
+                    # v4.6.112：不再笼统写「无法翻译」—— 拆成「可补 / 无可补」并带上开关状态，
+                    # 与上一行「角色缺英文名（可补 X / 无 tmdbid 补不了 Y）」同口径。
+                    _fill_on = bool(getattr(self, "_pool_tmdb_credits", False))
+                    _health_lines.append(
+                        f"🩺 第二排：{_r2_norole + _r2_norole_ok} 个角色 NFO 未提供角色名"
+                        f"（可补 {_r2_norole_ok} / 无 tmdbid 补不了 {_r2_norole}；"
+                        f"TMDB 角色回填{'已开' if _fill_on else '已关'}）")
             except Exception as _e:
                 logger.debug(f"[NFO] 两排体检统计失败（非致命）: {_e}")
             _health_txt = ("；" + "；".join(_health_lines)) if _health_lines else ""
@@ -8211,6 +8429,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             self._max_people_per_batch or constants.DEFAULT_BATCH_SIZE, constants.DEFAULT_BATCH_SIZE,
             min_value=1, max_value=200)
         self._tx_batch = self._tx_batch_max
+        self._tx_batch_safe = self._tx_batch_max   # v4.6.112（GH#3-6）
         self._max_guest_per_episode = constants.safe_int(
             config.get(constants.CFG_MAX_GUEST_PER_EPISODE), 5, min_value=0)
         if constants.CFG_ACTOR_LIMIT in config:
@@ -9590,7 +9809,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
 
     def _reconcile_missing_episodes(self, client, container_item_id: str,
                                     path_prefix: str, server_id: str = "",
-                                    itype: str = "series") -> tuple:
+                                    itype: str = "series",
+                                    include_legacy: bool = True) -> tuple:
         """容器级删除事件但容器**仍在 Emby** → 比对「库里登记的集」与「Emby 实际的集」。
 
         返回 `(真正消失的 [(season, episode), ...], 枚举是否可信, 原因)`：
@@ -9604,39 +9824,73 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         现在改为：只有「成功且完整」的枚举才能产出可信差集；其余一律不可信 → 不标记。
 
         - Series 容器：`client.get_series_episodes_status(剧 Id)` 拿全剧集（含分页完整性）；
-        - Season 容器：`client.query_items_status(ParentId=季 Id, IncludeItemTypes=Episode)`
-          （总数 > 实际返回 → 视为不完整）。
+        - Season 容器：`client.query_items_status(ParentId=季 Id, IncludeItemTypes=Episode)`，
+          **循环翻页**直到取满总数 —— 任一页结构非法 / 分页中断 / 总数变化 → 不可信。
+
+        v4.6.113（P1-01 / P2）：
+        · Season 查询补齐**分页循环**（此前固定单页 Limit=500，>500 集的季会被判「不完整」）；
+        · `episode_pairs_under_prefix` 返回 None（数据库查询失败）时按**不可信**处理，
+          不再落入 no_db_rows（否则真实缺失集不会被处理）；
+        · 读取范围与写入一致：`include_legacy` 透传给 db 层（多服务器环境只命中本服）。
         """
         try:
             db = getattr(self, "_people_db", None)
             if db is None or client is None:
                 return [], False, "no_client_or_db"
             _sid = str(server_id or "")
-            db_pairs = set(db.episode_pairs_under_prefix(
-                plugin_id=self.__class__.__name__, path_prefix=path_prefix, server_id=_sid) or [])
+            db_pairs = db.episode_pairs_under_prefix(
+                plugin_id=self.__class__.__name__, path_prefix=path_prefix,
+                server_id=_sid, include_legacy=include_legacy)
+            if db_pairs is None:
+                # v4.6.113（P2）：数据库查询失败 ≠ 「库里没有记录」—— 不得返回 no_db_rows
+                return [], False, "db_error"
+            db_pairs = set(db_pairs)
             if not db_pairs:
                 # 库里本就没有「带季集」的记录可比 → 无可标记（可信的「无差异」）
                 return [], True, "no_db_rows"
             _itype = str(itype or "series").lower()
             _items: List[dict] = []
             if _itype == "season":
-                _st, _r, _reason = client.query_items_status({
-                    "ParentId": str(container_item_id or ""),
-                    "IncludeItemTypes": "Episode",
-                    "Recursive": "false",
-                    "Fields": "ParentIndexNumber,IndexNumber",
-                    "Limit": 500,
-                })
-                if _st != ITEM_FOUND:
-                    return [], False, f"season_query_{_st}:{_reason}"
-                _r = _r or {}
-                _items = _r.get("Items") or []
-                try:
-                    _total = int(_r.get("TotalRecordCount") or 0)
-                except Exception:
-                    _total = 0
-                if _total and _total > len(_items):
-                    return [], False, f"season_incomplete_{len(_items)}/{_total}"
+                _total = None
+                _start = 0
+                _limit = 500
+                while True:
+                    _st, _r, _reason = client.query_items_status({
+                        "ParentId": str(container_item_id or ""),
+                        "IncludeItemTypes": "Episode",
+                        "Recursive": "false",
+                        "Fields": "ParentIndexNumber,IndexNumber",
+                        "StartIndex": _start,
+                        "Limit": _limit,
+                    })
+                    if _st != ITEM_FOUND:
+                        return [], False, f"season_query_{_st}:{_reason}"
+                    _r = _r if isinstance(_r, dict) else {}
+                    _page = _r.get("Items")
+                    if not isinstance(_page, list):
+                        return [], False, "season_items_not_list"
+                    try:
+                        _t = int(_r.get("TotalRecordCount"))
+                    except Exception:
+                        return [], False, "season_total_invalid"
+                    if _t < 0:
+                        return [], False, "season_total_negative"
+                    if _total is None:
+                        _total = _t
+                    elif _t != _total:
+                        return [], False, f"season_total_changed_{_total}->{_t}"
+                    if not _page:
+                        if _start >= _total:
+                            break
+                        return [], False, f"season_empty_page_but_total_{_total}_at_{_start}"
+                    if _total == 0:
+                        return [], False, f"season_total_zero_but_items_at_{_start}"
+                    _items.extend(_page)
+                    _start += len(_page)
+                    if _start >= _total:
+                        break
+                    if len(_page) < _limit:
+                        return [], False, f"season_short_page_{_start}/{_total}"
             else:
                 _st, _items, _reason = client.get_series_episodes_status(str(container_item_id or ""))
                 if _st != ITEM_FOUND:
@@ -9749,7 +10003,9 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                             season_num=_item.get("ParentIndexNumber"),
                             episode_num=_item.get("IndexNumber"),
                             series_name=str(_item.get("SeriesName") or _item.get("Name") or ""),
-                            title=str(_item.get("Name") or "")) or {}
+                            title=str(_item.get("Name") or ""),
+                            # v4.6.113（P2）：Folder 候选探测同样禁止仅凭标题弱匹配
+                            is_folder=(str(itype or "").lower() == "folder")) or {}
                         if (str(_pr.get("status") or "ok") == "error"
                                 or str(_pr.get("match_type") or "") == "error"):
                             _probe_ok = False
@@ -9823,7 +10079,11 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                         series_media_id=(_series_media or _probe_iid) if itype.lower() != "movie" else "",
                         nfo_path=(nfo_path or _norm_pre or ""),
                         season_num=_season, episode_num=_episode,
-                        series_name=_ev_sn, title=_title0) or _probe
+                        series_name=_ev_sn, title=_title0,
+                        # v4.6.113（P2）：探测范围与写入一致（多服务器不认领 legacy）；
+                        # Folder 禁止仅凭标题弱匹配认领（避免陌生文件夹撞名产生噪声事件）。
+                        is_folder=(itype.lower() == "folder"),
+                        include_legacy=_include_legacy) or _probe
                 except Exception as _pe:
                     logger.warning(f"[Webhook] 删除事件身份探测异常（按 error 处理，不当作未管理）: {_pe}")
                     _probe = {"managed": False, "match_type": "error",
@@ -9904,7 +10164,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                         _ok, _reason = True, ""
                         try:
                             _miss_pairs, _ok, _reason = self._reconcile_missing_episodes(
-                                _cli, str(item_id or ""), _norm_pre, _sid_arg, _ct)
+                                _cli, str(item_id or ""), _norm_pre, _sid_arg, _ct,
+                                include_legacy=_include_legacy)
                         except Exception as _re:
                             _miss_pairs, _ok, _reason = [], False, f"exception:{_re}"
                         if not _ok:
