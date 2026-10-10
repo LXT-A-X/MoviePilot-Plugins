@@ -82,7 +82,19 @@ function _normItems(resp) {
   return { list, total: Number(resp?.total ?? list.length) || list.length, hasMore: !!resp?.has_more }
 }
 
+let _itemsInflight = false
 async function loadItems(silent = false) {
+  // v4.6.103（LIB-004）：单飞守卫 —— 与 loadTxPreview 的 _txPreviewInflight 同款。
+  // 症状（用户实测 v4.6.102，库内 360 条目）：左侧条目早已渲染出来，进度条却一直转、停不下来。
+  // 成因：轮询每 8s 调 loadItems(true)，若 /db/items 响应慢于 8s，老请求会被新请求顶掉
+  // （seq 不匹配 → early return，finally 不清 loadingList），而新请求又被下一轮顶掉……
+  // 于是「永远没有一个请求是"最新一代"」，loadingList 永远为 true。在飞期间直接丢弃本轮调用，
+  // 保证在飞的唯一请求一定是最新一代 → 其 finally 必然清掉 loadingList。
+  if (_itemsInflight) {
+    if (!silent) loadingList.value = true   // 手动刷新时至少给出转圈反馈（由在飞请求收尾清除）
+    return
+  }
+  _itemsInflight = true
   // 请求代次（LIB-003）：连点刷新/轮询叠加时，只有最新一轮响应能写状态
   const seq = ++itemsSeq
   if (!silent) loadingList.value = true
@@ -93,7 +105,10 @@ async function loadItems(silent = false) {
     items.value = list
     itemHasMore.value = hasMore
   } catch (e) { if (seq === itemsSeq && !silent) notify(e.message, 'error') }
-  finally { if (seq === itemsSeq) loadingList.value = false }
+  finally {
+    if (seq === itemsSeq) loadingList.value = false
+    _itemsInflight = false
+  }
 }
 
 // 滚动到底部自动追加下一页：按「来源 + item_id」复合键去重，避免分页边界重复

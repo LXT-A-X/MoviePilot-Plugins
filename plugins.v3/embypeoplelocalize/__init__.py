@@ -100,7 +100,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
     plugin_name = "Emby 演职人员中文化"
     plugin_desc = "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回；拉取人名时可用 TMDB 刮削补中文名/简介/头像"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/embypeoplelocalize.png"
-    plugin_version = "4.6.102"
+    plugin_version = "4.6.103"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "embypeoplelocalize_"
@@ -220,6 +220,10 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
     _tx_cfg_snapshot: object = None
     # v4.6.99（报告 P1-03 D）：快照版本 —— 旧任务恢复时据此按明确规则迁移，缺字段不静默套用新配置
     TX_SNAPSHOT_VERSION: int = 2
+    # v4.6.103（TMDB-1/2）：TMDB 无效 ID 负缓存 TTL（秒）。宿主 TmdbApi 对 404/异常一律
+    # 吞掉返回空，插件无法区分「确实没有」与「请求失败」；负结果在 TTL 内跳过重试，避免
+    # 每轮扫描/每次拉池都重打同一个坏 ID。TTL 过期自动重试 —— 网络抖动不会永久毒化。
+    _TMDB_DEAD_TTL: float = 6 * 3600.0
     _tx_job_by_kind: object = None
     _tx_job_started: float = 0.0
     _tx_autosync_res: object = None
@@ -1023,6 +1027,16 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         if not _tid.isdigit():
             out["err"] = "无 TMDB ID"
             return out
+        # v4.6.103（TMDB-2）：进程级负缓存 —— 同一 TmdbId 已在本进程确认「TMDB 无人物详情」时，
+        # TTL 内直接跳过（此前每次拉池都重打一遍坏 ID，宿主 tmdbapi 每次 logger.error 一行
+        # "The resource you requested could not be found."，用户日志被刷屏）。
+        _dead = getattr(self, "_tmdb_dead", None)
+        if _dead is None:
+            _dead = self._tmdb_dead = {}
+        _dts = _dead.get(("person", _tid))
+        if _dts and (time.time() - float(_dts)) < float(getattr(self, "_TMDB_DEAD_TTL", 21600.0) or 21600.0):
+            out["err"] = "TMDB 无人物详情（负缓存命中，跳过请求）"
+            return out
         _cache = getattr(self, "_tmdb_person_cache", None)
         if _cache is None:
             _cache = self._tmdb_person_cache = {}
@@ -1037,6 +1051,10 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 _pd = None
             _cache[_tid] = _pd
         if not _pd:
+            try:
+                _dead[("person", _tid)] = time.time()   # v4.6.103（TMDB-2）：登记负结果
+            except Exception:
+                pass
             out["err"] = "TMDB 无人物详情"
             return out
         # 中文名来源（v4.6.11 修正）：
@@ -1129,6 +1147,17 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             _cache = self._tmdb_credits_cache = {}
         if _key in _cache:
             return _cache[_key]
+        # v4.6.103（TMDB-1）：进程级负缓存 —— 宿主 TmdbApi.get_tv_credits/get_movie_credits 对
+        # 404/异常一律吞掉返回 []，插件无法区分「确实没有演职员」与「ID 无效/请求失败」；此前
+        # _tmdb_credits_cache 每轮扫描清空，同一个坏 ID 会被反复重打（日志 1 秒 1 条 404）。
+        # 命中即跳过；TTL 过期自动重试。
+        _dead = getattr(self, "_tmdb_dead", None)
+        if _dead is None:
+            _dead = self._tmdb_dead = {}
+        _dts = _dead.get(("credits", _key))
+        if _dts and (time.time() - float(_dts)) < float(getattr(self, "_TMDB_DEAD_TTL", 21600.0) or 21600.0):
+            _cache[_key] = {}
+            return {}
         _map = {}
         try:
             from app.modules.themoviedb.tmdbapi import TmdbApi
@@ -1151,6 +1180,13 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         except Exception as e:
             logger.debug(f"[Pool][TMDB] credits 拉取失败 {_iid}({'tv' if _is_tv else 'movie'}): {e}")
         _cache[_key] = _map
+        if not _map:
+            # v4.6.103（TMDB-1）：空结果登记负缓存（TTL 内不再重打 —— 404 的 ID 与「确实无演职员」
+            # 在宿主侧无法区分，两者都不值得每轮重试；TTL 到期会自动再试一次）。
+            try:
+                _dead[("credits", _key)] = time.time()
+            except Exception:
+                pass
         return _map
 
     def _pool_fetch_worker(self, data: Optional[dict] = None):
@@ -5465,9 +5501,16 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         # —— _tr['role'] 即 _collect_trans_types 计算出的有效值。此前用原始 _translate_role：
         # 用户开「全部类型」但历史 _translate_role=false 时，翻译会翻角色、这里却不补角色。
         if getattr(self, "_pool_tmdb_credits", False) and bool(_tr.get("role", True)):
-            _cid = series_id if (item_type == "Episode" and series_id) else item_id
-            _cty = "Series" if item_type in ("Episode", "Series") else "Movie"
-            _credits_map = self._tmdb_credits_role_map(_cid, _cty)
+            # v4.6.103（TMDB-4）：单集记录若拿不到剧级 id，**不得**退回用单集 id 当剧 id 去查
+            # get_tv_credits —— 单集 nfo 的 <tmdbid> 是「集」的 ID，用它请求 /tv/{id}/credits
+            # 必然 404，正是用户日志里刷屏的 "The resource you requested could not be found."
+            # （每个单集文件 1 条）。此路径直接放弃补角色，不再发无效请求。
+            if item_type == "Episode" and not series_id:
+                _credits_map = {}
+            else:
+                _cid = series_id if item_type == "Episode" else item_id
+                _cty = "Series" if item_type in ("Episode", "Series") else "Movie"
+                _credits_map = self._tmdb_credits_role_map(_cid, _cty)
         people = []
         for actor in doc.root.findall("actor"):
             _n = actor.find("name")
@@ -6467,11 +6510,20 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 _base = str(getattr(settings, "TMDB_IMAGE_URL", "") or "https://image.tmdb.org/t/p/w500")
                 _p = poster.lstrip("/")
                 poster = f"{_base.rstrip('/')}/{_p}" if _p else ""
-            if poster:
-                cache[_tid] = poster
+            # v4.6.103（TMDB-3）：无图/失败同样落缓存（空串）—— 此前只在拿到图时才写缓存，
+            # 「ID 无效 / TMDB 无图」的条目每次打开详情都会重新请求一遍（同一条目反复打 TMDB）。
+            cache[_tid] = poster or ""
             return poster
         except Exception as e:
             logger.debug(f"[TMDB] 拉取海报失败 {item_id}: {e}")
+            try:
+                _tid2 = str(item_id or "").strip()
+                if _tid2.isdigit():
+                    _c = getattr(self, "_tmdb_poster_cache", None)
+                    if isinstance(_c, dict):
+                        _c[_tid2] = ""   # v4.6.103（TMDB-3）：异常路径也记负结果，避免重复请求
+            except Exception:
+                pass
             return ""
 
     def _proxy_poster(self, url: str) -> str:
@@ -8388,6 +8440,15 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         try:
             self._failed_terms = set()
             self._failed_terms_detail = {}
+        except Exception:
+            pass
+        try:
+            # v4.6.103（TMDB-1/2）：清缓存时一并重置 TMDB 无效 ID 负缓存 ——
+            # 「清空缓存」是用户唯一的手动恢复入口，避免坏 ID 在 TTL 内被一直跳过。
+            self._tmdb_dead = {}
+            self._tmdb_poster_cache = {}
+            self._tmdb_credits_cache = {}
+            self._tmdb_person_cache = {}
         except Exception:
             pass
         self._save_state()
@@ -12331,17 +12392,24 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         except Exception:
             pass
         if getattr(self, "_enabled", False):
-            try:
-                _gh = float(getattr(self, "_nfo_dead_grace_hours", 24) or 24)
-                _pid2 = self.__class__.__name__
-                _expired = db.expired_item_ids(plugin_id=_pid2, grace_hours=_gh)
-                if _expired:
-                    db.purge_expired(plugin_id=_pid2, grace_hours=_gh)
-                    _sexp = set(str(x) for x in _expired)
-                    items = [it for it in items if str(it.get("item_id")) not in _sexp]
-                    self._push_log("INFO", f"已清理 {len(_expired)} 个超过宽限期未恢复的条目（判定为真删除）")
-            except Exception as _e:
-                logger.warning(f"[DB] 洗版宽限期处理失败: {_e}")
+            # v4.6.103（LIB-005）：洗版宽限期清理**限频 120s** —— expired_item_ids（全表
+            # CAST(deleted_at AS REAL) 扫描）与 purge_expired（全表 DELETE）此前每调用一次
+            # /db/items 就跑一遍，而库页轮询每 8s 一次、条目 360 个时直接拖慢整页。
+            # 宽限期以「小时」计，120s 粒度完全够用；内存时间戳，不落盘。
+            _now = time.time()
+            if _now - float(getattr(self, "_purge_scan_ts", 0.0) or 0.0) >= 120.0:
+                self._purge_scan_ts = _now
+                try:
+                    _gh = float(getattr(self, "_nfo_dead_grace_hours", 24) or 24)
+                    _pid2 = self.__class__.__name__
+                    _expired = db.expired_item_ids(plugin_id=_pid2, grace_hours=_gh)
+                    if _expired:
+                        db.purge_expired(plugin_id=_pid2, grace_hours=_gh)
+                        _sexp = set(str(x) for x in _expired)
+                        items = [it for it in items if str(it.get("item_id")) not in _sexp]
+                        self._push_log("INFO", f"已清理 {len(_expired)} 个超过宽限期未恢复的条目（判定为真删除）")
+                except Exception as _e:
+                    logger.warning(f"[DB] 洗版宽限期处理失败: {_e}")
         return items
 
     def _api_db_items(self, server_id: str = "", limit: int = 0, offset: int = 0):
@@ -12528,12 +12596,15 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         except Exception as e:
             return {"success": False, "message": str(e)}
 
-    def _pending_stats(self) -> dict:
+    def _pending_stats(self, snap: Optional[dict] = None) -> dict:
         """库内待翻统计（唯一口径 v4.6.61 · P1-2）—— 直接取统一快照：
         徽章 / 明细 / 预估 / worker 日志 / 通知全部同源（旧实现另维护一套 SQL 口径，已废）。
-        条目 = 词条 × 条目明细对按 item 去重（含人数上限 / 类型开关 / 已是中文跳过）。"""
+        条目 = 词条 × 条目明细对按 item 去重（含人数上限 / 类型开关 / 已是中文跳过）。
+
+        :param snap: v4.6.103 —— 调用方已经算过的同一份快照（_tx_pending_snapshot 结果）。
+                     传入即直接复用，不再重复跑一遍重 SQL（「任务统计」徽章每次轮询曾算两遍）。"""
         try:
-            _s = self._tx_pending_snapshot()
+            _s = snap if isinstance(snap, dict) else self._tx_pending_snapshot()
         except Exception:
             return {"names": 0, "roles": 0, "items": 0, "names_scope": 0, "roles_scope": 0,
                     "person_on": True, "role_on": True, "disabled": [],
@@ -12774,11 +12845,15 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                     "person_enabled": _person_on, "role_enabled": _role_on,
                     "pending_items": [], "scope": "item",
                 }}
-            _s = self._pending_stats()
+            # v4.6.103（LIB-005）：徽章数与明细**共用同一份快照** —— 此前 _pending_stats() 与
+            # _tx_pending_snapshot(with_detail=True) 各算一遍（同一轮跑两遍重 SQL：pending_terms_full
+            # × 4 + count_pool_status），而前端每 8s 轮询一次，是「任务统计」迟迟转不出来的主因之一。
+            _snap = self._tx_pending_snapshot(with_detail=True)
+            _s = self._pending_stats(_snap)
             _pend_items = []
             try:
                 # v4.6.61：徽章悬浮列表直接取统一快照明细（与合计完全同口径）
-                _detail = self._tx_pending_snapshot(with_detail=True).get("items_list") or []
+                _detail = _snap.get("items_list") or []
                 _pend_items = [{"item_id": str(x.get("item_id") or ""),
                                 "server_id": str(x.get("server_id") or ""),
                                 "title": str(x.get("title") or x.get("item_id") or "")}
