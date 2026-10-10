@@ -61,11 +61,47 @@ const visibleNodes = computed(() => {
   for (const [lib, list] of entries) {
     out.push({ type: 'group', lib, depth: 0, count: list.length })
     if (expandedLibs.value.has(lib) || (search.value || '').trim()) {
-      for (const it of list) out.push({ type: 'item', item: it, depth: 1 })
+      // v4.6.110（LIB-018）：**分段渲染** —— 展开一个分库时不再把该分库的全部条目一次性画出来
+      // （Vuetify 的 v-list 不虚拟滚动，几千行会明显卡顿：展开要等、滚动掉帧）。
+      // 注意：这里只限制「渲染多少行」，**数据仍是全量加载**（items.value 不变）——
+      // 所以左侧分库分组与条数完全不受影响，也不会退回「分库整组消失」的老问题。
+      const _cap = libRenderCap.value[lib] || RENDER_PAGE
+      const _shown = list.slice(0, _cap)
+      for (const it of _shown) out.push({ type: 'item', item: it, depth: 1 })
+      if (list.length > _shown.length) {
+        out.push({ type: 'more', lib, depth: 1, shown: _shown.length, total: list.length,
+                   remain: list.length - _shown.length })
+      }
     }
   }
   return out
 })
+
+// ── v4.6.110（LIB-018）：展开分库的分段渲染 ──
+const RENDER_PAGE = 300            // 每次（首批/追加）渲染多少行
+const libRenderCap = ref({})       // { 分库名: 已渲染条数 }
+const listBody = ref(null)         // 左侧列表的滚动容器
+
+function growLib(lib) {
+  const _cur = libRenderCap.value[lib] || RENDER_PAGE
+  libRenderCap.value = { ...libRenderCap.value, [lib]: _cur + RENDER_PAGE }
+}
+
+/** 滚到「还有 N 条」提示行附近时，按页补渲染（一次只补一页，避免一次全放出来） */
+function onListScroll() {
+  const _box = listBody.value
+  if (!_box) return
+  const _els = _box.querySelectorAll('.epl-more-sentinel')
+  if (!_els.length) return
+  const _cb = _box.getBoundingClientRect()
+  for (const _el of _els) {
+    if (_el.getBoundingClientRect().top <= _cb.bottom + 200) {
+      const _lib = _el.getAttribute('data-more-lib')
+      if (_lib) growLib(_lib)
+      break
+    }
+  }
+}
 
 // ── 库列表分页（UI-PAGE）：与分集同款滚动自加载 ──
 const ITEM_PAGE_SIZE = 100
@@ -1224,7 +1260,7 @@ onBeforeUnmount(() => {
             </div>
           </div>
           <v-divider style="opacity:.3"></v-divider>
-          <v-card-text class="pa-0 epl-col-body">
+          <v-card-text ref="listBody" class="pa-0 epl-col-body" @scroll="onListScroll">
             <v-progress-linear v-if="loadingList" indeterminate color="primary"></v-progress-linear>
             <div v-if="!loadingList && !visibleNodes.length" class="epl-empty pa-6">暂无翻译记录</div>
             <v-list v-else density="compact" class="pa-0" nav>
@@ -1239,7 +1275,7 @@ onBeforeUnmount(() => {
                   <template #append><span class="epl-group-count">{{ node.count }}</span></template>
                 </v-list-item>
                 <!-- 条目节点 -->
-                <v-list-item v-else :active="itemKey(selected) === itemKey(node.item)" class="epl-item"
+                <v-list-item v-else-if="node.type === 'item'" :active="itemKey(selected) === itemKey(node.item)" class="epl-item"
                              :class="{ 'epl-item-dead': node.item.deleted_at, 'epl-item-partdead': !node.item.deleted_at && node.item.deleted_eps > 0 }"
                              :style="{ paddingLeft: (node.depth * 6 + 16) + 'px' }" @click="selectItem(node.item)">
                   <template #prepend>
@@ -1267,6 +1303,17 @@ onBeforeUnmount(() => {
                       <v-icon size="16">mdi-close</v-icon>
                     </v-btn>
                   </template>
+                </v-list-item>
+                <!-- v4.6.110（LIB-018）：分段渲染的「继续加载」提示行 —— 滚到它就再渲染一页 -->
+                <v-list-item v-else class="epl-more-sentinel" :data-more-lib="node.lib"
+                             :style="{ paddingLeft: (node.depth * 6 + 16) + 'px' }"
+                             @click="growLib(node.lib)">
+                  <template #prepend>
+                    <v-icon size="18" color="info" class="epl-thumb-placeholder">mdi-dots-horizontal</v-icon>
+                  </template>
+                  <v-list-item-title class="epl-cast-hint">
+                    还有 {{ node.remain }} 条 · 继续往下拉加载（已显示 {{ node.shown }} / {{ node.total }}）
+                  </v-list-item-title>
                 </v-list-item>
               </template>
             </v-list>
@@ -1735,6 +1782,8 @@ onBeforeUnmount(() => {
 .epl-search-title { font-size: 13px; opacity: .85; display: flex; align-items: center; }
 .epl-detail-head { border-bottom: 1px solid rgba(255,255,255,.06); background: rgba(255,255,255,.02); }
 .epl-group-item { cursor: pointer; }
+/* v4.6.110（LIB-018）：分段渲染的「还有 N 条」提示行（可点，等同滚到位自动加载） */
+.epl-more-sentinel { cursor: pointer; opacity: .85; }
 .epl-group-name { font-size: 13px; font-weight: 600; }
 .epl-group-count { font-size: 12px; opacity: 0.6; background: rgba(128,128,128,0.18); border-radius: 10px; padding: 0 8px; }
 .epl-item { cursor: pointer; }

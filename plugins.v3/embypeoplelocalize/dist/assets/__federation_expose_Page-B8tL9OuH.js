@@ -2516,6 +2516,7 @@ const _hoisted_101 = {
 
 const {computed: computed$3,inject: inject$3,nextTick,onActivated: onActivated$2,onBeforeUnmount: onBeforeUnmount$1,onDeactivated: onDeactivated$1,onMounted: onMounted$3,ref: ref$3,watch: watch$2} = await importShared('vue');
 
+const RENDER_PAGE = 300;            // 每次（首批/追加）渲染多少行
 const ITEM_PAGE_SIZE = 100;
 const EP_PAGE_SIZE = 50;
 const FAST_POLL_MS = 8000;
@@ -2581,11 +2582,46 @@ const visibleNodes = computed$3(() => {
   for (const [lib, list] of entries) {
     out.push({ type: 'group', lib, depth: 0, count: list.length });
     if (expandedLibs.value.has(lib) || (search.value || '').trim()) {
-      for (const it of list) out.push({ type: 'item', item: it, depth: 1 });
+      // v4.6.110（LIB-018）：**分段渲染** —— 展开一个分库时不再把该分库的全部条目一次性画出来
+      // （Vuetify 的 v-list 不虚拟滚动，几千行会明显卡顿：展开要等、滚动掉帧）。
+      // 注意：这里只限制「渲染多少行」，**数据仍是全量加载**（items.value 不变）——
+      // 所以左侧分库分组与条数完全不受影响，也不会退回「分库整组消失」的老问题。
+      const _cap = libRenderCap.value[lib] || RENDER_PAGE;
+      const _shown = list.slice(0, _cap);
+      for (const it of _shown) out.push({ type: 'item', item: it, depth: 1 });
+      if (list.length > _shown.length) {
+        out.push({ type: 'more', lib, depth: 1, shown: _shown.length, total: list.length,
+                   remain: list.length - _shown.length });
+      }
     }
   }
   return out
 });
+
+// ── v4.6.110（LIB-018）：展开分库的分段渲染 ──
+const libRenderCap = ref$3({});       // { 分库名: 已渲染条数 }
+const listBody = ref$3(null);         // 左侧列表的滚动容器
+
+function growLib(lib) {
+  const _cur = libRenderCap.value[lib] || RENDER_PAGE;
+  libRenderCap.value = { ...libRenderCap.value, [lib]: _cur + RENDER_PAGE };
+}
+
+/** 滚到「还有 N 条」提示行附近时，按页补渲染（一次只补一页，避免一次全放出来） */
+function onListScroll() {
+  const _box = listBody.value;
+  if (!_box) return
+  const _els = _box.querySelectorAll('.epl-more-sentinel');
+  if (!_els.length) return
+  const _cb = _box.getBoundingClientRect();
+  for (const _el of _els) {
+    if (_el.getBoundingClientRect().top <= _cb.bottom + 200) {
+      const _lib = _el.getAttribute('data-more-lib');
+      if (_lib) growLib(_lib);
+      break
+    }
+  }
+}
 
 // ── 库列表分页（UI-PAGE）：与分集同款滚动自加载 ──
 const itemHasMore = ref$3(false);
@@ -3980,7 +4016,12 @@ return (_ctx, _cache) => {
                   ])
                 ]),
                 _createVNode$3(_component_v_divider, { style: {"opacity":".3"} }),
-                _createVNode$3(_component_v_card_text, { class: "pa-0 epl-col-body" }, {
+                _createVNode$3(_component_v_card_text, {
+                  ref_key: "listBody",
+                  ref: listBody,
+                  class: "pa-0 epl-col-body",
+                  onScroll: onListScroll
+                }, {
                   default: _withCtx$3(() => [
                     (loadingList.value)
                       ? (_openBlock$3(), _createBlock$3(_component_v_progress_linear, {
@@ -4042,113 +4083,143 @@ return (_ctx, _cache) => {
                                       ]),
                                       _: 2
                                     }, 1032, ["onClick"]))
-                                  : (_openBlock$3(), _createBlock$3(_component_v_list_item, {
-                                      key: 1,
-                                      active: itemKey(selected.value) === itemKey(node.item),
-                                      class: _normalizeClass$2(["epl-item", { 'epl-item-dead': node.item.deleted_at, 'epl-item-partdead': !node.item.deleted_at && node.item.deleted_eps > 0 }]),
-                                      style: _normalizeStyle({ paddingLeft: (node.depth * 6 + 16) + 'px' }),
-                                      onClick: $event => (selectItem(node.item))
-                                    }, {
-                                      prepend: _withCtx$3(() => [
-                                        _createVNode$3(_component_v_icon, {
-                                          size: "22",
-                                          color: "grey",
-                                          class: "epl-thumb-placeholder"
-                                        }, {
-                                          default: _withCtx$3(() => [
-                                            _createTextVNode$3(_toDisplayString$3(itemIcon(node.item)), 1)
-                                          ]),
-                                          _: 2
-                                        }, 1024)
-                                      ]),
-                                      append: _withCtx$3(() => [
-                                        _createVNode$3(_component_v_btn, {
-                                          size: "x-small",
-                                          variant: "text",
-                                          color: "error",
-                                          onClick: _withModifiers$1($event => (delItem(node)), ["stop"])
-                                        }, {
-                                          default: _withCtx$3(() => [
-                                            _createVNode$3(_component_v_icon, { size: "16" }, {
-                                              default: _withCtx$3(() => [...(_cache[41] || (_cache[41] = [
-                                                _createTextVNode$3("mdi-close", -1)
-                                              ]))]),
-                                              _: 1
-                                            })
-                                          ]),
-                                          _: 1
-                                        }, 8, ["onClick"])
-                                      ]),
-                                      default: _withCtx$3(() => [
-                                        _createVNode$3(_component_v_list_item_title, {
-                                          class: "epl-item-name",
-                                          title: node.item.title
-                                        }, {
-                                          default: _withCtx$3(() => [
-                                            _createTextVNode$3(_toDisplayString$3(node.item.title) + " ", 1),
-                                            (node.item.deleted_at)
-                                              ? (_openBlock$3(), _createBlock$3(_component_v_chip, {
-                                                  key: 0,
-                                                  size: "x-small",
-                                                  color: "error",
-                                                  variant: "flat",
-                                                  class: "ml-1"
-                                                }, {
-                                                  default: _withCtx$3(() => [
-                                                    _createVNode$3(_component_v_icon, {
-                                                      start: "",
-                                                      size: "12"
-                                                    }, {
-                                                      default: _withCtx$3(() => [...(_cache[38] || (_cache[38] = [
-                                                        _createTextVNode$3("mdi-progress-clock", -1)
-                                                      ]))]),
-                                                      _: 1
-                                                    }),
-                                                    _cache[39] || (_cache[39] = _createTextVNode$3("待恢复 ", -1))
-                                                  ]),
-                                                  _: 1
-                                                }))
-                                              : (node.item.deleted_eps > 0)
+                                  : (node.type === 'item')
+                                    ? (_openBlock$3(), _createBlock$3(_component_v_list_item, {
+                                        key: 1,
+                                        active: itemKey(selected.value) === itemKey(node.item),
+                                        class: _normalizeClass$2(["epl-item", { 'epl-item-dead': node.item.deleted_at, 'epl-item-partdead': !node.item.deleted_at && node.item.deleted_eps > 0 }]),
+                                        style: _normalizeStyle({ paddingLeft: (node.depth * 6 + 16) + 'px' }),
+                                        onClick: $event => (selectItem(node.item))
+                                      }, {
+                                        prepend: _withCtx$3(() => [
+                                          _createVNode$3(_component_v_icon, {
+                                            size: "22",
+                                            color: "grey",
+                                            class: "epl-thumb-placeholder"
+                                          }, {
+                                            default: _withCtx$3(() => [
+                                              _createTextVNode$3(_toDisplayString$3(itemIcon(node.item)), 1)
+                                            ]),
+                                            _: 2
+                                          }, 1024)
+                                        ]),
+                                        append: _withCtx$3(() => [
+                                          _createVNode$3(_component_v_btn, {
+                                            size: "x-small",
+                                            variant: "text",
+                                            color: "error",
+                                            onClick: _withModifiers$1($event => (delItem(node)), ["stop"])
+                                          }, {
+                                            default: _withCtx$3(() => [
+                                              _createVNode$3(_component_v_icon, { size: "16" }, {
+                                                default: _withCtx$3(() => [...(_cache[41] || (_cache[41] = [
+                                                  _createTextVNode$3("mdi-close", -1)
+                                                ]))]),
+                                                _: 1
+                                              })
+                                            ]),
+                                            _: 1
+                                          }, 8, ["onClick"])
+                                        ]),
+                                        default: _withCtx$3(() => [
+                                          _createVNode$3(_component_v_list_item_title, {
+                                            class: "epl-item-name",
+                                            title: node.item.title
+                                          }, {
+                                            default: _withCtx$3(() => [
+                                              _createTextVNode$3(_toDisplayString$3(node.item.title) + " ", 1),
+                                              (node.item.deleted_at)
                                                 ? (_openBlock$3(), _createBlock$3(_component_v_chip, {
-                                                    key: 1,
+                                                    key: 0,
                                                     size: "x-small",
-                                                    color: "warning",
+                                                    color: "error",
                                                     variant: "flat",
-                                                    class: "ml-1",
-                                                    title: "部分集被服务器删除，观察期内重新入库自动恢复；超期自动清理（不会一直显示）"
+                                                    class: "ml-1"
                                                   }, {
                                                     default: _withCtx$3(() => [
                                                       _createVNode$3(_component_v_icon, {
                                                         start: "",
                                                         size: "12"
                                                       }, {
-                                                        default: _withCtx$3(() => [...(_cache[40] || (_cache[40] = [
+                                                        default: _withCtx$3(() => [...(_cache[38] || (_cache[38] = [
                                                           _createTextVNode$3("mdi-progress-clock", -1)
                                                         ]))]),
                                                         _: 1
                                                       }),
-                                                      _createTextVNode$3(_toDisplayString$3(node.item.deleted_eps) + " 集待恢复 ", 1)
+                                                      _cache[39] || (_cache[39] = _createTextVNode$3("待恢复 ", -1))
                                                     ]),
-                                                    _: 2
-                                                  }, 1024))
+                                                    _: 1
+                                                  }))
+                                                : (node.item.deleted_eps > 0)
+                                                  ? (_openBlock$3(), _createBlock$3(_component_v_chip, {
+                                                      key: 1,
+                                                      size: "x-small",
+                                                      color: "warning",
+                                                      variant: "flat",
+                                                      class: "ml-1",
+                                                      title: "部分集被服务器删除，观察期内重新入库自动恢复；超期自动清理（不会一直显示）"
+                                                    }, {
+                                                      default: _withCtx$3(() => [
+                                                        _createVNode$3(_component_v_icon, {
+                                                          start: "",
+                                                          size: "12"
+                                                        }, {
+                                                          default: _withCtx$3(() => [...(_cache[40] || (_cache[40] = [
+                                                            _createTextVNode$3("mdi-progress-clock", -1)
+                                                          ]))]),
+                                                          _: 1
+                                                        }),
+                                                        _createTextVNode$3(_toDisplayString$3(node.item.deleted_eps) + " 集待恢复 ", 1)
+                                                      ]),
+                                                      _: 2
+                                                    }, 1024))
+                                                  : _createCommentVNode$3("", true)
+                                            ]),
+                                            _: 2
+                                          }, 1032, ["title"]),
+                                          _createVNode$3(_component_v_list_item_subtitle, { class: "epl-item-meta" }, {
+                                            default: _withCtx$3(() => [
+                                              _createTextVNode$3(_toDisplayString$3(node.item.item_type) + " · " + _toDisplayString$3(node.item.person_count) + " 人 ", 1),
+                                              (node.item.episode_count)
+                                                ? (_openBlock$3(), _createElementBlock$3(_Fragment$3, { key: 0 }, [
+                                                    _createTextVNode$3(" · " + _toDisplayString$3(node.item.episode_count) + " 集", 1)
+                                                  ], 64))
                                                 : _createCommentVNode$3("", true)
-                                          ]),
-                                          _: 2
-                                        }, 1032, ["title"]),
-                                        _createVNode$3(_component_v_list_item_subtitle, { class: "epl-item-meta" }, {
-                                          default: _withCtx$3(() => [
-                                            _createTextVNode$3(_toDisplayString$3(node.item.item_type) + " · " + _toDisplayString$3(node.item.person_count) + " 人 ", 1),
-                                            (node.item.episode_count)
-                                              ? (_openBlock$3(), _createElementBlock$3(_Fragment$3, { key: 0 }, [
-                                                  _createTextVNode$3(" · " + _toDisplayString$3(node.item.episode_count) + " 集", 1)
-                                                ], 64))
-                                              : _createCommentVNode$3("", true)
-                                          ]),
-                                          _: 2
-                                        }, 1024)
-                                      ]),
-                                      _: 2
-                                    }, 1032, ["active", "class", "style", "onClick"]))
+                                            ]),
+                                            _: 2
+                                          }, 1024)
+                                        ]),
+                                        _: 2
+                                      }, 1032, ["active", "class", "style", "onClick"]))
+                                    : (_openBlock$3(), _createBlock$3(_component_v_list_item, {
+                                        key: 2,
+                                        class: "epl-more-sentinel",
+                                        "data-more-lib": node.lib,
+                                        style: _normalizeStyle({ paddingLeft: (node.depth * 6 + 16) + 'px' }),
+                                        onClick: $event => (growLib(node.lib))
+                                      }, {
+                                        prepend: _withCtx$3(() => [
+                                          _createVNode$3(_component_v_icon, {
+                                            size: "18",
+                                            color: "info",
+                                            class: "epl-thumb-placeholder"
+                                          }, {
+                                            default: _withCtx$3(() => [...(_cache[42] || (_cache[42] = [
+                                              _createTextVNode$3("mdi-dots-horizontal", -1)
+                                            ]))]),
+                                            _: 1
+                                          })
+                                        ]),
+                                        default: _withCtx$3(() => [
+                                          _createVNode$3(_component_v_list_item_title, { class: "epl-cast-hint" }, {
+                                            default: _withCtx$3(() => [
+                                              _createTextVNode$3(" 还有 " + _toDisplayString$3(node.remain) + " 条 · 继续往下拉加载（已显示 " + _toDisplayString$3(node.shown) + " / " + _toDisplayString$3(node.total) + "） ", 1)
+                                            ]),
+                                            _: 2
+                                          }, 1024)
+                                        ]),
+                                        _: 2
+                                      }, 1032, ["data-more-lib", "style", "onClick"]))
                               ], 64))
                             }), 128))
                           ]),
@@ -4168,13 +4239,13 @@ return (_ctx, _cache) => {
                           })
                         ], 512))
                       : (!loadingList.value && items.value.length)
-                        ? (_openBlock$3(), _createElementBlock$3("div", _hoisted_12$2, [...(_cache[42] || (_cache[42] = [
+                        ? (_openBlock$3(), _createElementBlock$3("div", _hoisted_12$2, [...(_cache[43] || (_cache[43] = [
                             _createElementVNode$3("span", { class: "epl-cast-hint" }, "— 已全部加载 —", -1)
                           ]))]))
                         : _createCommentVNode$3("", true)
                   ]),
                   _: 1
-                })
+                }, 512)
               ]),
               _: 1
             })
@@ -4206,7 +4277,7 @@ return (_ctx, _cache) => {
                                 size: "40",
                                 color: "grey"
                               }, {
-                                default: _withCtx$3(() => [...(_cache[43] || (_cache[43] = [
+                                default: _withCtx$3(() => [...(_cache[44] || (_cache[44] = [
                                   _createTextVNode$3("mdi-movie-outline", -1)
                                 ]))]),
                                 _: 1
@@ -4256,12 +4327,12 @@ return (_ctx, _cache) => {
                                     start: "",
                                     size: "18"
                                   }, {
-                                    default: _withCtx$3(() => [...(_cache[44] || (_cache[44] = [
+                                    default: _withCtx$3(() => [...(_cache[45] || (_cache[45] = [
                                       _createTextVNode$3("mdi-refresh-circle", -1)
                                     ]))]),
                                     _: 1
                                   }),
-                                  _cache[45] || (_cache[45] = _createTextVNode$3("重新翻译 ", -1))
+                                  _cache[46] || (_cache[46] = _createTextVNode$3("重新翻译 ", -1))
                                 ]),
                                 _: 1
                               }, 16, ["loading", "disabled"])
@@ -4317,12 +4388,12 @@ return (_ctx, _cache) => {
                                     start: "",
                                     size: "18"
                                   }, {
-                                    default: _withCtx$3(() => [...(_cache[46] || (_cache[46] = [
+                                    default: _withCtx$3(() => [...(_cache[47] || (_cache[47] = [
                                       _createTextVNode$3("mdi-file-refresh-outline", -1)
                                     ]))]),
                                     _: 1
                                   }),
-                                  _cache[47] || (_cache[47] = _createTextVNode$3("重新拉取 ", -1))
+                                  _cache[48] || (_cache[48] = _createTextVNode$3("重新拉取 ", -1))
                                 ]),
                                 _: 1
                               }, 16, ["loading", "disabled"])
@@ -4381,7 +4452,7 @@ return (_ctx, _cache) => {
                                   size: "22",
                                   color: "primary"
                                 }),
-                                _cache[48] || (_cache[48] = _createTextVNode$3(" 搜索中…", -1))
+                                _cache[49] || (_cache[49] = _createTextVNode$3(" 搜索中…", -1))
                               ]))
                             : (!searchResults.value.length)
                               ? (_openBlock$3(), _createElementBlock$3("div", _hoisted_23$2, [
@@ -4399,7 +4470,7 @@ return (_ctx, _cache) => {
                                       size: "15",
                                       class: "mr-1"
                                     }, {
-                                      default: _withCtx$3(() => [...(_cache[49] || (_cache[49] = [
+                                      default: _withCtx$3(() => [...(_cache[50] || (_cache[50] = [
                                         _createTextVNode$3("mdi-account-search-outline", -1)
                                       ]))]),
                                       _: 1
@@ -4413,7 +4484,7 @@ return (_ctx, _cache) => {
                                           variant: "tonal",
                                           class: "ml-1"
                                         }, {
-                                          default: _withCtx$3(() => [...(_cache[50] || (_cache[50] = [
+                                          default: _withCtx$3(() => [...(_cache[51] || (_cache[51] = [
                                             _createTextVNode$3("全库 · 含其他作品", -1)
                                           ]))]),
                                           _: 1
@@ -4424,7 +4495,7 @@ return (_ctx, _cache) => {
                                           variant: "tonal",
                                           class: "ml-1"
                                         }, {
-                                          default: _withCtx$3(() => [...(_cache[51] || (_cache[51] = [
+                                          default: _withCtx$3(() => [...(_cache[52] || (_cache[52] = [
                                             _createTextVNode$3("仅本条目", -1)
                                           ]))]),
                                           _: 1
@@ -4475,7 +4546,7 @@ return (_ctx, _cache) => {
                                                   }, {
                                                     default: _withCtx$3(() => [
                                                       _createVNode$3(_component_v_icon, { size: "14" }, {
-                                                        default: _withCtx$3(() => [...(_cache[52] || (_cache[52] = [
+                                                        default: _withCtx$3(() => [...(_cache[53] || (_cache[53] = [
                                                           _createTextVNode$3("mdi-pencil-outline", -1)
                                                         ]))]),
                                                         _: 1
@@ -4553,7 +4624,7 @@ return (_ctx, _cache) => {
                                       : (_openBlock$3(), _createElementBlock$3(_Fragment$3, { key: 1 }, [
                                           _createTextVNode$3("当前范围「本条目」：只在本条目的名单里筛，「N 处」也只数本条目内的出现；")
                                         ], 64)),
-                                    _cache[53] || (_cache[53] = _createTextVNode$3(" 按「原文名」汇总；点「N 处 ▾」展开出现清单可逐处编辑；铅笔（汇总行）= 全库同名改（弹窗里确认数量）；出现清单里的铅笔可选「仅这一处 / 该剧所有集 / 全库同名」。 ", -1))
+                                    _cache[54] || (_cache[54] = _createTextVNode$3(" 按「原文名」汇总；点「N 处 ▾」展开出现清单可逐处编辑；铅笔（汇总行）= 全库同名改（弹窗里确认数量）；出现清单里的铅笔可选「仅这一处 / 该剧所有集 / 全库同名」。 ", -1))
                                   ])
                                 ], 64))
                         ], 64))
@@ -4581,13 +4652,13 @@ return (_ctx, _cache) => {
                                                           size: "18",
                                                           color: "primary"
                                                         }, {
-                                                          default: _withCtx$3(() => [...(_cache[54] || (_cache[54] = [
+                                                          default: _withCtx$3(() => [...(_cache[55] || (_cache[55] = [
                                                             _createTextVNode$3("mdi-account-star", -1)
                                                           ]))]),
                                                           _: 1
                                                         }),
-                                                        _cache[55] || (_cache[55] = _createTextVNode$3(" 主演员 ", -1)),
-                                                        _cache[56] || (_cache[56] = _createElementVNode$3("span", { class: "epl-cast-hint" }, "（来自 tvshow.nfo · 编辑时在弹窗里选范围）", -1))
+                                                        _cache[56] || (_cache[56] = _createTextVNode$3(" 主演员 ", -1)),
+                                                        _cache[57] || (_cache[57] = _createElementVNode$3("span", { class: "epl-cast-hint" }, "（来自 tvshow.nfo · 编辑时在弹窗里选范围）", -1))
                                                       ])
                                                     ]),
                                                     (libMainCast.value.length)
@@ -4647,14 +4718,14 @@ return (_ctx, _cache) => {
                                                               size: "18",
                                                               color: "primary"
                                                             }, {
-                                                              default: _withCtx$3(() => [...(_cache[57] || (_cache[57] = [
+                                                              default: _withCtx$3(() => [...(_cache[58] || (_cache[58] = [
                                                                 _createTextVNode$3("mdi-television-classic", -1)
                                                               ]))]),
                                                               _: 1
                                                             }),
-                                                            _cache[59] || (_cache[59] = _createTextVNode$3(" 分集演员 ", -1)),
+                                                            _cache[60] || (_cache[60] = _createTextVNode$3(" 分集演员 ", -1)),
                                                             _createElementVNode$3("span", _hoisted_50$2, [
-                                                              _cache[58] || (_cache[58] = _createTextVNode$3("（", -1)),
+                                                              _cache[59] || (_cache[59] = _createTextVNode$3("（", -1)),
                                                               (epMultiSeason.value)
                                                                 ? (_openBlock$3(), _createElementBlock$3(_Fragment$3, { key: 0 }, [
                                                                     _createTextVNode$3("当前 S" + _toDisplayString$3(epCurrentSeason.value) + " · ", 1)
@@ -4675,7 +4746,7 @@ return (_ctx, _cache) => {
                                                                   "prepend-icon": "mdi-chevron-double-down",
                                                                   onClick: loadMoreEps
                                                                 }, {
-                                                                  default: _withCtx$3(() => [...(_cache[60] || (_cache[60] = [
+                                                                  default: _withCtx$3(() => [...(_cache[61] || (_cache[61] = [
                                                                     _createTextVNode$3("加载更多", -1)
                                                                   ]))]),
                                                                   _: 1
@@ -4706,7 +4777,7 @@ return (_ctx, _cache) => {
                                                                             key: 0,
                                                                             size: "12"
                                                                           }, {
-                                                                            default: _withCtx$3(() => [...(_cache[61] || (_cache[61] = [
+                                                                            default: _withCtx$3(() => [...(_cache[62] || (_cache[62] = [
                                                                               _createTextVNode$3("mdi-alert-outline", -1)
                                                                             ]))]),
                                                                             _: 1
@@ -4860,7 +4931,7 @@ return (_ctx, _cache) => {
                                                       ])
                                                     ]))
                                                   }), 128)),
-                                                  _cache[62] || (_cache[62] = _createElementVNode$3("div", {
+                                                  _cache[63] || (_cache[63] = _createElementVNode$3("div", {
                                                     class: "text-caption",
                                                     style: {"opacity":".6"}
                                                   }, "点铅笔编辑译文（人名 = 全库统一，可选同步 Emby；角色 = 仅这一条）；点「写入」把当前条目已翻译名单写入文件（第一排再写入服务器）。", -1))
@@ -4883,7 +4954,7 @@ return (_ctx, _cache) => {
                         }, {
                           default: _withCtx$3(() => [
                             _createVNode$3(_component_v_card_title, null, {
-                              default: _withCtx$3(() => [...(_cache[63] || (_cache[63] = [
+                              default: _withCtx$3(() => [...(_cache[64] || (_cache[64] = [
                                 _createTextVNode$3("编辑译文", -1)
                               ]))]),
                               _: 1
@@ -4904,12 +4975,12 @@ return (_ctx, _cache) => {
                                       _: 1
                                     }))
                                   : _createCommentVNode$3("", true),
-                                _cache[78] || (_cache[78] = _createElementVNode$3("div", { class: "epl-zone-head" }, [
+                                _cache[79] || (_cache[79] = _createElementVNode$3("div", { class: "epl-zone-head" }, [
                                   _createTextVNode$3("人名（第一排）"),
                                   _createElementVNode$3("span", { class: "epl-zone-tag" }, "默认只改当前身份")
                                 ], -1)),
                                 _createElementVNode$3("div", _hoisted_73$2, [
-                                  _cache[64] || (_cache[64] = _createElementVNode$3("span", { class: "epl-edit-label" }, "原文", -1)),
+                                  _cache[65] || (_cache[65] = _createElementVNode$3("span", { class: "epl-edit-label" }, "原文", -1)),
                                   _createElementVNode$3("span", _hoisted_74$2, _toDisplayString$3(editDlgForm.value.name_before), 1)
                                 ]),
                                 _createVNode$3(_component_v_text_field, {
@@ -4922,7 +4993,7 @@ return (_ctx, _cache) => {
                                   class: "mb-2"
                                 }, null, 8, ["modelValue"]),
                                 _createElementVNode$3("div", _hoisted_75$2, [
-                                  _cache[68] || (_cache[68] = _createElementVNode$3("span", { class: "epl-edit-label" }, "范围", -1)),
+                                  _cache[69] || (_cache[69] = _createElementVNode$3("span", { class: "epl-edit-label" }, "范围", -1)),
                                   _createVNode$3(_component_v_btn_toggle, {
                                     modelValue: editDlgNameScope.value,
                                     "onUpdate:modelValue": _cache[7] || (_cache[7] = $event => ((editDlgNameScope).value = $event)),
@@ -4936,7 +5007,7 @@ return (_ctx, _cache) => {
                                         size: "small",
                                         color: "primary"
                                       }, {
-                                        default: _withCtx$3(() => [...(_cache[65] || (_cache[65] = [
+                                        default: _withCtx$3(() => [...(_cache[66] || (_cache[66] = [
                                           _createTextVNode$3("仅这一条", -1)
                                         ]))]),
                                         _: 1
@@ -4946,7 +5017,7 @@ return (_ctx, _cache) => {
                                         size: "small",
                                         color: "primary"
                                       }, {
-                                        default: _withCtx$3(() => [...(_cache[66] || (_cache[66] = [
+                                        default: _withCtx$3(() => [...(_cache[67] || (_cache[67] = [
                                           _createTextVNode$3("该作品内同名", -1)
                                         ]))]),
                                         _: 1
@@ -4956,7 +5027,7 @@ return (_ctx, _cache) => {
                                         size: "small",
                                         color: "error"
                                       }, {
-                                        default: _withCtx$3(() => [...(_cache[67] || (_cache[67] = [
+                                        default: _withCtx$3(() => [...(_cache[68] || (_cache[68] = [
                                           _createTextVNode$3("全库同名", -1)
                                         ]))]),
                                         _: 1
@@ -4981,7 +5052,7 @@ return (_ctx, _cache) => {
                                       density: "compact",
                                       class: "mb-1"
                                     }, {
-                                      default: _withCtx$3(() => [...(_cache[69] || (_cache[69] = [
+                                      default: _withCtx$3(() => [...(_cache[70] || (_cache[70] = [
                                         _createTextVNode$3(" 全库同名会修改所有同名人物，可能包含不同真人。请优先使用「仅这一条 / 该作品内同名」。 ", -1)
                                       ]))]),
                                       _: 1
@@ -5006,12 +5077,12 @@ return (_ctx, _cache) => {
                                         class: "mb-3",
                                         style: {"opacity":".25"}
                                       }),
-                                      _cache[77] || (_cache[77] = _createElementVNode$3("div", { class: "epl-zone-head" }, [
+                                      _cache[78] || (_cache[78] = _createElementVNode$3("div", { class: "epl-zone-head" }, [
                                         _createTextVNode$3("角色（第二排）"),
                                         _createElementVNode$3("span", { class: "epl-zone-tag" }, "可精确到某集")
                                       ], -1)),
                                       _createElementVNode$3("div", _hoisted_82$2, [
-                                        _cache[70] || (_cache[70] = _createElementVNode$3("span", { class: "epl-edit-label" }, "原文", -1)),
+                                        _cache[71] || (_cache[71] = _createElementVNode$3("span", { class: "epl-edit-label" }, "原文", -1)),
                                         _createElementVNode$3("span", _hoisted_83$2, _toDisplayString$3(editDlgForm.value.role_before), 1)
                                       ]),
                                       _createVNode$3(_component_v_text_field, {
@@ -5024,7 +5095,7 @@ return (_ctx, _cache) => {
                                         class: "mb-2"
                                       }, null, 8, ["modelValue"]),
                                       _createElementVNode$3("div", _hoisted_84$1, [
-                                        _cache[76] || (_cache[76] = _createElementVNode$3("span", { class: "epl-edit-label" }, "范围", -1)),
+                                        _cache[77] || (_cache[77] = _createElementVNode$3("span", { class: "epl-edit-label" }, "范围", -1)),
                                         (editDlgForm.value.role_level === 'movie')
                                           ? (_openBlock$3(), _createElementBlock$3("span", _hoisted_85$1, "仅这一条（电影只有这一条记录）"))
                                           : (_openBlock$3(), _createBlock$3(_component_v_btn_toggle, {
@@ -5043,7 +5114,7 @@ return (_ctx, _cache) => {
                                                         value: "single",
                                                         size: "small"
                                                       }, {
-                                                        default: _withCtx$3(() => [...(_cache[71] || (_cache[71] = [
+                                                        default: _withCtx$3(() => [...(_cache[72] || (_cache[72] = [
                                                           _createTextVNode$3("仅这一集", -1)
                                                         ]))]),
                                                         _: 1
@@ -5052,7 +5123,7 @@ return (_ctx, _cache) => {
                                                         value: "season",
                                                         size: "small"
                                                       }, {
-                                                        default: _withCtx$3(() => [...(_cache[72] || (_cache[72] = [
+                                                        default: _withCtx$3(() => [...(_cache[73] || (_cache[73] = [
                                                           _createTextVNode$3("这一季", -1)
                                                         ]))]),
                                                         _: 1
@@ -5061,7 +5132,7 @@ return (_ctx, _cache) => {
                                                         value: "series",
                                                         size: "small"
                                                       }, {
-                                                        default: _withCtx$3(() => [...(_cache[73] || (_cache[73] = [
+                                                        default: _withCtx$3(() => [...(_cache[74] || (_cache[74] = [
                                                           _createTextVNode$3("这个剧", -1)
                                                         ]))]),
                                                         _: 1
@@ -5072,7 +5143,7 @@ return (_ctx, _cache) => {
                                                         value: "tv",
                                                         size: "small"
                                                       }, {
-                                                        default: _withCtx$3(() => [...(_cache[74] || (_cache[74] = [
+                                                        default: _withCtx$3(() => [...(_cache[75] || (_cache[75] = [
                                                           _createTextVNode$3("仅剧级名单", -1)
                                                         ]))]),
                                                         _: 1
@@ -5081,7 +5152,7 @@ return (_ctx, _cache) => {
                                                         value: "series",
                                                         size: "small"
                                                       }, {
-                                                        default: _withCtx$3(() => [...(_cache[75] || (_cache[75] = [
+                                                        default: _withCtx$3(() => [...(_cache[76] || (_cache[76] = [
                                                           _createTextVNode$3("这个剧（含各集）", -1)
                                                         ]))]),
                                                         _: 1
@@ -5117,12 +5188,12 @@ return (_ctx, _cache) => {
                                           start: "",
                                           size: "16"
                                         }, {
-                                          default: _withCtx$3(() => [...(_cache[79] || (_cache[79] = [
+                                          default: _withCtx$3(() => [...(_cache[80] || (_cache[80] = [
                                             _createTextVNode$3("mdi-brain", -1)
                                           ]))]),
                                           _: 1
                                         }),
-                                        _cache[80] || (_cache[80] = _createTextVNode$3("清除该剧角色记忆 ", -1))
+                                        _cache[81] || (_cache[81] = _createTextVNode$3("清除该剧角色记忆 ", -1))
                                       ]),
                                       _: 1
                                     }, 16, ["loading", "disabled"])
@@ -5134,7 +5205,7 @@ return (_ctx, _cache) => {
                                   variant: "text",
                                   onClick: _cache[11] || (_cache[11] = $event => (editDlgOpen.value = false))
                                 }, {
-                                  default: _withCtx$3(() => [...(_cache[81] || (_cache[81] = [
+                                  default: _withCtx$3(() => [...(_cache[82] || (_cache[82] = [
                                     _createTextVNode$3("取消", -1)
                                   ]))]),
                                   _: 1
@@ -5151,7 +5222,7 @@ return (_ctx, _cache) => {
                                       disabled: dataOpBlocked.value,
                                       onClick: saveEditDialog
                                     }), {
-                                      default: _withCtx$3(() => [...(_cache[82] || (_cache[82] = [
+                                      default: _withCtx$3(() => [...(_cache[83] || (_cache[83] = [
                                         _createTextVNode$3("保存", -1)
                                       ]))]),
                                       _: 1
@@ -5194,7 +5265,7 @@ return (_ctx, _cache) => {
                   start: "",
                   size: "18"
                 }, {
-                  default: _withCtx$3(() => [...(_cache[83] || (_cache[83] = [
+                  default: _withCtx$3(() => [...(_cache[84] || (_cache[84] = [
                     _createTextVNode$3("mdi-translate", -1)
                   ]))]),
                   _: 1
@@ -5220,7 +5291,7 @@ return (_ctx, _cache) => {
                       _: 1
                     }))
                   : _createCommentVNode$3("", true),
-                _cache[88] || (_cache[88] = _createElementVNode$3("div", { class: "epl-tx-label" }, "翻译范围", -1)),
+                _cache[89] || (_cache[89] = _createElementVNode$3("div", { class: "epl-tx-label" }, "翻译范围", -1)),
                 _createVNode$3(_component_v_radio_group, {
                   modelValue: txScope.value,
                   "onUpdate:modelValue": _cache[13] || (_cache[13] = $event => ((txScope).value = $event)),
@@ -5255,7 +5326,7 @@ return (_ctx, _cache) => {
                   style: {"font-size":"12px"},
                   class: "mb-2"
                 }, {
-                  default: _withCtx$3(() => [...(_cache[84] || (_cache[84] = [
+                  default: _withCtx$3(() => [...(_cache[85] || (_cache[85] = [
                     _createTextVNode$3(" 本次只决定「翻哪一排」，属于一次性任务、不改设置页长期配置；", -1),
                     _createElementVNode$3("b", null, "「翻哪些类型 + 每个人翻几个」由设置页「翻译范围」决定", -1),
                     _createTextVNode$3("，已计入下方预估。 ", -1)
@@ -5266,18 +5337,18 @@ return (_ctx, _cache) => {
                   _createElementVNode$3("div", {
                     class: _normalizeClass$2(["epl-tx-preview-row", { 'epl-tx-off': !txEstimate.value.wantP }])
                   }, [
-                    _cache[85] || (_cache[85] = _createElementVNode$3("span", null, "第一排（人物姓名）", -1)),
+                    _cache[86] || (_cache[86] = _createElementVNode$3("span", null, "第一排（人物姓名）", -1)),
                     _createElementVNode$3("span", _hoisted_88, _toDisplayString$3(txPreview.value.loading ? '…' : `待翻 ${txEstimate.value.names} 个 / 范围内 ${txEstimate.value.namesScope} 个`), 1)
                   ], 2),
                   _createElementVNode$3("div", {
                     class: _normalizeClass$2(["epl-tx-preview-row", { 'epl-tx-off': !txEstimate.value.wantR }])
                   }, [
-                    _cache[86] || (_cache[86] = _createElementVNode$3("span", null, "第二排（角色名）", -1)),
+                    _cache[87] || (_cache[87] = _createElementVNode$3("span", null, "第二排（角色名）", -1)),
                     _createElementVNode$3("span", _hoisted_89, _toDisplayString$3(txPreview.value.loading ? '…' : `待翻 ${txEstimate.value.roles} 个 / 范围内 ${txEstimate.value.rolesScope} 个`), 1)
                   ], 2)
                 ]),
                 (!txPreview.value.loading && txEstimate.value.pending === 0 && txEstimate.value.scope === 0)
-                  ? (_openBlock$3(), _createElementBlock$3("div", _hoisted_90, [...(_cache[87] || (_cache[87] = [
+                  ? (_openBlock$3(), _createElementBlock$3("div", _hoisted_90, [...(_cache[88] || (_cache[88] = [
                       _createTextVNode$3(" 范围内 0 条 —— 可能是：① 该排总开关没开；② ", -1),
                       _createElementVNode$3("b", null, "类型开关没开", -1),
                       _createTextVNode$3("（例如只填了「客串」的人数、却没打开「客串」开关）；③ 被人数上限挡在外面；④ 库里还没有该范围的记录。请到设置页「翻译范围」确认。 ", -1)
@@ -5302,12 +5373,12 @@ return (_ctx, _cache) => {
                       start: "",
                       size: "16"
                     }, {
-                      default: _withCtx$3(() => [...(_cache[89] || (_cache[89] = [
+                      default: _withCtx$3(() => [...(_cache[90] || (_cache[90] = [
                         _createTextVNode$3("mdi-refresh", -1)
                       ]))]),
                       _: 1
                     }),
-                    _cache[90] || (_cache[90] = _createTextVNode$3("刷新预估 ", -1))
+                    _cache[91] || (_cache[91] = _createTextVNode$3("刷新预估 ", -1))
                   ]),
                   _: 1
                 }, 8, ["loading"]),
@@ -5316,7 +5387,7 @@ return (_ctx, _cache) => {
                   variant: "text",
                   onClick: _cache[14] || (_cache[14] = $event => (txDlg.value = false))
                 }, {
-                  default: _withCtx$3(() => [...(_cache[91] || (_cache[91] = [
+                  default: _withCtx$3(() => [...(_cache[92] || (_cache[92] = [
                     _createTextVNode$3("取消", -1)
                   ]))]),
                   _: 1
@@ -5355,12 +5426,12 @@ return (_ctx, _cache) => {
                   start: "",
                   size: "18"
                 }, {
-                  default: _withCtx$3(() => [...(_cache[92] || (_cache[92] = [
+                  default: _withCtx$3(() => [...(_cache[93] || (_cache[93] = [
                     _createTextVNode$3("mdi-format-list-checks", -1)
                   ]))]),
                   _: 1
                 }),
-                _cache[94] || (_cache[94] = _createTextVNode$3("待翻译明细 ", -1)),
+                _cache[95] || (_cache[95] = _createTextVNode$3("待翻译明细 ", -1)),
                 _createVNode$3(_component_v_spacer),
                 _createVNode$3(_component_v_btn, {
                   icon: "",
@@ -5370,7 +5441,7 @@ return (_ctx, _cache) => {
                 }, {
                   default: _withCtx$3(() => [
                     _createVNode$3(_component_v_icon, { size: "18" }, {
-                      default: _withCtx$3(() => [...(_cache[93] || (_cache[93] = [
+                      default: _withCtx$3(() => [...(_cache[94] || (_cache[94] = [
                         _createTextVNode$3("mdi-close", -1)
                       ]))]),
                       _: 1
@@ -5404,7 +5475,7 @@ return (_ctx, _cache) => {
                       _createElementVNode$3("div", _hoisted_97, "《" + _toDisplayString$3(it.title) + "》", 1),
                       (it.names_total)
                         ? (_openBlock$3(), _createElementBlock$3("div", _hoisted_98, [
-                            _cache[95] || (_cache[95] = _createElementVNode$3("span", { class: "epl-pend-tag" }, "第一排", -1)),
+                            _cache[96] || (_cache[96] = _createElementVNode$3("span", { class: "epl-pend-tag" }, "第一排", -1)),
                             (_openBlock$3(true), _createElementBlock$3(_Fragment$3, null, _renderList$3(it.names, (n, i) => {
                               return (_openBlock$3(), _createElementBlock$3("span", {
                                 class: "epl-pend-term",
@@ -5418,7 +5489,7 @@ return (_ctx, _cache) => {
                         : _createCommentVNode$3("", true),
                       (it.roles_total)
                         ? (_openBlock$3(), _createElementBlock$3("div", _hoisted_100, [
-                            _cache[96] || (_cache[96] = _createElementVNode$3("span", { class: "epl-pend-tag" }, "第二排", -1)),
+                            _cache[97] || (_cache[97] = _createElementVNode$3("span", { class: "epl-pend-tag" }, "第二排", -1)),
                             (_openBlock$3(true), _createElementBlock$3(_Fragment$3, null, _renderList$3(it.roles, (r, i) => {
                               return (_openBlock$3(), _createElementBlock$3("span", {
                                 class: "epl-pend-term",
@@ -5443,7 +5514,7 @@ return (_ctx, _cache) => {
                   variant: "text",
                   onClick: _cache[17] || (_cache[17] = $event => (pendingDlg.value = false))
                 }, {
-                  default: _withCtx$3(() => [...(_cache[97] || (_cache[97] = [
+                  default: _withCtx$3(() => [...(_cache[98] || (_cache[98] = [
                     _createTextVNode$3("关闭", -1)
                   ]))]),
                   _: 1
@@ -5475,7 +5546,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const Library = /*#__PURE__*/_export_sfc(_sfc_main$3, [['__scopeId',"data-v-b6c5178a"]]);
+const Library = /*#__PURE__*/_export_sfc(_sfc_main$3, [['__scopeId',"data-v-ae0e60e5"]]);
 
 const {toDisplayString:_toDisplayString$2,createElementVNode:_createElementVNode$2,createTextVNode:_createTextVNode$2,resolveComponent:_resolveComponent$2,withCtx:_withCtx$2,createVNode:_createVNode$2,openBlock:_openBlock$2,createElementBlock:_createElementBlock$2,createCommentVNode:_createCommentVNode$2,createBlock:_createBlock$2,Fragment:_Fragment$2,withKeys:_withKeys,withModifiers:_withModifiers,renderList:_renderList$2,normalizeClass:_normalizeClass$1,unref:_unref,createStaticVNode:_createStaticVNode} = await importShared('vue');
 

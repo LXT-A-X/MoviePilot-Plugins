@@ -100,7 +100,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
     plugin_name = "Emby 演职人员中文化"
     plugin_desc = "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回；拉取人名时可用 TMDB 刮削补中文名/简介/头像"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/embypeoplelocalize.png"
-    plugin_version = "4.6.109"
+    plugin_version = "4.6.110"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "embypeoplelocalize_"
@@ -1130,7 +1130,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 out["avatar"] = bool(cli.set_person_primary_image(person_id, _img))
         return out
 
-    def _tmdb_credits_role_map(self, item_id: str, item_type: str) -> dict:
+    def _tmdb_credits_role_map(self, item_id: str, item_type: str, hint: str = "") -> dict:
         """取条目的 TMDB 演职人员表，构建 {人物 TmdbId(str): 英文角色名}。
 
         用途：回填「第二排角色名」——豆瓣等来源的 NFO 第二排常缺英文角色名，翻译链无原文可翻。
@@ -1193,6 +1193,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             # 这行紧跟在它旁边，直接把 id + 类型 + 结论写清楚，便于定位与排查。
             _ttl_h = float(getattr(self, "_TMDB_DEAD_TTL", 21600.0) or 21600.0) / 3600.0
             logger.info(f"[TMDB] 演职员表为空：id={_iid}（{'tv' if _is_tv else 'movie'}）"
+                        f"{('｜' + hint) if hint else ''}"
                         f"—— 该 ID 无效（TMDB 返回 404）或该条目确实没有演职员；"
                         f"已负缓存 {_ttl_h:.0f} 小时，期间不再重打")
         return _map
@@ -5611,7 +5612,12 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             else:
                 _cid = series_id if item_type == "Episode" else item_id
                 _cty = "Series" if item_type in ("Episode", "Series") else "Movie"
-                _credits_map = self._tmdb_credits_role_map(_cid, _cty)
+                # v4.6.110：把「哪个条目 / 哪个 NFO」带进日志 —— 宿主那条 404 只有一句
+                # "The resource you requested could not be found."，看不出是谁在打；
+                # 有了这个 hint 就能直接定位到具体条目与文件（排查 NFO 里的假 tmdbid）。
+                _credits_map = self._tmdb_credits_role_map(
+                    _cid, _cty, hint=f"条目={title or os.path.basename(doc.path)}"
+                                     f"｜文件={os.path.basename(doc.path)}")
         people = []
         for actor in doc.root.findall("actor"):
             _n = actor.find("name")
@@ -13568,16 +13574,30 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 self._save_file_sigs()
             except Exception:
                 _sig_n = 0
+            # v4.6.110（LIB-019）：**扫描断点一并清空** —— 否则「清空翻译记录」之后
+            # 仪表盘仍显示「续跑」可用：`_nfo_resume_state()` 只看断点（_scan_cursor.nfo.done）,
+            # 记录/译文都删了，续跑只会跳过全部已处理文件、空转（用户实测：扫到一半暂停 →
+            # 清库 → 仪表盘还提示续跑）。清掉后「续跑」自动灰置，下次扫描按全量重来（符合预期）。
+            _cur_n = 0
+            try:
+                _cur = getattr(self, "_scan_cursor", None)
+                if isinstance(_cur, dict):
+                    _cur_n = len((_cur.get("nfo") or {}).get("done") or {})
+                    _cur.pop("nfo", None)
+                    self._scan_cursor = _cur
+            except Exception:
+                _cur_n = 0
             self._db_items_cache = None
             try:
                 self._save_state()
             except Exception:
                 pass
-            self._push_log("INFO", f"已清空翻译记录：{n} 条（写回队列 {_wn} 条、文件签名 {_sig_n} 条已一并清空）—— "
-                                   f"人名池保留（含人工修正，未受影响），下次扫描将用池内译文快速重建记录")
+            self._push_log("INFO", f"已清空翻译记录：{n} 条（写回队列 {_wn} 条、文件签名 {_sig_n} 条、"
+                                   f"扫描断点 {_cur_n} 条已一并清空）—— 人名池保留（含人工修正，未受影响），"
+                                   f"下次扫描将按全量重来并用池内译文快速重建记录")
             return {"success": True,
-                    "message": f"已清空翻译记录（{n} 条；人名池未受影响，含人工修正保留）",
-                    "data": {"cleared": n, "writeback_cleared": _wn}}
+                    "message": f"已清空翻译记录（{n} 条；断点已清，「续跑」不再可用；人名池未受影响，含人工修正保留）",
+                    "data": {"cleared": n, "writeback_cleared": _wn, "cursor_cleared": _cur_n}}
         except Exception as e:
             return {"success": False, "message": str(e)}
 
