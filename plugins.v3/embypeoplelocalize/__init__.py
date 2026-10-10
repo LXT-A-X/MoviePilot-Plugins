@@ -100,7 +100,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
     plugin_name = "Emby 演职人员中文化"
     plugin_desc = "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回；拉取人名时可用 TMDB 刮削补中文名/简介/头像"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/embypeoplelocalize.png"
-    plugin_version = "4.6.104"
+    plugin_version = "4.6.105"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "embypeoplelocalize_"
@@ -3776,6 +3776,17 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         """翻译一轮（人物库待翻 + 人名池待翻）→ 写回对应表。无待翻返回 {"did": False}。"""
         db = getattr(self, "_people_db", None)
         nm = getattr(self, "_name_map_db", None)
+        if nm is None:
+            # v4.6.105（LIB-011）：兜底 —— 池句柄未初始化时就地补建（并告警一次）。
+            # 此前这里没有兜底，插件重启后直接点「人名池 · 批量翻译」会静默一轮 0 条（见 init_plugin 注释）。
+            try:
+                nm = NameMapDb()
+                self._name_map_db = nm
+                self._warn_once("name_map_db_lazy",
+                                "[Translate] 人名池句柄未初始化，已就地补建（正常不应发生，请检查 init_plugin）")
+            except Exception as _e:
+                logger.warning(f"[Translate] 人名池句柄补建失败: {_e}")
+                nm = None
         _tr = self._tx_eff_types()   # v4.6.76：任务期间用 Job Snapshot（运行中改设置不影响当前任务）
         _take_library = self._tx_source_allows("library")
         _take_person = _take_library and bool(_tr.get("person", True)) and self._tx_scope_allows("person")
@@ -3817,6 +3828,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             logger.warning(f"[Translate] 读取人物库待翻失败: {e}")
         # 人名池待翻（池管理条目：有原文无译文）
         pool_rows: List[dict] = []
+        _person_in_scope = False   # v4.6.105：提前声明，供末尾诊断日志判定「池为什么没收」
         try:
             # v4.6.75（规范 §三-1/2）：**人名池 = 第一排** —— 目标范围不含第一排
             # （如「仅第二排角色」）或第一排人名总开关关闭时，池内人名一律不翻译。
@@ -3873,10 +3885,22 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         if not _occs:
             # v4.6.80（用户实测反馈「点了批量翻译就没有然后了」）：一轮无待翻时给出**可见原因**，
             # 不再静默返回（此前只有一句 did=False，界面/日志看不出为什么什么都没发生）。
+            # v4.6.105：把「池未收」的原因拆分到**具体一条** —— 此前只并列三种可能，
+            # 用户实测「待翻译 89 个」却一轮 0 条时，日志看不出到底是哪一条拦的。
+            _pool_why: List[str] = []
+            if not self._tx_source_allows("pool"):
+                _pool_why.append("本次来源不含 pool")
+            if not bool(getattr(self, "_pool_translation_enabled", True)):
+                _pool_why.append("「人名池翻译总开关」已关（设置页 · 人名池）")
+            if not _person_in_scope:
+                _pool_why.append("目标范围不含第一排 / 「第一排人名」总开关关闭")
+            if nm is None:
+                _pool_why.append("人名池句柄未初始化")
+            _pool_hint = ("；".join(_pool_why) if _pool_why
+                          else "池行被类型开关 / 已跳过项过滤（检查「翻译范围」类型开关，或用「重试失败」）")
             logger.info(f"[Translate] 本轮无可消费词条：来源={str(getattr(self, '_tx_source', '') or 'both')} "
                         f"范围={self._tx_scope()}｜库内 第一排={_take_person} 第二排={_take_role}"
-                        f"（来源含 library={_take_library}）｜池={bool(pool_rows)}"
-                        f"（池未收：源不含 pool / 未开池翻译 / 范围不含第一排）")
+                        f"（来源含 library={_take_library}）｜池={bool(pool_rows)}（{_pool_hint}）")
             return {"did": False}
         # v4.6.70（报告第二十~三十四节）：**第二排角色跨集复用** —— 同剧（server_id + item_id）
         # 同角色名已翻过的，直接复用记忆，不再调 AI；洗版重建 / 删除后恢复后同样命中。
@@ -7801,6 +7825,15 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 NameMapDb.ensure_table()
             except Exception as e:
                 logger.warning(f"初始化人名池数据库失败: {e}")
+            # v4.6.105（LIB-011 · 人名池「批量翻译」一轮 0 条的根因）：启动即建人名池句柄。
+            # 此前这里只建了 _people_db，_name_map_db 一直是 None，要等「扫描 / 拉取人名 / 重拉」
+            # 等路径惰性赋值（各处都写 `getattr(self, "_name_map_db", None) or NameMapDb()`）。
+            # 于是插件重启/重载后，若用户**直接**去「人名池」点「批量翻译」：
+            #   池页/统计走 `or NameMapDb()` 正常显示「待翻译 89」，
+            #   但翻译 worker 收词时 `nm = getattr(self, "_name_map_db", None)` 拿到 None →
+            #   池收集门 `nm is not None` 直接失败 → 本轮 0 条、池 pending 一直不动
+            #   （日志：「池=False（池未收：源不含 pool / 未开池翻译 / 范围不含第一排）」）。
+            self._name_map_db = NameMapDb()
 
             self._load_state()
             try:
