@@ -27,6 +27,7 @@ PLUGIN_DIR = Path(__file__).resolve().parent.parent
 TMP = Path(tempfile.mkdtemp(prefix="epl470_"))
 _SRC = (PLUGIN_DIR / "__init__.py").read_text(encoding="utf-8")
 _DB = (PLUGIN_DIR / "db.py").read_text(encoding="utf-8")
+_TM = (PLUGIN_DIR / "task_manager.py").read_text(encoding="utf-8")
 
 _N = [0, 0]
 
@@ -292,12 +293,18 @@ check(_ph(_PhNS, "(voice)") is True and _ph(_PhNS, "（CV）") is True and _ph(_
 check(_ph(_PhNS, "N8") is False and _ph(_PhNS, "sloppy") is False and _ph(_PhNS, "M") is False,
       "占位判定不误伤真实名字（N8 / sloppy / M 走 AI 或单字符判定）")
 
-# 附带（同一排障诉求）：DEBUG 日志不再被桥接层写死 INFO 挡住 + 实例级别真正接通
+# 附带（同一排障诉求）：DEBUG 日志 —— 桥接不写死 INFO + 实例级绑定（v4.7.3 根因修复）
 check("bridge.setLevel(logging.NOTSET)" in _SRC and "bridge.setLevel(logging.INFO)" not in _SRC,
       "日志桥接不再写死 INFO（跟随 logger 有效级别）")
-check("def _align_log_level" in _SRC and "moviepilot.plugins.embypeoplelocalize" in _SRC
-      and "DEBUG 将落入日志文件" in _SRC,
-      "新增 _align_log_level：把插件实例日志级别（DEBUG）真正接通到共享 logger + 文件 handler")
+check("def _plugin_log_scope" in _SRC and "bind_plugin_instance" in _SRC,
+      "v4.7.3：插件自建线程绑定宿主实例日志上下文（实例级 DEBUG 真正生效）")
+check("def _bound(self, fn)" in _SRC and _SRC.count("self._bound(") >= 10,
+      "_bound 包装器 + 全部自建线程入口已改用（translate/writeback/scan/probe/webhook/…）")
+check("self._bound(target)" in _TM and "self._bound(self._nfo_sync_worker)" in _TM,
+      "task_manager 的 _launch_bg / _launch_nfo_worker 也已绑定")
+check("def _align_log_level" not in _SRC and "_attach_to" not in _SRC,
+      "移除 v4.7.2 的 _align_log_level（它把 LoggerManager.logger 方法当 Logger 传 → 报 "
+      "'function' object has no attribute 'handlers'）")
 check("条「无需操作」词条已落持久标记" in _SRC,
       "noop 落标记有 INFO 自证日志（空转作业可自查，不再只有 debug 分支）")
 

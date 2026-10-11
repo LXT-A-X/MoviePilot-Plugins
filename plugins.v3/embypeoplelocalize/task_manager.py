@@ -62,7 +62,8 @@ class TaskStateMixin:
             self._stop_requested = False  # 旧全局位（Webhook 事件管线沿用）保持原语义
             self._set_task_paused("scan", False)
         try:
-            self._scan_thread = threading.Thread(target=self._nfo_sync_worker, args=(body,), daemon=True)
+            # v4.7.3：绑定插件实例日志上下文（自建线程不继承宿主绑定 → 实例级 DEBUG 不生效）
+            self._scan_thread = threading.Thread(target=self._bound(self._nfo_sync_worker), args=(body,), daemon=True)
             self._scan_thread.start()
             self._task_threads["scan"] = self._scan_thread
         except Exception:
@@ -90,7 +91,8 @@ class TaskStateMixin:
             if _task in ("scan", "pool"):
                 self._set_task_paused(_task, False)
         try:
-            _th = threading.Thread(target=target, args=(body,), daemon=True)
+            # v4.7.3：绑定插件实例日志上下文（同上）
+            _th = threading.Thread(target=self._bound(target), args=(body,), daemon=True)
             _th.start()
             if _task == "pool":
                 self._pool_thread = _th

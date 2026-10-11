@@ -45,6 +45,38 @@ from app.plugins import _PluginBase
 from app.schemas import ServiceInfo, NotificationType
 from app.schemas.types import EventType
 
+from contextlib import contextmanager
+
+# v4.7.3（issue #8 附带）：宿主 MoviePilot 的日志门面是 `LoggerManager`（app.runtime.log），
+# 它的日志等级覆盖按「当前上下文绑定的插件实例」判定（`_effective_context_log_level`），
+# 而**插件自建的原生线程不继承这个绑定** —— 于是把插件日志级别设成 DEBUG 时，
+# worker 里的 `logger.debug` 会在等级闸处被静默丢弃（文件和控制台都没有），出问题无从取证。
+# 这里拿到宿主的绑定入口，让插件自己的线程也绑上实例（取不到就降级为空操作）。
+try:
+    from app.runtime.log import bind_plugin_instance as _mp_bind_plugin_instance
+except Exception:  # pragma: no cover - 宿主版本差异
+    _mp_bind_plugin_instance = None
+
+
+@contextmanager
+def _plugin_log_scope(instance_id: str):
+    """在插件实例日志上下文里执行（v4.7.3）—— 让实例级日志级别（DEBUG）对插件自建线程生效。"""
+    _cm = None
+    if _mp_bind_plugin_instance is not None and str(instance_id or "").strip():
+        try:
+            _cm = _mp_bind_plugin_instance(str(instance_id))
+            _cm.__enter__()
+        except Exception:
+            _cm = None
+    try:
+        yield
+    finally:
+        if _cm is not None:
+            try:
+                _cm.__exit__(None, None, None)
+            except Exception:
+                pass
+
 from .emby_client import EmbyClient, ITEM_FOUND, ITEM_NOT_FOUND, ITEM_UNAVAILABLE
 from .llm_client import (LLMClient, LLMError, RateLimited, QuotaExceeded,
                          AuthenticationError, ContextLengthExceeded)
@@ -122,7 +154,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
     plugin_name = "Emby 演职人员中文化"
     plugin_desc = "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回；拉取人名时可用 TMDB 刮削补中文名/简介/头像"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/embypeoplelocalize.png"
-    plugin_version = "4.7.2"
+    plugin_version = "4.7.3"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "embypeoplelocalize_"
@@ -518,7 +550,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                     return
                 self._webhook_worker_event.clear()
                 self._webhook_worker_thread = threading.Thread(
-                    target=self._webhook_worker, daemon=True, name="webhook-worker")
+                    target=self._bound(self._webhook_worker), daemon=True, name="webhook-worker")
                 self._webhook_worker_thread.start()
                 _n = len(self._webhook_schedule)
             logger.info(f"[Webhook] 重启续跑：将延迟队列 {_n} 个未处理事件交给 Worker 消费")
@@ -2355,7 +2387,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         except Exception as e:
             logger.warning(f"[Webhook] Series 展开入池失败，退化为独立线程: {e}")
         try:
-            threading.Thread(target=self._translate_series_expanded,
+            threading.Thread(target=self._bound(self._translate_series_expanded),
                              args=(client, item, item_id, server_id, display_title, added_count),
                              daemon=True, name=f"epl-series-{item_id}").start()
         except Exception:
@@ -2427,7 +2459,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             self._tx_event = getattr(self, "_tx_event", None) or threading.Event()
             # v4.6.61（P1-6）：重启恢复 —— 未完成 Job 标记 interrupted；force 任务重新入队
             self._tx_job_recover()
-            self._tx_thread = threading.Thread(target=self._translate_worker,
+            self._tx_thread = threading.Thread(target=self._bound(self._translate_worker),
                                                daemon=True, name="epl-translate")
             self._tx_thread.start()
             logger.info("[Translate] 翻译 worker 已启动（常驻：消费人物库/人名池待翻词条；限流自动熔断）")
@@ -4994,6 +5026,16 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         except Exception:
             return False
 
+    def _bound(self, fn):
+        """把线程体包进插件实例日志上下文（v4.7.3）—— 插件自建线程不继承宿主的实例绑定，
+        会导致「实例日志级别设成 DEBUG 也不落一条 DEBUG」；统一在这里绑一次。"""
+        _iid = self.__class__.__name__
+
+        def _w(*_a, **_k):
+            with _plugin_log_scope(_iid):
+                return fn(*_a, **_k)
+        return _w
+
     def _start_writeback_worker(self) -> None:
         """启动常驻写回 worker（单例防重：热加载/重复 init 不产生第二份，文档 §41）。"""
         try:
@@ -5012,7 +5054,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                     logger.info(f"[Writeback] 发现 {_n} 个中断的写回条目（writing），已复位为待写回并自动重试")
             except Exception:
                 pass
-            self._wb_thread = threading.Thread(target=self._writeback_worker,
+            self._wb_thread = threading.Thread(target=self._bound(self._writeback_worker),
                                                daemon=True, name="epl-writeback")
             self._wb_thread.start()
             logger.info("[Writeback] 写回 worker 已启动（常驻：条目翻完自动写回 nfo；幂等可重入）")
@@ -8304,52 +8346,10 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 self._log_bridge_installed = True
                 logger.info("[EmbyPeopleLocalize] 日志桥接已安装")
                 self._ensure_plugin_logfile()
-                # v4.7.2（issue #6/#8 附带）：把插件实例日志级别（DEBUG）真正接通
-                self._align_log_level()
         except Exception as e:
             logger.warning(f"安装日志桥接失败: {e}")
 
-    def _align_log_level(self):
-        """v4.7.2（issue #6 / #8 附带）：让「把插件日志级别调成 DEBUG」真正落文件。
-
-        宿主按插件给的是**子 logger**（moviepilot.plugins.embypeoplelocalize）的级别，而插件
-        代码用的是共享 logger —— 记录先在**调用它的 logger** 的级别被过滤掉，根本到不了任何
-        handler（所以此前把桥接 handler 从 INFO 改成 NOTSET 也没用）。这里读子 logger 的有效
-        级别，若已放宽到 INFO 以下：把共享 logger 与其父 moviepilot 一并放宽（**只降不升**），
-        并把插件文件 handler 挂到共享 logger 上，确保 DEBUG 真能落文件。级别正常时**什么都不做**。
-        """
-        try:
-            import logging
-            _child = logging.getLogger("moviepilot.plugins.embypeoplelocalize")
-            _lvl = _child.getEffectiveLevel()
-            if _lvl >= logging.INFO:
-                return
-            _lg = getattr(logger, "logger", logger)
-            try:
-                if getattr(_lg, "level", logging.INFO) not in (logging.NOTSET,) \
-                        and int(getattr(_lg, "level", logging.INFO) or logging.INFO) > _lvl:
-                    _lg.setLevel(_lvl)
-            except Exception:
-                pass
-            try:
-                _mp = logging.getLogger("moviepilot")
-                if _mp.level == logging.NOTSET or _mp.level > _lvl:
-                    _mp.setLevel(_lvl)
-            except Exception:
-                pass
-            try:
-                if not any(getattr(_h, "_epl_logfile", False)
-                           for _h in list(getattr(_lg, "handlers", []) or [])):
-                    self._logfile_ok = False
-                    self._ensure_plugin_logfile(_attach_to=_lg)
-            except Exception:
-                pass
-            logger.info(f"[EmbyPeopleLocalize] 已跟随插件日志级别 {logging.getLevelName(_lvl)}"
-                        f"（DEBUG 将落入日志文件）")
-        except Exception:
-            pass
-
-    def _ensure_plugin_logfile(self, _attach_to=None):
+    def _ensure_plugin_logfile(self):
         """路径改用宿主 CONFIG_PATH 推导（不再依赖进程 cwd）；
         换 RotatingFileHandler（5MB × 3）防长期运行日志无限增长。"""
         try:
@@ -8371,10 +8371,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             path = os.path.join(log_root, "embypeoplelocalize.log")
             fh = RotatingFileHandler(path, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
             fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [EmbyPeopleLocalize] %(message)s"))
-            # 挂到插件自身子 logger（moviepilot.plugins.embypeoplelocalize 的后代），不影响他人；
-            # _align_log_level 可指定挂到「插件代码实际使用的共享 logger」（DEBUG 才走这条）
-            lg = (_attach_to if _attach_to is not None
-                  else logging.getLogger("moviepilot.plugins.embypeoplelocalize"))
+            # 挂到插件自身子 logger（moviepilot.plugins.embypeoplelocalize 的后代），不影响他人
+            lg = logging.getLogger("moviepilot.plugins.embypeoplelocalize")
             for _lh in list(lg.handlers):
                 if getattr(_lh, "_epl_logfile", False):
                     try:
@@ -9087,7 +9085,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         # ============================================================
         if self._enabled and not self._startup_background_started:
             self._startup_background_started = True
-            threading.Thread(target=self._startup, daemon=True).start()
+            threading.Thread(target=self._bound(self._startup), daemon=True).start()
 
     def _load_config(self, config: dict):
         self._enabled = constants.safe_bool(config.get(constants.CFG_ENABLED), False)
@@ -10023,7 +10021,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 if self._webhook_worker_thread is None or not self._webhook_worker_thread.is_alive():
                     self._webhook_worker_event.clear()
                     self._webhook_worker_thread = threading.Thread(
-                        target=self._webhook_worker,
+                        target=self._bound(self._webhook_worker),
                         daemon=True,
                         name="webhook-worker"
                     )
@@ -11855,7 +11853,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 if due_keys and (self._webhook_worker_thread is None
                                  or not self._webhook_worker_thread.is_alive()):
                     self._webhook_worker_event.clear()
-                    self._webhook_worker_thread = threading.Thread(target=self._webhook_worker,
+                    self._webhook_worker_thread = threading.Thread(target=self._bound(self._webhook_worker),
                                                                    daemon=True, name="webhook-worker")
                     self._webhook_worker_thread.start()
             if due_keys:
@@ -11872,7 +11870,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             if getattr(self, "_maintenance_thread", None) and self._maintenance_thread.is_alive():
                 return
             self._maintenance_stop = threading.Event()
-            self._maintenance_thread = threading.Thread(target=self._maintenance_worker,
+            self._maintenance_thread = threading.Thread(target=self._bound(self._maintenance_worker),
                                                         daemon=True, name="epl-maintenance")
             self._maintenance_thread.start()
         except Exception as e:
@@ -11892,7 +11890,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             if getattr(self, "_schedule_thread", None) and self._schedule_thread.is_alive():
                 return
             self._schedule_stop = threading.Event()
-            self._schedule_thread = threading.Thread(target=self._schedule_worker,
+            self._schedule_thread = threading.Thread(target=self._bound(self._schedule_worker),
                                                      daemon=True, name="epl-schedule")
             self._schedule_thread.start()
         except Exception as e:
@@ -11949,7 +11947,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 return
             self._probe_stop = False          # 任务停止位（bool）
             self._probe_daemon_stop = threading.Event()   # daemon 专属退出事件
-            self._probe_thread = threading.Thread(target=self._probe_worker,
+            self._probe_thread = threading.Thread(target=self._bound(self._probe_worker),
                                                   daemon=True, name="epl-probe")
             self._probe_thread.start()
         except Exception as e:
@@ -12003,7 +12001,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             if self._is_running:
                 return {"success": False, "message": "已有任务正在运行（扫描/翻译/写回），稍后再试"}
         try:
-            threading.Thread(target=lambda: self._probe_execute(force_deep=True),
+            threading.Thread(target=self._bound(lambda: self._probe_execute(force_deep=True)),
                              daemon=True, name="epl-probe-run").start()
         except Exception as e:
             return {"success": False, "message": str(e)}
