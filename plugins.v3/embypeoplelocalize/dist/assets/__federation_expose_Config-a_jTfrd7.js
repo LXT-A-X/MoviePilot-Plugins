@@ -1,4 +1,4 @@
-import Page from './__federation_expose_Page-DIWApcy4.js';
+import Page from './__federation_expose_Page-BFgrthrC.js';
 
 const _sfc_main = Page;
 

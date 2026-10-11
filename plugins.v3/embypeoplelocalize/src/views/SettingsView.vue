@@ -706,7 +706,7 @@ onMounted(() => {
           <div class="epl-switch-row">
             <div class="flex-grow-1">
               <div class="epl-switch-title">恢复：以库为准直接覆盖 Emby</div>
-              <div class="epl-switch-desc">洗版 / 重新刮削后 Emby 会把 nfo 刷回原文时用。开启后点「全部写回」即按库中译文<strong>强制覆盖 Emby 元数据</strong>：第一排 Person 改名 + 第二排条目级角色，<strong>两排一起写</strong>，并触发 Emby 刷新（让它按中文元数据重写 nfo）；同时<strong>不受「还有待翻词条就不写」的限制</strong>——库里有多少写多少。Emby 新刮进来、库里没有的词条保留原样并计入「新增待翻」。默认关，仅在你确认「以插件库为准」时开启</div>
+              <div class="epl-switch-desc"><strong>开启后自动恢复，无需手动点「全部写回」</strong>。触发只认「<strong>恢复</strong>」：Emby 删除事件把插件管理过的条目放进观察期 → 洗版放入同 ID 新版本 → 入库判定为恢复时，插件自动把<strong>库中已有译文</strong>双写回去——nfo 文件 + Emby 服务器元数据（第一排 Person 改名 + 第二排条目级角色，<strong>两排一起写</strong>），并触发 Emby 刷新（让它按中文元数据重写 nfo）。普通首次入库 / 手动扫描入库不受影响。自动覆盖前先比对文件指纹，没变化不重写；<strong>不受「自动写回」开关限制</strong>。默认关，仅在你确认「以插件库为准」时开启</div>
             </div>
             <v-switch v-model="config.restore_overwrite_emby" color="primary" hide-details></v-switch>
           </div>
