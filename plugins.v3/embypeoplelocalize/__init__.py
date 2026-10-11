@@ -154,7 +154,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
     plugin_name = "Emby 演职人员中文化"
     plugin_desc = "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回；拉取人名时可用 TMDB 刮削补中文名/简介/头像"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/embypeoplelocalize.png"
-    plugin_version = "4.7.3"
+    plugin_version = "4.7.4"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "embypeoplelocalize_"
@@ -208,6 +208,9 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
     _lock_cast: bool = False
     # v4.6.114（issue #5）：第二排角色译文写入 Emby 条目级 People[].Role（默认关，设置页可开）
     _emby_role_sync: bool = constants.DEFAULT_EMBY_ROLE_SYNC
+    # v4.7.4：恢复（以库为准 · 直接覆盖 Emby）—— 洗版/重刮后把库里译文强制覆盖到 Emby
+    # 元数据（第一排 Person 名 + 第二排条目级角色，两排一起写），不受「待翻未完成」限制。
+    _overwrite_emby: bool = constants.DEFAULT_RESTORE_OVERWRITE_EMBY
     _webhook_delay: int = 60
     _notify_on_complete: bool = False
     _sync_series_people: bool = True
@@ -5211,9 +5214,11 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         if str(rec.get("status") or "") == "writing":
             return {"skip_writing": 1, "current": title}
         # 就绪判定：还有会被翻译的待翻词条 → 等下一轮（文档 §1.2-8 / §3.4）
+        # v4.7.4（恢复）：开启「以库为准直接覆盖 Emby」后**忽略**该阻塞 —— 库里有多少写多少，
+        # Emby 重刮带进来的新词条没翻完也不卡住已有译文的恢复。
         chk = self.translation_pending_for_item(item_id=item_id, server_id=server_id,
                                                 scope=str(rec.get("target_scope") or ""))
-        if not chk.get("ready"):
+        if not chk.get("ready") and not bool(getattr(self, "_overwrite_emby", False)):
             return {"not_ready": 1, "current": title}
         # 先标 writing（防并发；失败/中断后由 reset/退避恢复），失败计数 +1
         wdb.set_status(plugin_id=pi_d, server_id=server_id, item_id=item_id,
@@ -8898,6 +8903,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             self._lock_cast = False
             self._emby_name_sync = True
             self._emby_role_sync = constants.DEFAULT_EMBY_ROLE_SYNC
+            self._overwrite_emby = constants.DEFAULT_RESTORE_OVERWRITE_EMBY
             self._run_clear_cache = False
             self._llm_base_url = ""
             self._llm_api_key = ""
@@ -9220,6 +9226,10 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             except Exception:
                 pass
         self._emby_role_sync = _ers
+        # v4.7.4：恢复（以库为准 · 直接覆盖 Emby）—— 两排一起写服务器，忽略待翻阻塞
+        self._overwrite_emby = constants.safe_bool(
+            config.get(constants.CFG_RESTORE_OVERWRITE_EMBY),
+            constants.DEFAULT_RESTORE_OVERWRITE_EMBY)
         self._run_clear_cache = constants.safe_bool(config.get(constants.CFG_RUN_CLEAR_CACHE), False)
         self._llm_base_url = str(config.get(constants.CFG_LLM_BASE_URL, ""))
         self._llm_api_key = str(config.get(constants.CFG_LLM_API_KEY, ""))
@@ -9346,6 +9356,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             constants.CFG_EMBY_NAME_SYNC: getattr(self, "_emby_name_sync", True),
             constants.CFG_EMBY_ROLE_SYNC: bool(getattr(self, "_emby_role_sync",
                                                        constants.DEFAULT_EMBY_ROLE_SYNC)),
+            constants.CFG_RESTORE_OVERWRITE_EMBY: bool(getattr(self, "_overwrite_emby",
+                                                              constants.DEFAULT_RESTORE_OVERWRITE_EMBY)),
             constants.CFG_POOL_FETCH_SCOPE: (getattr(self, "_pool_fetch_scope", "") or constants.DEFAULT_POOL_FETCH_SCOPE),
             constants.CFG_POOL_AUTO_TRANSLATE: getattr(self, "_pool_auto_translate", constants.DEFAULT_POOL_AUTO_TRANSLATE),
             constants.CFG_POOL_AUTO_SYNC: getattr(self, "_pool_auto_sync", constants.DEFAULT_POOL_AUTO_SYNC),
@@ -14433,16 +14445,21 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 # v4.6.114（issue #5）：第二排角色译文再同步到 Emby **条目级 People[].Role** ——
                 # 只写 nfo 会被 Emby 用它条目级缓存的英文 Role 覆盖回去；写到条目级后与第一排
                 # 同层级。开关默认关；未开启 / 无译文 / 取不到 itemId 都只在文案里说明，不报错。
+                # v4.7.4（恢复）：开启「以库为准直接覆盖 Emby」后，**两排一起写服务器** ——
+                # 强制同步第二排（不看开关），并在写完触发 Emby 刷新（让它按中文元数据重写 nfo）。
                 _ers: dict = {}
+                _ov = bool(getattr(self, "_overwrite_emby", False))
+                _rf: dict = {}
                 try:
                     # v4.6.115：仅当本次写回包含第二排（role/both）时才同步 Emby 条目角色
-                    if _sc not in ("role", "both"):
+                    if _sc not in ("role", "both") and not _ov:
                         # 用户选了「仅第一排」→ 明确说明本次不写第二排（不静默）
                         msg += "；Emby 角色：本次未包含第二排（仅写第一排）"
                     elif done and not bool(getattr(self, "_nfo_preview", False)):
                         _ers = self._emby_sync_item_roles(
                             item_id=item_id, server_id=server_id,
-                            ctx=("自动写回" if auto else "写回")) or {}
+                            ctx=("恢复·覆盖 Emby" if _ov else ("自动写回" if auto else "写回")),
+                            force=_ov) or {}
                         if _ers.get("changed"):
                             msg += f"；Emby 角色同步 {_ers['changed']} 处"
                         elif str(_ers.get("status") or "") == "disabled":
@@ -14451,10 +14468,17 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                             msg += f"；Emby 角色未同步（{_ers.get('reason')}）"
                 except Exception as _re:
                     logger.debug(f"[EmbyRole] 写回后角色同步失败（非致命）: {_re}")
+                if _ov and done and not bool(getattr(self, "_nfo_preview", False)):
+                    try:
+                        _rf = self._emby_refresh_item(item_id, server_id, ctx="恢复") or {}
+                        if _rf.get("ok"):
+                            msg += "；已触发 Emby 刷新"
+                    except Exception as _rfe:
+                        logger.debug(f"[Restore] 触发 Emby 刷新失败（非致命）: {_rfe}")
                 return {"success": failed == 0, "message": msg,
                         "data": {"files": done, "changed": changed_total, "failed": failed,
                                  "skipped": skipped, "noop": noop, "skipped_missing": max(0, _miss),
-                                 "scope": _sc, "emby_roles": _ers}}
+                                 "scope": _sc, "emby_roles": _ers, "emby_refresh": _rf}}
 
             if _n_with_path:
                 _recs_wp = [r for r in (people_records or []) if str(r.get("nfo_path") or "").strip()]
@@ -14631,9 +14655,15 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             _scope = str((data or {}).get("scope") or "both").strip().lower()
             if _scope not in ("person", "role", "both"):
                 _scope = "both"
+            # v4.7.4（恢复）：开启「以库为准直接覆盖 Emby」→ 两排一起写服务器（范围强制 both）
+            _ov = bool(getattr(self, "_overwrite_emby", False))
+            if _ov:
+                _scope = "both"
             db = getattr(self, "_people_db", None)
             items = db.library_items(plugin_id=_pid) if db else []
             done = changed_total = failed = skipped = skipped_na = skipped_missing = 0
+            # v4.7.4（恢复）：Emby 里没有 / 尚未翻译的新词条数（库里没有的保留原样，只提示）
+            _new_pending = 0
             # v4.6.115：Emby 角色同步统计（issue #5 新增能力）—— 供通知/日志回报第二排实际写入情况
             _er_ok = _er_changed = _er_no_item = _er_fail = 0
             _er_err = ""
@@ -14679,6 +14709,13 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                                             file_sig=self._wb_item_fp(_iid, _sid))
                     except Exception:
                         pass
+                    if _ov:
+                        # v4.7.4（恢复）：库里没有 / 未翻的新词条 —— 保留原样，只统计提示
+                        try:
+                            _pc = self.translation_pending_for_item(item_id=_iid, server_id=_sid)
+                            _new_pending += int(_pc.get("pending") or 0)
+                        except Exception:
+                            pass
                     if r.get("success"):
                         done += 1
                         changed_total += int(d.get("changed") or 0)
@@ -14700,7 +14737,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             _er_line = ""
             if _scope not in ("role", "both"):
                 _er_line = "🎭 Emby 角色：本次未包含第二排（写回范围 = 仅第一排人名）"
-            elif not bool(getattr(self, "_emby_role_sync", constants.DEFAULT_EMBY_ROLE_SYNC)):
+            elif not _ov and not bool(getattr(self, "_emby_role_sync", constants.DEFAULT_EMBY_ROLE_SYNC)):
                 _er_line = "🎭 Emby 角色：未开启（设置页「角色译文同步到 Emby 条目」）"
             elif _er_changed or _er_ok:
                 _er_line = f"🎭 Emby 角色：同步 {_er_changed} 处（{_er_ok} 个条目）"
@@ -14738,10 +14775,20 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                     if _emby_sync_line:
                         _lines.append(_emby_sync_line)
                     _lines.append(_er_line)
-                    _lines.append("不重新翻译 · 使用库中已翻译名单落盘")
+                    if _ov:
+                        # v4.7.4（恢复）：两排一起写 Emby 元数据（第一排 Person 改名 + 第二排条目角色）
+                        _lines.append("🖥️ 已按「以库为准」覆盖 Emby 服务器元数据（第一排 + 第二排）· 并触发刷新")
+                        if _new_pending:
+                            _lines.append(f"🆕 新增待翻 {_new_pending} 条（Emby 新刮进来的词条，库里没有 · "
+                                          f"保留原样，未覆盖）")
+                        _lines.append("不重新翻译 · 使用库中已翻译名单覆盖")
+                        _title = "🔄 恢复完成（已覆盖 Emby）"
+                    else:
+                        _lines.append("不重新翻译 · 使用库中已翻译名单落盘")
+                        _title = "✅ 全部写回完成"
                     self.post_message(
                         mtype=NotificationType.Manual,
-                        title="✅ 全部写回完成",
+                        title=_title,
                         text="\n".join(_lines),
                     )
                 except Exception as _e:
@@ -15302,7 +15349,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         _cache[_key] = _out
         return _out
 
-    def _emby_sync_item_roles(self, *, item_id: str, server_id: str = "", ctx: str = "") -> dict:
+    def _emby_sync_item_roles(self, *, item_id: str, server_id: str = "", ctx: str = "",
+                              force: bool = False) -> dict:
         """把该条目**第二排角色译文**写入 Emby 条目级 `People[].Role`（v4.6.114 · issue #5）。
 
         为什么需要：第一排走 Person 实体改名（服务器级），Emby 之后写 nfo 的 `<name>`
@@ -15314,7 +15362,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 明确原因（调用方据此拼接提示，绝不静默）。
         """
         try:
-            if not bool(getattr(self, "_emby_role_sync", constants.DEFAULT_EMBY_ROLE_SYNC)):
+            # v4.7.4：force（恢复模式）绕过开关 —— 恢复要求「两排一起写服务器」
+            if not force and not bool(getattr(self, "_emby_role_sync", constants.DEFAULT_EMBY_ROLE_SYNC)):
                 return {"ok": True, "changed": 0, "status": "disabled",
                         "reason": "未开启「角色译文同步到 Emby」"}
             _db = getattr(self, "_people_db", None)
@@ -15351,6 +15400,25 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         except Exception as e:
             logger.debug(f"[EmbyRole] 角色同步异常（非致命）: {e}")
             return {"ok": False, "changed": 0, "status": "exception", "reason": str(e)}
+
+    def _emby_refresh_item(self, item_id: str, server_id: str = "", ctx: str = "") -> dict:
+        """恢复模式下，覆盖 Emby 元数据后触发一次 Emby 刷新（v4.7.4）——
+        宿主 Emby 开着「把元数据写入 NFO」时，它以自己库里的元数据为准重写 nfo；
+        不触发刷新，nfo 会停留在旧的原文。失败不致命（只回报状态）。"""
+        try:
+            _cli, _cerr = self._emby_client_for_server(server_id)
+            if _cli is None:
+                return {"ok": False, "status": "no_client", "reason": _cerr or "Emby 未配置或不可用"}
+            _eid = self._emby_role_item_id(_cli, server_id=server_id, item_id=item_id)
+            if not _eid:
+                return {"ok": False, "status": "no_item_id", "reason": "未取到 Emby itemId"}
+            _ok = bool(_cli.refresh_item(_eid))
+            if _ok:
+                logger.info(f"[Restore] {ctx or '恢复'}：{item_id} → Emby itemId={_eid} 已触发刷新")
+            return {"ok": _ok, "status": "ok" if _ok else "failed"}
+        except Exception as e:
+            logger.debug(f"[Restore] 触发 Emby 刷新异常（非致命）: {e}")
+            return {"ok": False, "status": "exception", "reason": str(e)}
 
     def _sync_emby_person_name(self, name_before: str, name_after: str,
                                client: Optional[Any] = None, server_id: str = "") -> dict:

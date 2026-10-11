@@ -16,6 +16,7 @@ const DEFAULT = {
   lock_cast: false,
   emby_name_sync: true,
   emby_role_sync: false,
+  restore_overwrite_emby: false,
   translate_actor: true,
   translate_director: false,
   translate_writer: false,
@@ -701,6 +702,13 @@ onMounted(() => {
               <div class="epl-switch-desc">把「第二排角色名」的中文译文写入 Emby 条目级 People[].Role（与第一排同名层级）。只写 nfo 时，Emby 刷新元数据会用它条目级缓存的英文角色名把 nfo 覆盖回去——开启本项后 Emby 自己写 nfo 带的即是中文，不再依赖 Cast 锁能否挡住覆盖。写回后自动执行：每条目 1 次读取，命中才整份回写（只改 Role、不动 Name）；默认关，建议开启</div>
             </div>
             <v-switch v-model="config.emby_role_sync" color="primary" hide-details></v-switch>
+          </div>
+          <div class="epl-switch-row">
+            <div class="flex-grow-1">
+              <div class="epl-switch-title">恢复：以库为准直接覆盖 Emby</div>
+              <div class="epl-switch-desc">洗版 / 重新刮削后 Emby 会把 nfo 刷回原文时用。开启后点「全部写回」即按库中译文<strong>强制覆盖 Emby 元数据</strong>：第一排 Person 改名 + 第二排条目级角色，<strong>两排一起写</strong>，并触发 Emby 刷新（让它按中文元数据重写 nfo）；同时<strong>不受「还有待翻词条就不写」的限制</strong>——库里有多少写多少。Emby 新刮进来、库里没有的词条保留原样并计入「新增待翻」。默认关，仅在你确认「以插件库为准」时开启</div>
+            </div>
+            <v-switch v-model="config.restore_overwrite_emby" color="primary" hide-details></v-switch>
           </div>
           <div class="epl-switch-row">
             <div class="flex-grow-1">

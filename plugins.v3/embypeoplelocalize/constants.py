@@ -101,6 +101,12 @@ CFG_EMBY_NAME_SYNC = "emby_name_sync"
 # 缓存的英文 Role 覆盖回去。开启后与第一排同层级，Emby 自己写 nfo 带的即是中文。
 CFG_EMBY_ROLE_SYNC = "emby_role_sync"
 DEFAULT_EMBY_ROLE_SYNC = False
+# v4.7.4：恢复（以库为准 · 直接覆盖 Emby）。洗版 / 重新刮削后 Emby 会把 nfo 刷回原文，
+# 开启后写回不受「还有待翻词条就不写」的限制，直接把库里已有译文覆盖到 Emby 元数据
+# （第一排 Person 改名 + 第二排条目级 People[].Role，**两排一起写**），并触发 Emby 刷新；
+# Emby 里没有的新词条保留原样并计入「新增待翻」。默认关。
+CFG_RESTORE_OVERWRITE_EMBY = "restore_overwrite_emby"
+DEFAULT_RESTORE_OVERWRITE_EMBY = False
 CFG_PROBE_ENABLED = "probe_enabled"                    # 开关（默认关）
 CFG_PROBE_INTERVAL_MINUTES = "probe_interval_minutes"  # 间隔（分钟，默认 60，下限 10）
 CFG_WEBHOOK_DELAY = "webhook_delay"

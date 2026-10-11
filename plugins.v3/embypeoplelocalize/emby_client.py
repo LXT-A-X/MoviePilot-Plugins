@@ -796,6 +796,26 @@ class EmbyClient:
             logger.warning(f"[EmbyClient] 写回条目角色失败 {_iid}: {e}")
         return "failed", 0
 
+    def refresh_item(self, item_id: str) -> bool:
+        """请求 Emby 刷新该条目元数据（v4.7.4 · 恢复用）——
+        宿主 Emby 若开着「把元数据写入 NFO」，它是以**自己库里的元数据**为准去重写 nfo 的；
+        我们把译文覆盖到 Emby 元数据后，触发一次刷新，Emby 才会按新的（中文）元数据
+        重写 nfo。只刷新元数据、不动图片，也不整份替换（避免冲掉 Emby 其它信息）。
+        """
+        _iid = str(item_id or "").strip()
+        if not _iid:
+            return False
+        try:
+            return bool(self._post(f"/emby/Items/{_iid}/Refresh", {
+                "MetadataRefreshMode": "FullRefresh",
+                "ImageRefreshMode": "None",
+                "ReplaceAllMetadata": False,
+                "ReplaceAllImages": False,
+            }))
+        except Exception as e:
+            logger.debug(f"[EmbyClient] 刷新条目失败 {_iid}: {e}")
+            return False
+
     def close(self) -> None:
         """释放底层 requests 会话（连接池）—— 批量任务一次性创建的
         客户端在任务结束时统一 close()，避免长连接/套接字滞留。幂等，可重复调用。"""
