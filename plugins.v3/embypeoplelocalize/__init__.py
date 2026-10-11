@@ -122,7 +122,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
     plugin_name = "Emby 演职人员中文化"
     plugin_desc = "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回；拉取人名时可用 TMDB 刮削补中文名/简介/头像"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/embypeoplelocalize.png"
-    plugin_version = "4.7.1"
+    plugin_version = "4.7.2"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "embypeoplelocalize_"
@@ -3584,6 +3584,18 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             return True
         return not any(_ch.isalpha() for _ch in _t)
 
+    # v4.7.2（issue #8）：角色/人名里的「空标记占位」—— 不是可译名字，模型只会原样返回。
+    # 实测 (voice) 在真实库里可达几千行；此前 `_tx_untranslatable` 因含字母判不出，
+    # 于是既送 AI 白烧请求、又永远清不掉待翻角标。
+    _NOOP_PLACEHOLDER_RE = re.compile(
+        r"^[（(【\[『「]?\s*(?:voice|voices|cv|vo|配音|旁白|待补充|待定|无|n/?a|unknown)\s*[)）】\]』」]?$",
+        re.IGNORECASE)
+
+    @classmethod
+    def _tx_noop_placeholder(cls, text: str) -> bool:
+        """是否「空标记占位」（如 "(voice)" / "(CV)" / "【待补充】"）—— 无需翻译。"""
+        return bool(cls._NOOP_PLACEHOLDER_RE.match(str(text or "").strip()))
+
     @staticmethod
     def _tx_pick_batch(occs: list, n: int) -> list:
         """从 occurrence 列表里按「人名/角色轮流取」裁剪出不超过 n 条的一批
@@ -3649,6 +3661,31 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             # v4.6.113（P2）：异常同样登记为错误标记（≠ 空的「无可翻条目」）
             self._tx_occ_err = str(_e)
             logger.warning(f"[Translate] 取 occurrence 失败（数据库/查询错误，非「无可翻条目」）: {_e}")
+        # v4.7.2（issue #8 · 兜底）：全库轮在**读取处**就地剔除并持久标记「无需翻译」词条 ——
+        # 不依赖某一轮 _accept 是否被调用（「离线能登记、在线不登记」正是这条路径差异）。
+        # 带 item_id（「重新翻译」）时不替用户判死，交由上层按原语义处理。
+        if not str(item_id or "").strip() and _out:
+            _codes: Dict[str, list] = {"person": [], "role": []}
+            _keep: List[dict] = []
+            for _o in _out:
+                _t0 = str(_o.get("text") or "").strip()
+                if self._tx_untranslatable(_t0) or self._tx_noop_placeholder(_t0):
+                    _codes["role" if _o.get("kind") == "role" else "person"].append(_t0)
+                    continue
+                _keep.append(_o)
+            if _codes["person"] or _codes["role"]:
+                try:
+                    _db2 = getattr(self, "_people_db", None)
+                    if _db2 is not None:
+                        _mk = int(_db2.mark_person_noop(
+                            plugin_id=pid, name_terms=sorted(set(_codes["person"])),
+                            role_terms=sorted(set(_codes["role"]))) or 0)
+                        logger.info(f"[Translate] 兜底 noop 持久标记：人名 {len(set(_codes['person']))} / "
+                                    f"角色 {len(set(_codes['role']))}（影响 {_mk} 行），已从候选队列剔除"
+                                    f"（下次起不再计入待翻）")
+                except Exception as _me:
+                    logger.debug(f"[Translate] 兜底 noop 标记失败（非致命）: {_me}")
+                _out = _keep
         return _out
 
     def _tx_occ_queue(self, pid: str, force: bool = False) -> dict:
@@ -4410,26 +4447,35 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 logger.debug(f"[Translate] 落 noop 持久标记失败（非致命）: {_ne}")
 
         def _accept(_o: dict) -> bool:
-            """逐条过滤（与原先 for 循环里的条件逐字一致，只是改成「取够即停」时按需调用）。"""
+            """逐条过滤 —— 凡判定「无需翻译 / 无需操作」的词条，**一律落持久标记**
+            （v4.7.2 · issue #8 根因修复）。
+
+            此前三条过滤分支（已是中文 / 本会话已确认 noop / 无任何可译内容）都是「只 return
+            False、不落盘」—— 于是只要词条进了内存 noop 集合，就永远不会再有机会写
+            `name_noop/role_noop`，而 SQL 仍把它判为待翻 → 角标永久挂着、每次重启再来一轮
+            （issue #6 的死循环换个位置复现）。现在：过滤与落标记**同一处发生**，不再漏。
+            """
             _t = str(_o.get("text") or "")
             if _only_terms and _t not in _only_terms:
                 return False
             if int(skip.get(_t, 0) or 0) >= self.TX_SKIP_AFTER:
                 return False
+            _k = "role" if _o.get("kind") == "role" else "name"
             if self._skip_no_translate(_t):
+                # 已是简体中文 / 繁转简不变 → 无需翻译；落标记，避免它永远算「待翻」
+                _noop_lib[_k].add(_t)
                 return False
-            if not _only_terms:
-                # v4.6.102（P0·缺陷3）：本会话已确认「无需翻译」→ 不再重发（省一次请求）；
-                # 「无任何可译内容」（如 "M"）直接登记，不占单批名额、不触缩批重试。
-                # 手动单选重翻（_only_terms 非空）时放行，保证人工重翻不被拦。
-                if _t in self._tx_noop_terms_set():
-                    return False
-                if self._tx_untranslatable(_t):
-                    self._tx_noop_terms_set().add(_t)
-                    # v4.7.0（issue #6）：无任何可译内容（单字符代号等）→ 一并登记持久标记，
-                    # 否则它会每一轮都被判待翻却被本短路丢弃 → 空转、角标永不消。
-                    _noop_lib["role" if _o.get("kind") == "role" else "name"].add(_t)
-                    return False
+            if _t in self._tx_noop_terms_set():
+                # 本会话已确认无需翻译（模型如实返回原文 / 无任何可译内容）——
+                # 内存知识必须持久化，否则「同一集合命中即丢弃」= 永不落盘（issue #8）。
+                _noop_lib[_k].add(_t)
+                return False
+            if self._tx_untranslatable(_t) or self._tx_noop_placeholder(_t):
+                # 无任何可译内容（"M"）/ 空标记占位（"(voice)" / "(CV)" …）→ 落标记，
+                # 不占单批名额、不送 LLM 白烧请求、也不再计入待翻。
+                self._tx_noop_terms_set().add(_t)
+                _noop_lib[_k].add(_t)
+                return False
             if _o.get("kind") == "role":
                 return bool(_take_role and self._tx_role_type_enabled(_o.get("person_type")))
             return bool(_take_person and self._tx_type_enabled(_o.get("person_type")))
@@ -4468,6 +4514,19 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         # v4.7.0（issue #6）：库内收词阶段确认的「无需翻译」立即落持久标记
         # （即使本轮最终没有可翻词条、下面提前 return，标记也已生效）。
         _flush_noop_marks()
+        # v4.7.2（issue #8 · 自证）：候选非空却一条都没取到时给出可读原因 ——
+        # 此前这种「静默空转」只能靠独立进程复算同一函数才能反推，排障无从下手。
+        try:
+            if (_take_person or _take_role) and not _occs and not _only_terms:
+                _qq = self._tx_occ_queue(pid)
+                _ql = len(_qq.get("occs") or [])
+                if _ql:
+                    logger.info(f"[Translate] 自证：候选 {_ql} 条 / 游标 {_qq.get('i')} → 本轮可送翻 0 条"
+                                f"（会话 noop 集合 {len(self._tx_noop_terms_set())} 条、"
+                                f"会话跳过计数 ≥{self.TX_SKIP_AFTER} 者已排除；"
+                                f"来源含库={_take_library} 取人名={_take_person} 取角色={_take_role}）")
+        except Exception:
+            pass
         # 人名池待翻（池管理条目：有原文无译文）
         pool_rows: List[dict] = []
         _person_in_scope = False   # v4.6.105：提前声明，供末尾诊断日志判定「池为什么没收」
@@ -8245,10 +8304,52 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 self._log_bridge_installed = True
                 logger.info("[EmbyPeopleLocalize] 日志桥接已安装")
                 self._ensure_plugin_logfile()
+                # v4.7.2（issue #6/#8 附带）：把插件实例日志级别（DEBUG）真正接通
+                self._align_log_level()
         except Exception as e:
             logger.warning(f"安装日志桥接失败: {e}")
 
-    def _ensure_plugin_logfile(self):
+    def _align_log_level(self):
+        """v4.7.2（issue #6 / #8 附带）：让「把插件日志级别调成 DEBUG」真正落文件。
+
+        宿主按插件给的是**子 logger**（moviepilot.plugins.embypeoplelocalize）的级别，而插件
+        代码用的是共享 logger —— 记录先在**调用它的 logger** 的级别被过滤掉，根本到不了任何
+        handler（所以此前把桥接 handler 从 INFO 改成 NOTSET 也没用）。这里读子 logger 的有效
+        级别，若已放宽到 INFO 以下：把共享 logger 与其父 moviepilot 一并放宽（**只降不升**），
+        并把插件文件 handler 挂到共享 logger 上，确保 DEBUG 真能落文件。级别正常时**什么都不做**。
+        """
+        try:
+            import logging
+            _child = logging.getLogger("moviepilot.plugins.embypeoplelocalize")
+            _lvl = _child.getEffectiveLevel()
+            if _lvl >= logging.INFO:
+                return
+            _lg = getattr(logger, "logger", logger)
+            try:
+                if getattr(_lg, "level", logging.INFO) not in (logging.NOTSET,) \
+                        and int(getattr(_lg, "level", logging.INFO) or logging.INFO) > _lvl:
+                    _lg.setLevel(_lvl)
+            except Exception:
+                pass
+            try:
+                _mp = logging.getLogger("moviepilot")
+                if _mp.level == logging.NOTSET or _mp.level > _lvl:
+                    _mp.setLevel(_lvl)
+            except Exception:
+                pass
+            try:
+                if not any(getattr(_h, "_epl_logfile", False)
+                           for _h in list(getattr(_lg, "handlers", []) or [])):
+                    self._logfile_ok = False
+                    self._ensure_plugin_logfile(_attach_to=_lg)
+            except Exception:
+                pass
+            logger.info(f"[EmbyPeopleLocalize] 已跟随插件日志级别 {logging.getLevelName(_lvl)}"
+                        f"（DEBUG 将落入日志文件）")
+        except Exception:
+            pass
+
+    def _ensure_plugin_logfile(self, _attach_to=None):
         """路径改用宿主 CONFIG_PATH 推导（不再依赖进程 cwd）；
         换 RotatingFileHandler（5MB × 3）防长期运行日志无限增长。"""
         try:
@@ -8270,8 +8371,10 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             path = os.path.join(log_root, "embypeoplelocalize.log")
             fh = RotatingFileHandler(path, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
             fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [EmbyPeopleLocalize] %(message)s"))
-            # 挂到插件自身子 logger（moviepilot.plugins.embypeoplelocalize 的后代），不影响他人
-            lg = logging.getLogger("moviepilot.plugins.embypeoplelocalize")
+            # 挂到插件自身子 logger（moviepilot.plugins.embypeoplelocalize 的后代），不影响他人；
+            # _align_log_level 可指定挂到「插件代码实际使用的共享 logger」（DEBUG 才走这条）
+            lg = (_attach_to if _attach_to is not None
+                  else logging.getLogger("moviepilot.plugins.embypeoplelocalize"))
             for _lh in list(lg.handlers):
                 if getattr(_lh, "_epl_logfile", False):
                     try:

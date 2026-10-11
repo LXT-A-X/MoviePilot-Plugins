@@ -259,16 +259,45 @@ check(_rows and int(_rows[0].get("name_noop") or 0) == 0 and str(_rows[0].get("n
 # _translate_pending_round 接线
 check("_noop_lib: Dict[str, set] = {\"name\": set(), \"role\": set()}" in _SRC,
       "轮次收集库内 noop 词条（人名/角色分开）")
-check('_noop_lib["role" if _o.get("kind") == "role" else "name"].add(_t)' in _SRC,
-      "_accept：无任何可译内容（单字符代号）登记持久标记")
+check("_noop_lib[_k].add(_t)" in _SRC and _SRC.count("_noop_lib[_k].add(_t)") >= 3,
+      "v4.7.2（issue #8）：三条 noop 过滤分支（已是中文/会话 noop/无内容）**都**落持久标记")
+check('if _t in self._tx_noop_terms_set():' in _SRC
+      and "内存知识必须持久化" in _SRC,
+      "会话 noop 集合命中即持久化（此前只 return False → 永不落盘 = 角标永久挂着）")
 check("_flush_noop_marks()" in _SRC and "db.mark_person_noop(plugin_id=pid" in _SRC,
       "轮末落 person 表持久标记（收词即生效，含提前 return 路径）")
 check("def _flush_noop_marks()" in _SRC and _SRC.count("_flush_noop_marks()") >= 2,
       "_flush_noop_marks 定义 + 至少两处调用（收词后 / 模型 noop 后）")
 
-# 附带（同一排障诉求）：DEBUG 日志不再被桥接层写死 INFO 挡住 + noop 落标记有 INFO 自证
+# v4.7.2（issue #8）：空标记占位 + 读取处兜底 + 空转自证
+check("def _tx_noop_placeholder" in _SRC and "_NOOP_PLACEHOLDER_RE" in _SRC,
+      "新增空标记占位判定（(voice)/(CV)/待补充 …）—— 不被 _tx_untranslatable 覆盖")
+check("兜底 noop 持久标记" in _SRC and "已从候选队列剔除" in _SRC,
+      "全库轮在读取处兜底落标记并从候选剔除（不依赖某轮 _accept 是否被调用）")
+check("自证：候选" in _SRC, "候选非空却 0 条可送翻时有 INFO 自证日志（空转可自查）")
+
+_nsPh = {"re": re}
+exec(_grab_method(_SRC, "_tx_noop_placeholder"), _nsPh)
+_ph = _nsPh["_tx_noop_placeholder"]
+
+
+class _PhNS:
+    pass
+
+
+_PhNS._NOOP_PLACEHOLDER_RE = re.compile(
+    re.search(r'_NOOP_PLACEHOLDER_RE = re\.compile\(\s*r"([^"]+)"', _SRC).group(1), re.IGNORECASE)
+check(_ph(_PhNS, "(voice)") is True and _ph(_PhNS, "（CV）") is True and _ph(_PhNS, "待补充") is True,
+      "占位判定：voice / CV / 待补充 → noop")
+check(_ph(_PhNS, "N8") is False and _ph(_PhNS, "sloppy") is False and _ph(_PhNS, "M") is False,
+      "占位判定不误伤真实名字（N8 / sloppy / M 走 AI 或单字符判定）")
+
+# 附带（同一排障诉求）：DEBUG 日志不再被桥接层写死 INFO 挡住 + 实例级别真正接通
 check("bridge.setLevel(logging.NOTSET)" in _SRC and "bridge.setLevel(logging.INFO)" not in _SRC,
-      "日志桥接不再写死 INFO（跟随 logger 有效级别，调 DEBUG 才能落文件）")
+      "日志桥接不再写死 INFO（跟随 logger 有效级别）")
+check("def _align_log_level" in _SRC and "moviepilot.plugins.embypeoplelocalize" in _SRC
+      and "DEBUG 将落入日志文件" in _SRC,
+      "新增 _align_log_level：把插件实例日志级别（DEBUG）真正接通到共享 logger + 文件 handler")
 check("条「无需操作」词条已落持久标记" in _SRC,
       "noop 落标记有 INFO 自证日志（空转作业可自查，不再只有 debug 分支）")
 
