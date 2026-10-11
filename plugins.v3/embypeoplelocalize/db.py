@@ -173,6 +173,10 @@ CREATE TABLE IF NOT EXISTS writeback_state (
     -- 登记该候选时的任务目标范围（person/role/both）——
     -- 就绪判定按此范围，不依赖瞬时 _tx_target_scope（防「只翻第二排」被第一排 pending 重新阻塞）
     target_scope TEXT DEFAULT '',
+    -- v4.7.7：写回原因（'' = 自动写回 / 'restore' = 删除事件→观察期→同 ID 新版入库的恢复）——
+    -- 恢复登记不依赖「自动写回」开关：常驻 worker 见到 reason='restore' 一律处理（双写 + 刷新），
+    -- 处理成功后清回 ''（避免后续普通写回被误当成恢复）。
+    reason TEXT DEFAULT '',
     updated_at TEXT DEFAULT ''
 );
 -- (plugin_id, server_id, item_id) 的唯一索引不能放在这里 —— _SCHEMA 每次连接
@@ -252,7 +256,7 @@ CREATE TABLE IF NOT EXISTS translate_job_batches (
 CREATE INDEX IF NOT EXISTS idx_tjob_batches ON translate_job_batches (plugin_id, job_id, batch_id);
 """
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 # 「词条 × 条目」明细对上限（v4.6.61 唯一快照用）—— 防超大库下一次拉取过多行；
 # 触顶时快照按已取部分统计（日志 debug 提示），日常规模远小于该值。
@@ -291,6 +295,12 @@ _NAME_MAP_V5_COLUMNS = (
 
 _WRITEBACK_V6_COLUMNS = (
     ("target_scope", "TEXT DEFAULT ''"),
+)
+
+# v4.7.7（恢复与自动写回解耦）：writeback_state 补 reason 列 —— 'restore' = 恢复登记，
+# 不受「自动写回」开关约束；普通登记为空串（旧库默认空，行为不变）。
+_WRITEBACK_V15_COLUMNS = (
+    ("reason", "TEXT DEFAULT ''"),
 )
 
 
@@ -780,6 +790,11 @@ def migrate() -> int:
                                        ("role_noop", "INTEGER DEFAULT 0")])
             _x("CREATE INDEX IF NOT EXISTS idx_person_noop "
                "ON person (plugin_id, name_noop, role_noop)")
+        if cur_v < 15:
+            # v4.7.7（恢复与自动写回解耦）：writeback_state 补 reason 列 ——
+            # 「恢复」登记（reason='restore'）不再依赖「自动写回」开关。
+            # 旧库无损：新列默认空串，历史候选一律按普通写回处理。
+            _ensure_columns("writeback_state", _WRITEBACK_V15_COLUMNS)
     except Exception as e:
         logger.error(f"[DB] 迁移 v{cur_v} → v{SCHEMA_VERSION} 失败（版本号未更新，下次启动重试）: {e}")
         return cur_v
@@ -4690,7 +4705,8 @@ class WritebackDb:
             return False
 
     def register(self, *, plugin_id: str, server_id: str, item_id: str, nfo_path: str = "",
-                 file_sig: str = "", target_scope: str = "", db: Optional[Any] = None) -> str:
+                 file_sig: str = "", target_scope: str = "", reason: str = "",
+                 db: Optional[Any] = None) -> str:
         """登记条目为「待写回」候选（翻译 worker 每轮有新译文时调用）。
         幂等纪律（文档 §15）：
           - writing → 不动（同一个条目只能有一个写回任务）；
@@ -4698,6 +4714,9 @@ class WritebackDb:
           - 其余（新条目 / 有新译文 / 文件被外部替换）→ 置 pending（新内容重新给足重试次数）。
         target_scope 记录本次登记的任务范围（person/role/both）——
         重复登记时按并集合并（写回就绪判定按该范围，不读瞬时状态）。
+        reason（v4.7.7）：'' = 自动写回；'restore' = 恢复（删除→观察期→恢复）。
+          reason='restore' **不受**指纹幂等约束（恢复必须重新写）、且为**粘性**（普通登记不覆盖它，
+          处理成功后才由 clear_reason 清回 ''）—— 常驻 worker 见到 reason='restore' 一律处理。
         改为单条原子 upsert（INSERT ... ON CONFLICT ... DO UPDATE）——
         依赖 (plugin_id, server_id, item_id) 唯一索引，杜绝并发登记产生的重复 pending 行；
         幂等纪律由 DO UPDATE 的 WHERE 承担（不满足即不更新 → skip），不再「先 SELECT 再决定」。
@@ -4706,10 +4725,11 @@ class WritebackDb:
         now = _now()
         _fp = str(file_sig or "")
         _ts = _merge_scope("", target_scope)
+        _rsn = "restore" if str(reason or "").strip().lower() == "restore" else ""
         try:
             n = _x("INSERT INTO writeback_state (plugin_id, server_id, item_id, nfo_path, status, "
-                   "error, file_sig, attempts, target_scope, updated_at) "
-                   "VALUES (?,?,?,?,?,?,?,?,?,?) "
+                   "error, file_sig, attempts, target_scope, reason, updated_at) "
+                   "VALUES (?,?,?,?,?,?,?,?,?,?,?) "
                    "ON CONFLICT(plugin_id, server_id, item_id) DO UPDATE SET "
                    "status='pending', error='', file_sig=excluded.file_sig, attempts=0, "
                    # 任务范围并集合并（与 _merge_scope 同语义：空取另一、相同取自身、不同取 both）
@@ -4718,18 +4738,41 @@ class WritebackDb:
                    "WHEN writeback_state.target_scope='' THEN excluded.target_scope "
                    "WHEN writeback_state.target_scope=excluded.target_scope THEN writeback_state.target_scope "
                    "ELSE 'both' END, "
+                   # reason 粘性：普通登记（''）不覆盖已存在的 'restore'
+                   "reason=CASE WHEN excluded.reason<>'' THEN excluded.reason "
+                   "ELSE writeback_state.reason END, "
                    "nfo_path=CASE WHEN excluded.nfo_path<>'' THEN excluded.nfo_path "
                    "ELSE writeback_state.nfo_path END, "
                    "updated_at=excluded.updated_at "
-                   # 幂等纪律：writing 不动；done/failed/missing 且指纹一致不重复登记
+                   # 幂等纪律：writing 不动；done/failed/missing 且指纹一致不重复登记。
+                   # 例外：reason='restore' 必须重新写（恢复就是要覆盖已 done 的条目）。
                    "WHERE writeback_state.status<>'writing' "
-                   "AND NOT (writeback_state.status IN ('done','failed','missing') "
-                   "AND excluded.file_sig<>'' AND writeback_state.file_sig=excluded.file_sig)",
-                   (plugin_id, server_id, item_id, str(nfo_path or ""), "pending", "", _fp, 0, _ts, now))
+                   "AND (excluded.reason='restore' OR NOT (writeback_state.status IN ('done','failed','missing') "
+                   "AND excluded.file_sig<>'' AND writeback_state.file_sig=excluded.file_sig))",
+                   (plugin_id, server_id, item_id, str(nfo_path or ""), "pending", "", _fp, 0, _ts, _rsn, now))
             return "pending" if n > 0 else "skip"
         except Exception as e:
             logger.warning(f"[Writeback] register 失败: {e}")
             return "skip"
+
+    def has_pending_restore(self, *, plugin_id: str, db: Optional[Any] = None) -> bool:
+        """是否还有待处理的「恢复」登记（reason='restore'，pending/failed）——
+        常驻写回 worker 在「自动写回」关时用它决定要不要进入本轮（避免无谓空转）。"""
+        try:
+            return bool(_q1("SELECT 1 FROM writeback_state WHERE plugin_id=? "
+                            "AND reason='restore' AND status IN ('pending','failed') LIMIT 1",
+                            (plugin_id,)))
+        except Exception:
+            return False
+
+    def clear_reason(self, *, plugin_id: str, server_id: str, item_id: str,
+                     db: Optional[Any] = None) -> int:
+        """清除条目的写回原因（恢复写回成功后调用）—— 否则该条目后续的普通写回会被误当成恢复。"""
+        try:
+            return _x("UPDATE writeback_state SET reason='' WHERE plugin_id=? AND server_id=? AND item_id=?",
+                      (plugin_id, server_id, item_id))
+        except Exception:
+            return 0
 
     def clear_all(self, *, plugin_id: str, db: Optional[Any] = None) -> int:
         """清空写回队列（供库页「清空翻译记录」调用）—— 记录已删，残留候选只会空转。"""

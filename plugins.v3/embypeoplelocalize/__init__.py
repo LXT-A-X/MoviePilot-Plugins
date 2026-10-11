@@ -154,7 +154,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
     plugin_name = "Emby 演职人员中文化"
     plugin_desc = "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回；拉取人名时可用 TMDB 刮削补中文名/简介/头像"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/embypeoplelocalize.png"
-    plugin_version = "4.7.6"
+    plugin_version = "4.7.7"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "embypeoplelocalize_"
@@ -4945,15 +4945,14 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 and not bool(getattr(self, "_nfo_preview", False)))
 
     def _wb_writeback_enabled(self) -> bool:
-        """自动写回门控（文档 §3.8/§3.12）—— auto_writeback 关或旧预览模式开 → 不自动写回。
+        """**自动写回**门控（文档 §3.8/§3.12）—— auto_writeback 关或旧预览模式开 → 不自动写回。
         （预览模式旧语义本阶段保持：预览开 = 翻译完不自动写回。）
         v4.6.99（报告 P1-03 A）：任务运行期间取 Job Snapshot 的写回策略 ——
-        运行中改「自动写回 / 预览模式」不影响当前 Job（新设置从下一个任务生效）。"""
+        运行中改「自动写回 / 预览模式」不影响当前 Job（新设置从下一个任务生效）。
+        v4.7.7（解耦）：**恢复不再借本门** —— 恢复是独立逻辑（删除事件 → 观察期 → 恢复），
+        由写回队列里的 `reason='restore'` 标记驱动（见 _writeback_pending_round / _wb_process_item_locked），
+        开「恢复」开关**不会**让常驻自动写回被一起放行。"""
         try:
-            # v4.7.5（恢复）：开着「以库为准直接覆盖 Emby」时，恢复写回**优先于**自动写回开关 ——
-            # 用户开这个开关的意图就是「洗版/重刮后自动恢复」，不该再被 auto_writeback 关掉拦住。
-            if bool(getattr(self, "_overwrite_emby", False)):
-                return True
             _snap = getattr(self, "_tx_cfg_snapshot", None)
             if isinstance(_snap, dict) and "auto_writeback" in _snap:
                 return (bool(_snap.get("auto_writeback"))
@@ -5103,11 +5102,13 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         except Exception:
             return ""
 
-    def _wb_register_item(self, item_id: str, server_id: str = "", target_scope: str = "") -> str:
+    def _wb_register_item(self, item_id: str, server_id: str = "", target_scope: str = "",
+                          reason: str = "") -> str:
         """把「有新译文的条目」登记为写回候选（翻译 worker 每轮调用，文档 §3.4）。
         指纹只在需要做幂等比较时计算（状态 done/failed/missing）—— 省掉常规路径的文件 stat 开销。
         target_scope 随登记落库（person/role/both）—— 就绪判定按候选记录的任务范围，
-        不再依赖瞬时 _tx_target_scope（防「只翻第二排」任务结束后第一排 pending 重新阻塞写回）。"""
+        不再依赖瞬时 _tx_target_scope（防「只翻第二排」任务结束后第一排 pending 重新阻塞写回）。
+        reason（v4.7.7）：'' = 自动写回；'restore' = 恢复登记（不受「自动写回」开关约束）。"""
         _item = str(item_id or "").strip()
         if not _item:
             return "skip"
@@ -5121,7 +5122,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             if rec is not None and str(rec.get("status") or "") in ("done", "failed", "missing"):
                 _fp = self._wb_item_fp(_item, server_id)
             _r = wdb.register(plugin_id=self.__class__.__name__, server_id=str(server_id or ""),
-                              item_id=_item, file_sig=_fp, target_scope=str(target_scope or ""))
+                              item_id=_item, file_sig=_fp, target_scope=str(target_scope or ""),
+                              reason=str(reason or ""))
             if _r in ("new", "pending"):
                 self._wb_wake()
             return _r
@@ -5227,11 +5229,12 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         if str(rec.get("status") or "") == "writing":
             return {"skip_writing": 1, "current": title}
         # 就绪判定：还有会被翻译的待翻词条 → 等下一轮（文档 §1.2-8 / §3.4）
-        # v4.7.4（恢复）：开启「以库为准直接覆盖 Emby」后**忽略**该阻塞 —— 库里有多少写多少，
-        # Emby 重刮带进来的新词条没翻完也不卡住已有译文的恢复。
+        # v4.7.7（解耦）：恢复（reason='restore'）按行判定并**忽略**该阻塞 —— 库里有多少写多少，
+        # Emby 重刮带进来的新词条没翻完也不卡住已有译文的恢复；普通候选仍受「自动写回」门控。
+        _is_restore = str(rec.get("reason") or "") == "restore"
         chk = self.translation_pending_for_item(item_id=item_id, server_id=server_id,
                                                 scope=str(rec.get("target_scope") or ""))
-        if not chk.get("ready") and not bool(getattr(self, "_overwrite_emby", False)):
+        if not chk.get("ready") and not _is_restore:
             return {"not_ready": 1, "current": title}
         # 先标 writing（防并发；失败/中断后由 reset/退避恢复），失败计数 +1
         wdb.set_status(plugin_id=pi_d, server_id=server_id, item_id=item_id,
@@ -5239,8 +5242,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                        error="", bump_attempt=True)
         try:
             r = self._restore_item_to_nfo(
-                item_id, server_id, auto=True,
-                restore=bool(getattr(self, "_overwrite_emby", False)))
+                item_id, server_id, auto=True, restore=_is_restore)
         except Exception as e:
             r = {"success": False, "message": str(e)}
         d = r.get("data") or {}
@@ -5252,6 +5254,12 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             wdb.set_status(plugin_id=pi_d, server_id=server_id, item_id=item_id,
                            status="done", error="", changed_count=int(d.get("changed") or 0),
                            file_sig=_fp)
+            if _is_restore:
+                # v4.7.7：恢复写回成功 → 清回 reason，避免该条目后续普通写回被误当成恢复
+                try:
+                    wdb.clear_reason(plugin_id=pi_d, server_id=server_id, item_id=item_id)
+                except Exception:
+                    pass
             return {"written": 1, "changed": int(d.get("changed") or 0),
                     "noop": 1 if d.get("noop") else 0, "current": title}
         if d.get("missing") or d.get("skip"):
@@ -5320,8 +5328,11 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                  "failed": 0, "missing": 0, "not_ready": 0, "skip_writing": 0,
                  "current": "", "error": ""}
         for rec in rows:
-            if self._wb_stop_requested() or not self._wb_writeback_enabled():
+            if self._wb_stop_requested():
                 break
+            # v4.7.7（解耦）：自动写回关 → 只处理「恢复」登记（reason='restore'），普通候选跳过。
+            if not self._wb_writeback_enabled() and str(rec.get("reason") or "") != "restore":
+                continue
             # 让位：手动「全部写回」在跑 / 扫描在跑（扫描当前仍内联写 nfo，避免同文件两个写者）
             if self._task_running("writeback") or self._task_running("scan"):
                 break
@@ -5363,8 +5374,15 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 if self._task_running("writeback") or self._task_running("scan"):
                     _ev.wait(1.0); _ev.clear(); continue
                 if not self._wb_writeback_enabled():
-                    # 自动写回关 / 预览模式开：待命（手动「全部写回」不受影响）
-                    _ev.wait(1.0); _ev.clear(); continue
+                    # 自动写回关 / 预览模式开：待命。
+                    # v4.7.7（解耦）：但「恢复」登记（reason='restore'）不依赖本开关 ——
+                    # 队列里还有待处理的恢复时，仍要进入本轮（普通候选由本轮按行跳过）。
+                    try:
+                        _has_restore = self._wb_db().has_pending_restore(plugin_id=_pid)
+                    except Exception:
+                        _has_restore = False
+                    if not _has_restore:
+                        _ev.wait(1.0); _ev.clear(); continue
                 _st = self._writeback_pending_round(_pid)
                 if not _st or not _st.get("did"):
                     _idle += 1
@@ -6930,7 +6948,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                         except Exception:
                             _rsid = ""
                 if _riid:
-                    _rr = self._wb_register_item(_riid, _rsid, target_scope="both")
+                    _rr = self._wb_register_item(_riid, _rsid, target_scope="both", reason="restore")
                     if _rr in ("new", "pending"):
                         logger.info(f"[Restore] 入库即登记恢复：{os.path.basename(nfo_path)} "
                                     f"(item={_riid}) → 将按「以库为准」覆盖 Emby 两排 + 刷新")

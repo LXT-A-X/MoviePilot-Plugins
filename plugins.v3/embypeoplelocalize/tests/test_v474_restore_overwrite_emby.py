@@ -14,8 +14,9 @@
   T4 写回 worker：恢复绕过「待翻阻塞」，并传 restore=恢复开关
   T5 撤回： 「全部写回」不再被恢复开关改变（范围/通知/统计全部还原）
   T6 EmbyClient.refresh_item
-  T7 选项 A：入库只认 recovered 才自动恢复；恢复优先于「自动写回」开关
+  T7 选项 A：入库只认 recovered 才自动恢复；恢复与「自动写回」开关解耦（v4.7.7）
   T8 v4.7.6：状态 / 文案用「自动写回」用户设置本身（`_wb_auto_setting`），不再被恢复开关顶成 true
+  T9 v4.7.7：恢复改走队列标记 reason='restore'（真 SQLite：粘性 / 不受指纹幂等约束 / 清回）
 """
 import sys
 import os
@@ -133,12 +134,14 @@ check("_emby_refresh_item(item_id, server_id, ctx=\"恢复\")" in _rb, "恢复�
 check('"emby_refresh": _rf' in _rb, "结果 data 带 emby_refresh")
 
 # ─────────────────────────────────────────────
-print("\n[T4] 写回 worker：恢复绕过待翻阻塞 + 传 restore")
+print("\n[T4] 写回 worker：恢复按行判定（reason=restore）+ 传 restore")
 # ─────────────────────────────────────────────
-check('if not chk.get("ready") and not bool(getattr(self, "_overwrite_emby", False)):' in _SRC,
-      "待翻词条在恢复模式不阻塞写回")
-check("restore=bool(getattr(self, \"_overwrite_emby\", False)))" in _SRC,
-      "常驻写回 worker 传 restore=恢复开关（唯一的恢复入口）")
+check('_is_restore = str(rec.get("reason") or "") == "restore"' in _SRC,
+      "按行判定是否恢复登记（v4.7.7 解耦，不再看全局恢复开关）")
+check('if not chk.get("ready") and not _is_restore:' in _SRC,
+      "待翻词条在恢复登记不阻塞写回（普通候选仍阻塞）")
+check("item_id, server_id, auto=True, restore=_is_restore)" in _SRC,
+      "常驻写回 worker 按行传 restore（恢复登记才 True）")
 
 # ─────────────────────────────────────────────
 print("\n[T5] 撤回： 「全部写回」行为不再被恢复开关改变")
@@ -181,32 +184,40 @@ print("\n[T7] 选项 A：只认「恢复」，且优先于「自动写回」开�
 _ing = _grab_method(_SRC, "_ingest_nfo_pending")
 check('if recovered and bool(getattr(self, "_overwrite_emby", False)):' in _ing,
       "只在 recovered（删除→观察期→恢复）时自动登记，普通入库不受影响")
-check("self._wb_register_item(_riid, _rsid, target_scope=\"both\")" in _ing, "恢复即登记写回（自动）")
+check("self._wb_register_item(_riid, _rsid, target_scope=\"both\", reason=\"restore\")" in _ing,
+      "恢复即登记写回（自动，reason='restore'）")
 check("[Restore] 入库即登记恢复" in _ing, "有 INFO 自证")
 
 _wbe = _grab_method(_SRC, "_wb_writeback_enabled")
-check('if bool(getattr(self, "_overwrite_emby", False)):' in _wbe and "return True" in _wbe,
-      "写回总门：恢复开关优先于「自动写回」")
+check("_overwrite_emby" not in _wbe, "写回总门不再含恢复旁路（v4.7.7 解耦）")
+check("return self._wb_auto_setting()" in _wbe, "写回总门回落到「自动写回」用户设置本身")
 _nsW = {}
+exec(_grab_method(_SRC, "_wb_auto_setting"), _nsW)
 exec(_wbe, _nsW)
 
 
 class _S1:
+    # 自动写回开 + 恢复开 → 放行
     _overwrite_emby = True
-    _auto_writeback = False
-    _nfo_preview = True
+    _auto_writeback = True
+    _nfo_preview = False
     _tx_cfg_snapshot = None
+    _wb_auto_setting = _nsW["_wb_auto_setting"]
+    _wb_writeback_enabled = _nsW["_wb_writeback_enabled"]
 
 
 class _S2:
-    _overwrite_emby = False
+    # 恢复开、自动写回关 → 不放行（恢复不再借本门）
+    _overwrite_emby = True
     _auto_writeback = False
     _nfo_preview = False
     _tx_cfg_snapshot = None
+    _wb_auto_setting = _nsW["_wb_auto_setting"]
+    _wb_writeback_enabled = _nsW["_wb_writeback_enabled"]
 
 
-check(_nsW["_wb_writeback_enabled"](_S1()) is True and _nsW["_wb_writeback_enabled"](_S2()) is False,
-      "行为：恢复开→写；恢复关→维持原「自动写回」语义")
+check(_S1()._wb_writeback_enabled() is True and _S2()._wb_writeback_enabled() is False,
+      "行为：写回总门只看「自动写回」；恢复开关开着也不放行（v4.7.7 解耦）")
 check("已自动恢复 Emby：第一排 Person 改名" in _SRC, "恢复通知里注明「已自动恢复 Emby（两排）」")
 
 # ─────────────────────────────────────────────
@@ -220,7 +231,7 @@ check('"auto_writeback": self._wb_writeback_enabled(),' not in _SRC,
 check(_SRC.count("if self._wb_auto_setting() \\") == 2,
       "两条入队文案（库内翻译 / 重翻）用 _wb_auto_setting")
 check(_SRC.count("self._wb_writeback_enabled()") >= 2,
-      "写回 worker 门控仍用 _wb_writeback_enabled（保留恢复优先）")
+      "写回 worker 门控仍用 _wb_writeback_enabled（只管自动写回；恢复按行判定）")
 _wbas = _grab_method(_SRC, "_wb_auto_setting")
 _nsA = {}
 exec(_wbas, _nsA)
@@ -244,6 +255,53 @@ class _A3:
 check(_nsA["_wb_auto_setting"](_A1()) is True and _nsA["_wb_auto_setting"](_A2()) is False
       and _nsA["_wb_auto_setting"](_A3()) is False,
       "行为：auto_writeback 开且非预览→True；否则 False（与恢复开关无关）")
+
+# ─────────────────────────────────────────────
+print("\n[T9] v4.7.7 解耦：恢复改走队列标记 reason='restore'（不借自动写回门）")
+# ─────────────────────────────────────────────
+check("def _wb_register_item(self, item_id: str, server_id: str = \"\", target_scope: str = \"\",\n"
+      "                          reason: str = \"\") -> str:" in _SRC,
+      "_wb_register_item 新增 reason 参数")
+_wpr = _grab_method(_SRC, "_writeback_pending_round")
+check('if not self._wb_writeback_enabled() and str(rec.get("reason") or "") != "restore":' in _wpr,
+      "本轮：自动写回关时普通候选跳过、恢复候选照常处理")
+check("has_pending_restore(plugin_id=_pid)" in _SRC, "worker 用 has_pending_restore 决定是否进入本轮")
+check("wdb.clear_reason(plugin_id=pi_d, server_id=server_id, item_id=item_id)" in _SRC,
+      "恢复写回成功后清回 reason（防后续普通写回被误当恢复）")
+
+# 真 SQLite 行为：reason 粘性 + restore 不受指纹幂等约束 + has_pending_restore + clear_reason
+import importlib.util as _ilu
+_spec = _ilu.spec_from_file_location("epl_db_v477", str(PLUGIN_DIR / "db.py"))
+_db = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(_db)
+check(_db.SCHEMA_VERSION >= 15, f"SCHEMA_VERSION 升到 15+（实际 {_db.SCHEMA_VERSION}）")
+check(any(c[0] == "reason" for c in _db._WRITEBACK_V15_COLUMNS), "迁移补列含 reason")
+_db.PeopleDb.ensure_table()   # 建表 + 跑版本化迁移（writeback_state 唯一索引由 migrate 创建）
+_wdb = _db.WritebackDb()
+_wdb.ensure_table()
+_PID = "EmbyPeopleLocalizeProbe"
+_wdb.clear_all(plugin_id=_PID)
+# 恢复登记不受「指纹一致」约束（done + 同指纹也要重新写）
+_wdb.register(plugin_id=_PID, server_id="s1", item_id="i1", file_sig="sigX", target_scope="both")
+_wdb.set_status(plugin_id=_PID, server_id="s1", item_id="i1", status="done", file_sig="sigX")
+_r_plain = _wdb.register(plugin_id=_PID, server_id="s1", item_id="i1", file_sig="sigX", target_scope="both")
+check(_r_plain == "skip", "普通登记：done 且指纹一致 → skip（幂等不变）")
+_r_restore = _wdb.register(plugin_id=_PID, server_id="s1", item_id="i1", file_sig="sigX",
+                           target_scope="both", reason="restore")
+check(_r_restore == "pending", "恢复登记：done 且指纹一致也重新置 pending（必须重写）")
+_rec = _wdb.get(plugin_id=_PID, server_id="s1", item_id="i1") or {}
+check(str(_rec.get("reason") or "") == "restore", "行上记下 reason='restore'")
+check(_wdb.has_pending_restore(plugin_id=_PID) is True, "has_pending_restore → True")
+# 粘性：随后普通登记不清掉 restore
+_wdb.register(plugin_id=_PID, server_id="s1", item_id="i1", file_sig="sigX", target_scope="role")
+_rec = _wdb.get(plugin_id=_PID, server_id="s1", item_id="i1") or {}
+check(str(_rec.get("reason") or "") == "restore", "普通登记不覆盖已存在的 restore（粘性）")
+# 处理成功后清回
+_wdb.clear_reason(plugin_id=_PID, server_id="s1", item_id="i1")
+_rec = _wdb.get(plugin_id=_PID, server_id="s1", item_id="i1") or {}
+check(str(_rec.get("reason") or "") == "", "clear_reason 清回 ''（后续普通写回不再被误当恢复）")
+check(_wdb.has_pending_restore(plugin_id=_PID) is False, "清理后 has_pending_restore → False")
+_wdb.clear_all(plugin_id=_PID)
 
 print("\n" + "=" * 72)
 if _N[1] == 0:
