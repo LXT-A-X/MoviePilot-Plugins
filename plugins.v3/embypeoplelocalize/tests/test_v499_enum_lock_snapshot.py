@@ -306,17 +306,20 @@ _lim = _grab_method(_SRC, "_tx_limits_by_level")
 check('_snap.get("limits")' in _lim, "_tx_limits_by_level 任务期间取快照（人数上限冻结）")
 _wb = _grab_method(_SRC, "_wb_writeback_enabled")
 check('_snap.get("auto_writeback")' in _wb, "_wb_writeback_enabled 任务期间取快照（写回策略冻结）")
+check("return self._wb_auto_setting()" in _wb, "无快照回落到「自动写回」用户设置本身（v4.7.6）")
 _sv = _grab_method(_SRC, "_api_save_config")
 check("applied_next_task" in _sv and "下一个任务" in _sv, "运行中保存配置 → 明确提示「下一个任务生效」")
 
 # 行为级：快照存在时优先取快照
 _ns3 = {"logger": logger}
 exec(_grab_method(_SRC, "_tx_limits_by_level"), _ns3)
+exec(_grab_method(_SRC, "_wb_auto_setting"), _ns3)
 exec(_grab_method(_SRC, "_wb_writeback_enabled"), _ns3)
 
 
 class _SnapF:
     _tx_limits_by_level = _ns3["_tx_limits_by_level"]
+    _wb_auto_setting = _ns3["_wb_auto_setting"]
     _wb_writeback_enabled = _ns3["_wb_writeback_enabled"]
 
     def __init__(self, snap, live_limits, auto=True, preview=False):

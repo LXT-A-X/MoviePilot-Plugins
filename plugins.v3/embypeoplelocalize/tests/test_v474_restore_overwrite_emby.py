@@ -15,6 +15,7 @@
   T5 撤回： 「全部写回」不再被恢复开关改变（范围/通知/统计全部还原）
   T6 EmbyClient.refresh_item
   T7 选项 A：入库只认 recovered 才自动恢复；恢复优先于「自动写回」开关
+  T8 v4.7.6：状态 / 文案用「自动写回」用户设置本身（`_wb_auto_setting`），不再被恢复开关顶成 true
 """
 import sys
 import os
@@ -207,6 +208,42 @@ class _S2:
 check(_nsW["_wb_writeback_enabled"](_S1()) is True and _nsW["_wb_writeback_enabled"](_S2()) is False,
       "行为：恢复开→写；恢复关→维持原「自动写回」语义")
 check("已自动恢复 Emby：第一排 Person 改名" in _SRC, "恢复通知里注明「已自动恢复 Emby（两排）」")
+
+# ─────────────────────────────────────────────
+print("\n[T8] v4.7.6：状态 / 文案用「自动写回」用户设置本身（不掺恢复开关）")
+# ─────────────────────────────────────────────
+check("def _wb_auto_setting(self) -> bool:" in _SRC, "新增 _wb_auto_setting（纯用户设置）")
+check('"auto_writeback": self._wb_auto_setting(),' in _SRC,
+      "状态 payload 的 auto_writeback 用 _wb_auto_setting（否则恢复开关会藏掉「全部写回」按钮）")
+check('"auto_writeback": self._wb_writeback_enabled(),' not in _SRC,
+      "状态 payload 不再复用写回总门（撤回 v4.7.5 的泄漏）")
+check(_SRC.count("if self._wb_auto_setting() \\") == 2,
+      "两条入队文案（库内翻译 / 重翻）用 _wb_auto_setting")
+check(_SRC.count("self._wb_writeback_enabled()") >= 2,
+      "写回 worker 门控仍用 _wb_writeback_enabled（保留恢复优先）")
+_wbas = _grab_method(_SRC, "_wb_auto_setting")
+_nsA = {}
+exec(_wbas, _nsA)
+
+
+class _A1:
+    _auto_writeback = True
+    _nfo_preview = False
+
+
+class _A2:
+    _auto_writeback = False
+    _nfo_preview = False
+
+
+class _A3:
+    _auto_writeback = True
+    _nfo_preview = True
+
+
+check(_nsA["_wb_auto_setting"](_A1()) is True and _nsA["_wb_auto_setting"](_A2()) is False
+      and _nsA["_wb_auto_setting"](_A3()) is False,
+      "行为：auto_writeback 开且非预览→True；否则 False（与恢复开关无关）")
 
 print("\n" + "=" * 72)
 if _N[1] == 0:

@@ -154,7 +154,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
     plugin_name = "Emby 演职人员中文化"
     plugin_desc = "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回；拉取人名时可用 TMDB 刮削补中文名/简介/头像"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/embypeoplelocalize.png"
-    plugin_version = "4.7.5"
+    plugin_version = "4.7.6"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "embypeoplelocalize_"
@@ -4934,6 +4934,16 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
     WB_MAX_ATTEMPTS = 3     # 失败自动重试上限（超过后等新译文重新登记 / 手动「全部写回」）
     WB_RETRY_AFTER = 600.0  # 失败条目自动重试最小间隔（秒）
 
+    def _wb_auto_setting(self) -> bool:
+        """「自动写回」**用户设置本身**（auto_writeback 开 且 非预览模式）—— 与「恢复」开关无关。
+
+        v4.7.6：只供 **UI / 文案** 使用（库页据此决定是否显示手动「全部写回」按钮、提示文案），
+        绝不参与 worker 门控 —— 否则恢复开关一开，状态里 `auto_writeback=true`，库页会把
+        「全部写回」按钮**藏起来**（`v-if="!autoWriteback"`），用户会觉得按钮「不见了」。
+        """
+        return (bool(getattr(self, "_auto_writeback", True))
+                and not bool(getattr(self, "_nfo_preview", False)))
+
     def _wb_writeback_enabled(self) -> bool:
         """自动写回门控（文档 §3.8/§3.12）—— auto_writeback 关或旧预览模式开 → 不自动写回。
         （预览模式旧语义本阶段保持：预览开 = 翻译完不自动写回。）
@@ -4948,8 +4958,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             if isinstance(_snap, dict) and "auto_writeback" in _snap:
                 return (bool(_snap.get("auto_writeback"))
                         and not bool(_snap.get("nfo_preview")))
-            return (bool(getattr(self, "_auto_writeback", True))
-                    and not bool(getattr(self, "_nfo_preview", False)))
+            return self._wb_auto_setting()
         except Exception:
             return False
 
@@ -8752,7 +8761,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 "translate_status": dict(getattr(self, "_translate_status", None) or {}),
                 "writeback_status": dict(getattr(self, "_writeback_status", None) or {}),
                 "probe_status": dict(getattr(self, "_probe_status", None) or {}),
-                "auto_writeback": self._wb_writeback_enabled(),
+                "auto_writeback": self._wb_auto_setting(),
                 "pool_status": dict(getattr(self, "_pool_status", None) or {}),
                 "pool_counts": pool_counts,
                 "tx": self._tx_state_snapshot(pool_counts),
@@ -14675,7 +14684,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                         "message": f"当前翻译目标（{_lbl}）下没有待翻译词条"}
             self._tx_skip_clear = True   # 清会话跳过计数（曾失败的词条借这次机会重试）
             self._tx_request_consume(source="library", scope=_scope)
-            _wb_txt = "翻译完成后按「自动写回」设置自动落盘 nfo" if self._wb_writeback_enabled() \
+            _wb_txt = "翻译完成后按「自动写回」设置自动落盘 nfo" if self._wb_auto_setting() \
                 else "当前未开自动写回：翻译只写库，确认后点「全部写回」落盘 nfo"
             self._push_log("INFO", f"库内翻译已交后台翻译队列（目标 = {self._tx_scope_label()}）："
                                    f"人名 {_n} / 角色 {_r}（常驻 worker 自动消费；{_wb_txt}）")
@@ -15227,7 +15236,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 self._tx_register_job_terms(_orows)
             except Exception:
                 pass
-            _wb_txt = "重翻完成后按「自动写回」设置自动落盘" if self._wb_writeback_enabled() \
+            _wb_txt = "重翻完成后按「自动写回」设置自动落盘" if self._wb_auto_setting() \
                 else "当前未开自动写回：重翻只写库，确认后点「全部写回」落盘"
             self._push_log("INFO", f"重新翻译已入队：{_disp}（范围 = {_scope_lbl}；"
                                    f"人名 {len(_names)} / 角色 {len(_roles)}）"
