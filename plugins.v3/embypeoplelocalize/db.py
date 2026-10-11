@@ -181,6 +181,12 @@ CREATE TABLE IF NOT EXISTS writeback_state (
     -- 库里「集」与「剧」共用 item_id，恢复登记也按 item_id 建行；把本次真正回来的文件攒成
     -- 一串，整季洗版时每集都写到，而只删了某集时绝不越界写同剧其它集。写成功后清空。
     restore_paths TEXT DEFAULT '',
+    -- v4.7.9（审查 P1-02）：写回「代数」—— 每成功登记一次 +1。
+    -- 用途：写回进行中（status='writing'）又来了新登记（新译文 / 新的恢复路径）时，
+    -- 不再直接丢弃（旧行为：register 的 WHERE 把 writing 挡掉、_wb_register_item 直接 skip），
+    -- 而是只把新内容累积进队列并 gen+1；当前这一轮收尾时发现 gen 已变 → 交回 pending 重跑，
+    -- 绝不把「新一代」的恢复登记/路径当成已完成清掉。
+    gen INTEGER DEFAULT 0,
     updated_at TEXT DEFAULT ''
 );
 -- (plugin_id, server_id, item_id) 的唯一索引不能放在这里 —— _SCHEMA 每次连接
@@ -260,7 +266,7 @@ CREATE TABLE IF NOT EXISTS translate_job_batches (
 CREATE INDEX IF NOT EXISTS idx_tjob_batches ON translate_job_batches (plugin_id, job_id, batch_id);
 """
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 # 「词条 × 条目」明细对上限（v4.6.61 唯一快照用）—— 防超大库下一次拉取过多行；
 # 触顶时快照按已取部分统计（日志 debug 提示），日常规模远小于该值。
@@ -311,6 +317,13 @@ _WRITEBACK_V15_COLUMNS = (
 # （换行分隔，可多条）。旧库默认空 → 恢复退回「整条目」写（4.7.7 行为，兼容）。
 _WRITEBACK_V16_COLUMNS = (
     ("restore_paths", "TEXT DEFAULT ''"),
+)
+
+# v4.7.9（审查 P1-02）：writeback_state 补 gen（写回代数）—— 写回进行中来的新登记
+# 不再被丢弃，而是 gen+1 累积；当前轮收尾时若发现 gen 已变 → 交回 pending 重跑。
+# 旧库默认 0 → 与「本轮认领的 gen=0」一致，收尾行为不变。
+_WRITEBACK_V17_COLUMNS = (
+    ("gen", "INTEGER DEFAULT 0"),
 )
 
 
@@ -810,6 +823,11 @@ def migrate() -> int:
             # 恢复只写「本次真正重新入库的那个 nfo 文件」（整季洗版时攒成一串一起写）。
             # 旧库无损：新列默认空 → 恢复退回整条目写（4.7.7 行为）。
             _ensure_columns("writeback_state", _WRITEBACK_V16_COLUMNS)
+        if cur_v < 17:
+            # v4.7.9（审查 P1-02）：writeback_state 补 gen 列 —— 写回进行中来的新登记
+            # 不再被丢弃，而是 gen+1 累积、当前轮收尾时交回 pending 重跑。
+            # 旧库无损：默认 0，与「本轮认领的 gen=0」一致 → 收尾行为不变。
+            _ensure_columns("writeback_state", _WRITEBACK_V17_COLUMNS)
     except Exception as e:
         logger.error(f"[DB] 迁移 v{cur_v} → v{SCHEMA_VERSION} 失败（版本号未更新，下次启动重试）: {e}")
         return cur_v
@@ -883,6 +901,15 @@ def _media_strong_sql(*, item_id: str = "", media_provider: str = "", media_id: 
     if not conds:
         return "", []
     return " AND (" + " OR ".join(conds) + ")", args
+
+
+def _grace_secs(grace_hours) -> float:
+    """观察期秒数 —— v4.7.9（审查 P2-01）：**尊重显式 0**（0 = 无观察期）。
+    此前 `float(grace_hours or 24)` 会把配置的 0 悄悄换成 24；只有非法值（None/空串）才回退 24。"""
+    try:
+        return max(0.0, float(grace_hours)) * 3600.0
+    except (TypeError, ValueError):
+        return 24.0 * 3600.0
 
 
 def _weak_sql(*, series_name: str = "", title: str = "", season_num=None,
@@ -1373,7 +1400,10 @@ class PeopleDb:
     def item_translation_counts(self, *, plugin_id: str, pairs: list,
                                 db: Optional[Any] = None) -> dict:
         """按 (server_id, item_id) 统计「总行数 / 已翻行数」（v4.6.66 · 入库通知口径拆分用）。
-        已翻 = name_after 非空且与 name_before 不同（与 stats 同口径）；排除观察期行。
+        v4.7.9：**已翻 = 人名或角色任一有译文**（`name_after` / `role_after` 非空且与原文不同）——
+        此前只数人名，于是「人名全是汉字日文名（判『已是中文』不翻）+ 第二排已全翻」的条目
+        会显示「已有译文 0 条」，与同一批里明明写回了 N 条角色译文自相矛盾。
+        排除观察期行。
         :return: {(server, item): {"total": n, "translated": m}}
         """
         out: dict = {}
@@ -1385,8 +1415,10 @@ class PeopleDb:
                 _sid = str(_sid or "")
                 row = _q1(
                     "SELECT COUNT(*) AS total, "
-                    "COALESCE(SUM(CASE WHEN name_after IS NOT NULL AND name_after<>'' "
-                    "AND name_after<>name_before THEN 1 ELSE 0 END),0) AS translated "
+                    "COALESCE(SUM(CASE WHEN "
+                    "(name_after IS NOT NULL AND name_after<>'' AND name_after<>name_before) "
+                    "OR (role_after IS NOT NULL AND role_after<>'' AND role_after<>role_before) "
+                    "THEN 1 ELSE 0 END),0) AS translated "
                     "FROM person WHERE plugin_id=? AND item_id=? "
                     "AND (server_id=? OR (server_id IS NULL OR server_id='')) "
                     "AND (deleted_at='' OR deleted_at IS NULL)",
@@ -1476,6 +1508,25 @@ class PeopleDb:
             r = _q1("SELECT item_id FROM person WHERE plugin_id=? AND nfo_path=? LIMIT 1",
                     (plugin_id, nfo_path or ""))
             return str((r or {}).get("item_id") or (r or {}).get("itemid") or "").strip()
+        except Exception:
+            return ""
+
+    def emby_item_id_by_nfo_path(self, *, plugin_id: str, nfo_path: str,
+                                 server_id: Optional[str] = "", db: Optional[Any] = None) -> str:
+        """该 nfo 文件（= 某一集 / 某一条目）在 Emby 侧的 itemId。
+
+        v4.7.9：库里「集」与「剧」共用 `item_id`，`item_identity` 只返回一行 →
+        同剧多集时永远命中同一集（恢复会把 E02 刷到 E01 上）。恢复 / 角色同步改用
+        **文件级**定位。server_id 语义同 is_deleted_by_nfo_path（传实际服务器）。"""
+        _p = str(nfo_path or "").strip()
+        if not _p:
+            return ""
+        _sc, _scp = _scope_sql_soft(server_id)
+        try:
+            r = _q1(f"SELECT emby_item_id FROM person WHERE plugin_id=? AND {_NP_SQL}=? "
+                    f"AND COALESCE(emby_item_id,'')<>''" + _sc + " LIMIT 1",
+                    (plugin_id, _npath(_p), *_scp))
+            return str((r or {}).get("emby_item_id") or "").strip()
         except Exception:
             return ""
 
@@ -2133,26 +2184,31 @@ class PeopleDb:
     def expired_item_ids(self, *, plugin_id: str, grace_hours: float = 24,
                          db: Optional[Any] = None) -> list:
         """观察期已过的条目 ID（真删除判定）。
-        时间戳比较转数值（CAST REAL）—— 不再依赖字符串字典序。"""
-        cut = float(time.time() - float(grace_hours or 24) * 3600)
+        时间戳比较转数值（CAST REAL）—— 不再依赖字符串字典序。
+        v4.7.9：SQL 失败返回 **None**（不再返回空列表 —— 调用方分不清「没有过期条目」与「查询失败」）。"""
+        cut = float(time.time() - _grace_secs(grace_hours))
         try:
             rows = _q("SELECT DISTINCT item_id FROM person WHERE plugin_id=? "
                       "AND deleted_at!='' AND deleted_at IS NOT NULL AND CAST(deleted_at AS REAL) < ?",
                       (plugin_id, cut))
             return [str(r.get("item_id") or "") for r in rows if r.get("item_id")]
-        except Exception:
-            return []
+        except Exception as e:
+            logger.warning(f"[DB] expired_item_ids 查询失败: {e}")
+            return None
 
     def purge_expired(self, *, plugin_id: str, grace_hours: float = 24,
                       db: Optional[Any] = None) -> int:
-        """删除已过观察期（真删除）的条目记录。v3.9.7 L5: 同样改数值比较。"""
-        cut = float(time.time() - float(grace_hours or 24) * 3600)
+        """删除已过观察期（真删除）的条目记录。v3.9.7 L5: 同样改数值比较。
+        v4.7.9（审查 P2-04）：SQL 失败返回 **-1**（此前返回 0，调用方会把「失败」当成
+        「删了 0 行」并谎报「已清理成功」）；成功返回实际删除行数。"""
+        cut = float(time.time() - _grace_secs(grace_hours))
         try:
             return _x("DELETE FROM person WHERE plugin_id=? "
                       "AND deleted_at!='' AND deleted_at IS NOT NULL AND CAST(deleted_at AS REAL) < ?",
                       (plugin_id, cut))
-        except Exception:
-            return 0
+        except Exception as e:
+            logger.warning(f"[DB] purge_expired 删除失败: {e}")
+            return -1
 
     def purge_all_missing(self, *, plugin_id: str, db: Optional[Any] = None) -> int:
         try:
@@ -4731,9 +4787,11 @@ class WritebackDb:
         重复登记时按并集合并（写回就绪判定按该范围，不读瞬时状态）。
         reason（v4.7.7）：'' = 自动写回；'restore' = 恢复（删除→观察期→恢复）。
           reason='restore' **不受**指纹幂等约束（恢复必须重新写）、且为**粘性**（普通登记不覆盖它，
-          处理成功后才由 clear_restore 清回 ''）—— 常驻 worker 见到 reason='restore' 一律处理。
+          处理成功后由 finish(status='done') 原子清回 ''）—— 常驻 worker 见到 reason='restore' 一律处理。
         restore_path（v4.7.8）：恢复要写的具体 nfo 文件（换行分隔可多条）—— 只写本次真正回来的文件；
-          多次恢复登记按条目**累加合并**（整季洗版每集都写，只删某集则不越界），写成功后由 clear_restore 清空。
+          多次恢复登记按条目**累加合并**（整季洗版每集都写，只删某集则不越界），写成功后由 finish 清空。
+        v4.7.9（审查 P1-02）：**status='writing' 不再拒登记** —— 只累积新一代（gen+1 / 范围并集 /
+          恢复路径累加），不打断当前轮；那一轮 finish 时发现 gen 已变会把行交回 pending 重跑。
         改为单条原子 upsert（INSERT ... ON CONFLICT ... DO UPDATE）——
         依赖 (plugin_id, server_id, item_id) 唯一索引，杜绝并发登记产生的重复 pending 行；
         幂等纪律由 DO UPDATE 的 WHERE 承担（不满足即不更新 → skip），不再「先 SELECT 再决定」。
@@ -4746,10 +4804,17 @@ class WritebackDb:
         _rpath = str(restore_path or "").strip()
         try:
             n = _x("INSERT INTO writeback_state (plugin_id, server_id, item_id, nfo_path, status, "
-                   "error, file_sig, attempts, target_scope, reason, restore_paths, updated_at) "
-                   "VALUES (?,?,?,?,?,?,?,?,?,?,?,?) "
+                   "error, file_sig, attempts, target_scope, reason, restore_paths, gen, updated_at) "
+                   "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) "
                    "ON CONFLICT(plugin_id, server_id, item_id) DO UPDATE SET "
-                   "status='pending', error='', file_sig=excluded.file_sig, attempts=0, "
+                   # v4.7.9（审查 P1-02）：**写回进行中（writing）不再被拒** —— 只累积新一代内容
+                   # （gen+1 / 范围并集 / 恢复路径累加），status/attempts/error 保持不动，
+                   # 不打断当前这一轮；那一轮收尾时发现 gen 已变会把行交回 pending 重跑。
+                   "status=CASE WHEN writeback_state.status='writing' THEN 'writing' ELSE 'pending' END, "
+                   "error=CASE WHEN writeback_state.status='writing' THEN writeback_state.error ELSE '' END, "
+                   "attempts=CASE WHEN writeback_state.status='writing' THEN writeback_state.attempts ELSE 0 END, "
+                   "file_sig=CASE WHEN writeback_state.status='writing' THEN writeback_state.file_sig "
+                   "ELSE excluded.file_sig END, "
                    # 任务范围并集合并（与 _merge_scope 同语义：空取另一、相同取自身、不同取 both）
                    "target_scope=CASE "
                    "WHEN excluded.target_scope='' THEN writeback_state.target_scope "
@@ -4768,17 +4833,63 @@ class WritebackDb:
                    "ELSE writeback_state.restore_paths || char(10) || excluded.restore_paths END, "
                    "nfo_path=CASE WHEN excluded.nfo_path<>'' THEN excluded.nfo_path "
                    "ELSE writeback_state.nfo_path END, "
+                   "gen=writeback_state.gen+1, "
                    "updated_at=excluded.updated_at "
-                   # 幂等纪律：writing 不动；done/failed/missing 且指纹一致不重复登记。
-                   # 例外：reason='restore' 必须重新写（恢复就是要覆盖已 done 的条目）。
-                   "WHERE writeback_state.status<>'writing' "
-                   "AND (excluded.reason='restore' OR NOT (writeback_state.status IN ('done','failed','missing') "
-                   "AND excluded.file_sig<>'' AND writeback_state.file_sig=excluded.file_sig))",
+                   # 幂等纪律：done/failed/missing 且指纹一致不重复登记（有新内容才登记）。
+                   # 例外：writing（在跑 → 累积新一代）；reason='restore'（恢复必须重新写）。
+                   "WHERE writeback_state.status='writing' "
+                   "OR excluded.reason='restore' "
+                   "OR NOT (writeback_state.status IN ('done','failed','missing') "
+                   "AND excluded.file_sig<>'' AND writeback_state.file_sig=excluded.file_sig)",
                    (plugin_id, server_id, item_id, str(nfo_path or ""), "pending", "", _fp, 0, _ts,
-                    _rsn, _rpath, now))
+                    _rsn, _rpath, 0, now))
             return "pending" if n > 0 else "skip"
         except Exception as e:
             logger.warning(f"[Writeback] register 失败: {e}")
+            return "skip"
+
+    def finish(self, *, plugin_id: str, server_id: str, item_id: str, status: str,
+               error: str = "", changed_count: int = 0, file_sig: Optional[str] = None,
+               claimed_gen: Optional[int] = None, db: Optional[Any] = None) -> str:
+        """收尾一轮写回（done / failed / missing）—— 带「代数」判定（v4.7.9 · 审查 P1-02）。
+
+        若本轮**认领之后**又来了新登记（`gen` 变了：新译文 / 新的恢复路径），说明这次结论
+        已过期：**不收尾、也绝不清掉恢复登记**，把行交回 pending 让下一轮重新写。
+        :return: 'done' 正常收尾 / 'requeued' 有更新的一代 → 交回待写回 / 'skip' 无事可做
+        """
+        now = _now()
+        _st = str(status or "")
+        _clear = 1 if _st == "done" else 0
+        try:
+            if claimed_gen is None:
+                n = _x("UPDATE writeback_state SET status=?, error=?, changed_count=?, "
+                       "file_sig=COALESCE(?, writeback_state.file_sig), "
+                       "reason=CASE WHEN ? THEN '' ELSE reason END, "
+                       "restore_paths=CASE WHEN ? THEN '' ELSE restore_paths END, updated_at=? "
+                       "WHERE plugin_id=? AND server_id=? AND item_id=?",
+                       (_st, str(error or ""), int(changed_count or 0), file_sig,
+                        _clear, _clear, now, plugin_id, server_id, item_id))
+            else:
+                n = _x("UPDATE writeback_state SET status=?, error=?, changed_count=?, "
+                       "file_sig=COALESCE(?, writeback_state.file_sig), "
+                       "reason=CASE WHEN ? THEN '' ELSE reason END, "
+                       "restore_paths=CASE WHEN ? THEN '' ELSE restore_paths END, updated_at=? "
+                       "WHERE plugin_id=? AND server_id=? AND item_id=? AND gen=?",
+                       (_st, str(error or ""), int(changed_count or 0), file_sig,
+                        _clear, _clear, now, plugin_id, server_id, item_id, int(claimed_gen)))
+            if n > 0:
+                return "done"
+            if claimed_gen is not None:
+                # gen 已变 → 交回 pending（保留新登记的 reason / restore_paths），并给足重试预算
+                _x("UPDATE writeback_state SET status='pending', error='', attempts=0, updated_at=? "
+                   "WHERE plugin_id=? AND server_id=? AND item_id=? AND status='writing'",
+                   (now, plugin_id, server_id, item_id))
+                logger.info(f"[Writeback] 本轮结论已过期（写回期间又有新登记）→ 交回待写回重跑: "
+                            f"{server_id}:{item_id}")
+                return "requeued"
+            return "skip"
+        except Exception as e:
+            logger.warning(f"[Writeback] finish 失败: {e}")
             return "skip"
 
     def has_pending_restore(self, *, plugin_id: str, db: Optional[Any] = None) -> bool:
@@ -4790,17 +4901,6 @@ class WritebackDb:
                             (plugin_id,)))
         except Exception:
             return False
-
-    def clear_restore(self, *, plugin_id: str, server_id: str, item_id: str,
-                      db: Optional[Any] = None) -> int:
-        """清除条目的恢复登记（reason + 待恢复路径）—— 恢复写回成功后调用。
-        否则该条目后续的普通写回会被误当成恢复（强写 Emby + 刷新）。"""
-        try:
-            return _x("UPDATE writeback_state SET reason='', restore_paths='' "
-                      "WHERE plugin_id=? AND server_id=? AND item_id=?",
-                      (plugin_id, server_id, item_id))
-        except Exception:
-            return 0
 
     def clear_all(self, *, plugin_id: str, db: Optional[Any] = None) -> int:
         """清空写回队列（供库页「清空翻译记录」调用）—— 记录已删，残留候选只会空转。"""

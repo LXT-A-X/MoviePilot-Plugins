@@ -561,18 +561,22 @@ class EmbyClient:
         except Exception as e:
             logger.warning(f"[EmbyClient] 重命名 Person 失败（完整回写）{pid}: {e}")
             return False
-        # 回写后复读校验：只比「必须保持不变」的字段
+        # 回写后复读校验：只比「必须保持不变」的字段。
+        # v4.7.9：空值归一 —— Emby 会把空字段直接省略，于是「改名前 '' / [] / {}」复读后
+        # 变成「字段不存在（None）」，此前被判成「变了」→ 改名误报失败
+        # （实测：Overview before='' after=None）。None / '' / [] / {} 一律视为「空」。
+        _empty = (None, "", [], {})
         try:
             _after_d = self.get_person_detail(pid)
             if isinstance(_after_d, dict) and _after_d:
                 for k, v in before.items():
-                    if v is None and k not in (_after_d or {}):
+                    _a = _after_d.get(k)
+                    if _a == v or (_a in _empty and v in _empty):
                         continue
-                    if _after_d.get(k) != v:
-                        logger.error(f"[EmbyClient] 重命名 Person 后元数据校验失败（{k} 变化）"
-                                     f" pid={pid}：before={v!r} after={(_after_d or {}).get(k)!r}"
-                                     f" —— 本次改名按失败处理（可能整份回写丢字段）")
-                        return False
+                    logger.error(f"[EmbyClient] 重命名 Person 后元数据校验失败（{k} 变化）"
+                                 f" pid={pid}：before={v!r} after={_a!r}"
+                                 f" —— 本次改名按失败处理（可能整份回写丢字段）")
+                    return False
         except Exception as e:
             logger.debug(f"[EmbyClient] 重命名后复读校验跳过（非致命）{pid}: {e}")
         return True

@@ -281,8 +281,14 @@ _body = _grab("_ingest_nfo_pending")
 check("is_deleted_by_media" in _body, "恢复判定用强身份 is_deleted_by_media")
 check("deleted_weak_candidates" in _body and "_wc == 1" in _body,
       "弱匹配要求候选唯一（_wc == 1）才自动恢复")
-check("sample_deleted_identities" in _body and "alias_put" in _body,
+# v4.7.9（审查 P1-01）：身份清扫 + 别名登记已搬进 `_clear_recovered_observation()`，
+# 且只在「入库写入成功之后」被调用 —— 这里同时校验「搬家后仍在」与「调用时机」。
+_clear = _grab("_clear_recovered_observation")
+check("sample_deleted_identities" in _clear and "alias_put" in _clear,
       "恢复时登记洗版历史别名")
+check('res["recovered"] = 1 if recovered else 0' in _body
+      and "self._clear_recovered_observation(" in _body[_body.index('res["recovered"] = 1 if recovered else 0'):],
+      "解除观察期/别名登记在入库写入成功之后调用（P1-01）")
 
 # ─────────────────────────────────────────────
 print("\n[T10] schema 迁移：旧库 v11 → v12 无损补列（必须放最后，会切换连接）")

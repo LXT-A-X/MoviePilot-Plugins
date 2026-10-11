@@ -366,7 +366,9 @@ const stageRows = computed(() => {
   const wb = status.value?.writeback_status || {}
   if (wb.running) {
     const t = Number(wb.total || 0), dn = Number(wb.done || 0)
-    out.push({ key: 'writeback', name: 'NFO 写回', color: 'teal', percent: t ? Math.min(100, Math.round(dn / t * 100)) : 0,
+    // v4.7.9：恢复写回单独显示 —— 恢复不受「自动写回」开关限制，别让用户以为自动写回被偷偷开了
+    const _wbName = String(wb.phase || '') === 'restore' ? '恢复写回' : 'NFO 写回'
+    out.push({ key: 'writeback', name: _wbName, color: 'teal', percent: t ? Math.min(100, Math.round(dn / t * 100)) : 0,
                text: `${dn} / ${t || '…'}${wb.current ? ' · ' + wb.current : ''}` })
   }
   return out

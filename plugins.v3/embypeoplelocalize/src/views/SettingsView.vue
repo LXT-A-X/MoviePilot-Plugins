@@ -699,14 +699,14 @@ onMounted(() => {
           <div class="epl-switch-row">
             <div class="flex-grow-1">
               <div class="epl-switch-title">角色译文同步到 Emby 条目</div>
-              <div class="epl-switch-desc">把「第二排角色名」的中文译文写入 Emby 条目级 People[].Role（与第一排同名层级）。只写 nfo 时，Emby 刷新元数据会用它条目级缓存的英文角色名把 nfo 覆盖回去——开启本项后 Emby 自己写 nfo 带的即是中文，不再依赖 Cast 锁能否挡住覆盖。写回后自动执行：每条目 1 次读取，命中才整份回写（只改 Role、不动 Name）；默认关，建议开启</div>
+              <div class="epl-switch-desc">把「第二排角色名」的中文译文写入 Emby 条目级 People[].Role（只改 Role、不动 Name）。不写条目级时，Emby 刷新会用它缓存的英文角色名把 nfo 覆盖回去。<strong>「写入 / 全部写回」弹窗选哪排决定写哪排 nfo；本开关决定第二排要不要写进 Emby</strong>（关 = 只写 nfo）。默认关，建议开启。</div>
             </div>
             <v-switch v-model="config.emby_role_sync" color="primary" hide-details></v-switch>
           </div>
           <div class="epl-switch-row">
             <div class="flex-grow-1">
               <div class="epl-switch-title">恢复：以库为准直接覆盖 Emby</div>
-              <div class="epl-switch-desc"><strong>开启后自动恢复，无需手动点「全部写回」</strong>。触发只认「<strong>恢复</strong>」：Emby 删除事件把插件管理过的条目放进观察期 → 洗版放入同 ID 新版本 → 入库判定为恢复时，插件自动把<strong>库中已有译文</strong>双写回去——nfo 文件 + Emby 服务器元数据（第一排 Person 改名 + 第二排条目级角色，<strong>两排一起写</strong>），并触发 Emby 刷新（让它按中文元数据重写 nfo）。普通首次入库 / 手动扫描入库不受影响。自动覆盖前先比对文件指纹，没变化不重写；<strong>不受「自动写回」开关限制</strong>。默认关，仅在你确认「以插件库为准」时开启</div>
+              <div class="epl-switch-desc"><strong>开启后自动恢复，无需手动点「全部写回」。</strong>只认「恢复」：Emby 删掉的条目在观察期内重新入库时，自动把库里已有译文写回（<strong>只写本次回来的那个 nfo</strong> + Emby 两排 + 刷新）。普通入库不受影响；<strong>不受「自动写回」开关限制</strong>。默认关。</div>
             </div>
             <v-switch v-model="config.restore_overwrite_emby" color="primary" hide-details></v-switch>
           </div>
@@ -850,7 +850,7 @@ onMounted(() => {
         <div class="epl-switch-row">
           <div class="flex-grow-1">
             <div class="epl-switch-title">人名池翻译完成后自动同步 Emby</div>
-            <div class="epl-switch-desc">关闭时（默认），翻译只写池，需到「人名池 → 批量同步」手动同步到 Emby；开启后池内待翻全部翻完即自动同步（区别于批量翻译弹窗里一次性的「翻译完成后自动同步」勾选）</div>
+            <div class="epl-switch-desc">关闭时（默认），翻译只写池，需到「人名池 → 批量同步」手动同步到 Emby；开启后池内待翻全部翻完即自动同步（区别于批量翻译弹窗里一次性的「翻译完成后自动同步」勾选）。<strong>本开关只管「自动触发」</strong>，同步结果（改名成功 / 已是译文 / 失败）在「人名池」页与日志里看。</div>
           </div>
           <v-switch v-model="config.pool_auto_sync" color="primary" hide-details :disabled="!aiOn"></v-switch>
         </div>

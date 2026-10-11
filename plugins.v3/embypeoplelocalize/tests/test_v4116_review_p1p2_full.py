@@ -290,6 +290,8 @@ check("(skey, _ck)" in _pdc and "complete_servers" in _pdc and "query_items_page
 
 _nsRM = {"logger": logger, "time": __import__("time"), "List": List}
 exec(_grab_method(_SRC, "_probe_reverse_mark"), _nsRM)
+_nsRh = {"logger": logger}
+exec(_grab_method(_SRC, "_nfo_grace_hours"), _nsRh)
 
 
 class _RevDb:
@@ -303,6 +305,9 @@ class _RevDb:
 
 class _RevSelf:
     _probe_reverse_mark = _nsRM["_probe_reverse_mark"]
+    # v4.7.9（审查 P2-01）：观察期解析改走实例方法 `_nfo_grace_hours()`（尊重显式 0）→
+    # 桩件也要带上真实现，否则被 try/except 吞成「标记 0 条」
+    _nfo_grace_hours = _nsRh["_nfo_grace_hours"]
     PROBE_REVERSE_MAX = 100
 
     def __init__(self, db, servers, complete):

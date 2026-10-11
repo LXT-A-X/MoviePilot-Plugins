@@ -115,6 +115,8 @@ _NS = {"logger": logger, "os": os, "time": time, "re": re, "Any": Any, "Optional
        "ITEM_UNAVAILABLE": clim.ITEM_UNAVAILABLE}
 for _n in ("_resolve_unique_server_id", "_reconcile_missing_episodes",
            "_handle_webhook_delete", "_cleanup_dirty_webhook_events",
+           # v4.7.9（审查 P2-01）：观察期解析改走 `_nfo_grace_hours()`（尊重显式 0）
+           "_nfo_grace_hours",
            "_configured_server_keys"):
     exec(_grab_method(_SRC, _n), _NS)
 
@@ -366,6 +368,9 @@ class _DelPlugin:
     _configured_server_keys = _NS["_configured_server_keys"]
     _reconcile_missing_episodes = _NS["_reconcile_missing_episodes"]
     _handle_webhook_delete = _NS["_handle_webhook_delete"]
+    # v4.7.9（审查 P2-01）：观察期解析改走实例方法 → 桩件必须带上真实现
+    _nfo_grace_hours = _NS["_nfo_grace_hours"]
+    _nfo_dead_grace_hours = 24
 
     def __init__(self, db, svcs, client):
         self._people_db = db

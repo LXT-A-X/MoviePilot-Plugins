@@ -18,6 +18,9 @@
   T8 v4.7.6：状态 / 文案用「自动写回」用户设置本身（`_wb_auto_setting`），不再被恢复开关顶成 true
   T9 v4.7.7：恢复改走队列标记 reason='restore'（真 SQLite：粘性 / 不受指纹幂等约束 / 清回）
   T10 v4.7.8：文件级恢复（只写本次回来的文件）+ 接收通知区分 📥 新入库 / 🔁 恢复入库
+  T11 v4.7.9：恢复写回标 phase='restore'、不复用「自动写回」文案；worker 空闲必复位 running（卡片不再挂着）
+  T12 v4.7.9：恢复的 Emby 侧按「文件」定位（不再打到同剧别的集）；改名复读校验空值归一
+  T13 v4.7.9：入库通知「已有译文」口径补上第二排（只翻第二排也算已译）
 """
 import sys
 import os
@@ -129,10 +132,10 @@ check('scope: str = "both", restore: bool = False,' in _SRC
 _rb = _grab_method(_SRC, "_restore_item_to_nfo")
 check("_ov = bool(restore)" in _rb, "恢复标记取自 restore 参数（不再直接读全局开关）")
 check('if _sc not in ("role", "both") and not _ov:' in _rb, "恢复模式不因「仅第一排」跳过第二排")
-check("force=_ov) or {}" in _rb, "第二排同步带 force=恢复标记")
+check("force=True, nfo_path=_p)" in _rb, "第二排同步带 force=恢复标记（并按文件定位）")
 check("_emby_sync_manual_rename(_nb, _na, server_id=server_id)" in _rb,
       "双写第一排：恢复时同步 Emby Person 改名")
-check("_emby_refresh_item(item_id, server_id, ctx=\"恢复\")" in _rb, "恢复时触发 Emby 刷新")
+check('ctx="恢复", nfo_path=_p)' in _rb, "恢复时按文件触发 Emby 刷新")
 check('"emby_refresh": _rf' in _rb, "结果 data 带 emby_refresh")
 
 # ─────────────────────────────────────────────
@@ -266,20 +269,25 @@ check("def _wb_register_item(self, item_id: str, server_id: str = \"\", target_s
       "                          reason: str = \"\", nfo_path: str = \"\") -> str:" in _SRC,
       "_wb_register_item 新增 reason / nfo_path 参数（v4.7.8）")
 _wpr = _grab_method(_SRC, "_writeback_pending_round")
-check('if not self._wb_writeback_enabled() and str(rec.get("reason") or "") != "restore":' in _wpr,
+check('_is_r = str(rec.get("reason") or "") == "restore"' in _wpr
+      and "if not self._wb_writeback_enabled() and not _is_r:" in _wpr,
       "本轮：自动写回关时普通候选跳过、恢复候选照常处理")
 check("has_pending_restore(plugin_id=_pid)" in _SRC, "worker 用 has_pending_restore 决定是否进入本轮")
-check("wdb.clear_restore(plugin_id=pi_d, server_id=server_id, item_id=item_id)" in _SRC,
-      "恢复写回成功后清回恢复登记（防后续普通写回被误当恢复）")
+# v4.7.9（审查 P1-02）：收尾改走 `finish` + 认领代数 —— 写回期间来的新登记不再被丢/被清
+check("wdb.finish(plugin_id=pi_d, server_id=server_id, item_id=item_id" in _SRC
+      and "claimed_gen=_claimed_gen" in _SRC,
+      "写回收尾走 finish + 认领代数（P1-02）")
+check("clear_restore" not in _SRC, "不再依赖 clear_restore（清回由 finish 原子完成）")
 
 # 真 SQLite 行为：reason 粘性 + restore 不受指纹幂等约束 + has_pending_restore + clear_reason
 import importlib.util as _ilu
 _spec = _ilu.spec_from_file_location("epl_db_v477", str(PLUGIN_DIR / "db.py"))
 _db = _ilu.module_from_spec(_spec)
 _spec.loader.exec_module(_db)
-check(_db.SCHEMA_VERSION >= 16, f"SCHEMA_VERSION 升到 16+（实际 {_db.SCHEMA_VERSION}）")
+check(_db.SCHEMA_VERSION >= 17, f"SCHEMA_VERSION 升到 17+（实际 {_db.SCHEMA_VERSION}）")
 check(any(c[0] == "reason" for c in _db._WRITEBACK_V15_COLUMNS), "迁移补列含 reason")
 check(any(c[0] == "restore_paths" for c in _db._WRITEBACK_V16_COLUMNS), "迁移补列含 restore_paths")
+check(any(c[0] == "gen" for c in _db._WRITEBACK_V17_COLUMNS), "迁移补列含 gen（写回代数）")
 _db.PeopleDb.ensure_table()   # 建表 + 跑版本化迁移（writeback_state 唯一索引由 migrate 创建）
 _wdb = _db.WritebackDb()
 _wdb.ensure_table()
@@ -310,12 +318,42 @@ _wdb.register(plugin_id=_PID, server_id="s1", item_id="i1", file_sig="sigX", tar
 _rec = _wdb.get(plugin_id=_PID, server_id="s1", item_id="i1") or {}
 check(str(_rec.get("reason") or "") == "restore", "普通登记不覆盖已存在的 restore（粘性）")
 check(str(_rec.get("restore_paths") or "") != "", "普通登记不清空 restore_paths")
-# 处理成功后清回
-_wdb.clear_restore(plugin_id=_PID, server_id="s1", item_id="i1")
+# v4.7.9（审查 P1-02）收尾带「代数」：
+#  – 认领后又有新登记（gen 变了）→ **不收尾、不清恢复登记**，交回 pending 重跑
+#  – 没有新登记 → 正常收尾并清回 reason + restore_paths
+_rec = _wdb.get(plugin_id=_PID, server_id="s1", item_id="i1") or {}
+_gen_now = int(_rec.get("gen") or 0)
+check(_gen_now >= 1, f"每次登记都 +1 代数（gen={_gen_now}）")
+_wdb.set_status(plugin_id=_PID, server_id="s1", item_id="i1", status="writing")
+check(_wdb.finish(plugin_id=_PID, server_id="s1", item_id="i1", status="done",
+                  file_sig="sigZ", claimed_gen=_gen_now - 1) == "requeued",
+      "认领代数已被顶替 → 收尾被拒（requeued）")
+_rec = _wdb.get(plugin_id=_PID, server_id="s1", item_id="i1") or {}
+check(str(_rec.get("status") or "") == "pending"
+      and str(_rec.get("reason") or "") == "restore"
+      and str(_rec.get("restore_paths") or "") != "",
+      "被顶替时：不收尾、**不清恢复登记**，交回 pending（新内容下一轮重新写）")
+check(_wdb.has_pending_restore(plugin_id=_PID) is True, "仍在待恢复（下一轮会重新写）")
+check(_wdb.finish(plugin_id=_PID, server_id="s1", item_id="i1", status="done",
+                  file_sig="sigZ", claimed_gen=_gen_now) == "done",
+      "代数一致 → 正常收尾")
 _rec = _wdb.get(plugin_id=_PID, server_id="s1", item_id="i1") or {}
 check(str(_rec.get("reason") or "") == "" and str(_rec.get("restore_paths") or "") == "",
-      "clear_restore 清回 reason + restore_paths（普通写回不再被误当恢复）")
-check(_wdb.has_pending_restore(plugin_id=_PID) is False, "清理后 has_pending_restore → False")
+      "正常收尾后清回 reason + restore_paths（普通写回不再被误当恢复）")
+check(_wdb.has_pending_restore(plugin_id=_PID) is False, "收尾后 has_pending_restore → False")
+# 写回进行中（writing）来的新登记：不再被丢弃、也不打断当前轮（status/attempts 不动）
+_wdb.clear_all(plugin_id=_PID)
+_wdb.register(plugin_id=_PID, server_id="s1", item_id="i2", file_sig="a", target_scope="both")
+_wdb.set_status(plugin_id=_PID, server_id="s1", item_id="i2", status="writing", bump_attempt=True)
+_r_w = _wdb.register(plugin_id=_PID, server_id="s1", item_id="i2", file_sig="b",
+                     target_scope="both", reason="restore", restore_path="/v/S02E01.nfo")
+check(_r_w == "pending", "写回进行中来登记 → 不再 skip（累积为新一代，P1-02）")
+_rec2 = _wdb.get(plugin_id=_PID, server_id="s1", item_id="i2") or {}
+check(str(_rec2.get("status") or "") == "writing", "不打断当前这一轮（status 仍为 writing）")
+check(str(_rec2.get("reason") or "") == "restore"
+      and str(_rec2.get("restore_paths") or "") == "/v/S02E01.nfo",
+      "新恢复登记与路径已并进队列（此前会被静默丢弃）")
+check(int(_rec2.get("gen") or 0) == 1, f"gen 递增（新一代，实际 {_rec2.get('gen')}）")
 _wdb.clear_all(plugin_id=_PID)
 
 # ─────────────────────────────────────────────
@@ -399,6 +437,129 @@ check('_head = "🔁 恢复入库"' in _flush, "命中的批次报「🔁 恢复
 check("📥 收到 {total} 条入库事件" in _flush, "未命中仍报「📥 收到 N 条入库事件」")
 check("_all_recov" in _flush, "按批次是否全为恢复分流（📥 vs 🔁）")
 check("本次仅入库" in _flush, "恢复开关关时如实说明「仅入库」")
+
+# ─────────────────────────────────────────────
+print("\n[T11] v4.7.9：恢复写回不再冒充「自动写回」+ 卡片不再永久挂着")
+# ─────────────────────────────────────────────
+_wwork = _grab_method(_SRC, "_writeback_worker")
+check("def _wb_status_idle(self) -> None:" in _SRC, "新增 _wb_status_idle（空闲复位 running）")
+check(_wwork.count("self._wb_status_idle()") >= 4,
+      f"每个「不干活」的分支都复位 running（实际 {_wwork.count('self._wb_status_idle()')} 处）")
+check('"phase": ("restore" if _rs else "writeback")' in _SRC, "恢复写回用 phase='restore'")
+check('_label = "恢复写回" if _rs else "自动写回"' in _SRC, "日志按恢复/自动分流文案")
+_wpr2 = _grab_method(_SRC, "_writeback_pending_round")
+check('"restore": 0' in _wpr2 and 'stats["restore"] = int(stats.get("restore") or 0) + 1' in _wpr2,
+      "本轮统计「恢复」实际干活的条数")
+
+_nsI = {}
+exec(_grab_method(_SRC, "_wb_status_idle"), _nsI)
+
+
+class _SX:
+    def __init__(s, st):
+        s._writeback_status = st
+
+
+_x = _SX({"running": True, "phase": "restore"})
+_nsI["_wb_status_idle"](_x)
+check(_x._writeback_status["running"] is False, "空闲复位 running（phase=restore，就是那个卡住的场景）")
+_y = _SX({"running": True, "phase": "writeback_all"})
+_nsI["_wb_status_idle"](_y)
+check(_y._writeback_status["running"] is True, "不动手动「全部写回」的卡片（phase=writeback_all）")
+_z = _SX({"running": True, "phase": "writeback"})
+_nsI["_wb_status_idle"](_z)
+check(_z._writeback_status["running"] is False, "空闲复位 running（phase=writeback）")
+
+_DV = (PLUGIN_DIR / "src" / "views" / "DashboardView.vue").read_text(encoding="utf-8")
+check("'恢复写回'" in _DV and "wb.phase" in _DV, "仪表盘按 phase 显示「恢复写回」")
+
+# ─────────────────────────────────────────────
+print("\n[T12] v4.7.9：恢复的 Emby 侧按「文件」定位（不再打到同剧别的集）+ 改名复读空值归一")
+# ─────────────────────────────────────────────
+check("def emby_item_id_by_nfo_path(self, *, plugin_id: str, nfo_path: str," in
+      (PLUGIN_DIR / "db.py").read_text(encoding="utf-8"),
+      "db 新增 emby_item_id_by_nfo_path（按文件取 Emby itemId）")
+check("def _emby_role_item_id(self, cli, *, server_id: str, item_id: str, nfo_path: str = \"\") -> str:" in _SRC,
+      "_emby_role_item_id 新增 nfo_path")
+check('_key = (str(server_id or ""), str(item_id or ""), _np)' in _SRC, "缓存键带上文件（集）")
+check("def _emby_refresh_item(self, item_id: str, server_id: str = \"\", ctx: str = \"\"," in _SRC
+      and "nfo_path: str = \"\") -> dict:" in _SRC, "_emby_refresh_item 新增 nfo_path")
+check('_tpaths = [str(_p) for _p in (path_groups or {}).keys()]' in _SRC, "恢复按本次写回的文件逐个定位")
+check("force=True, nfo_path=_p)" in _SRC, "角色同步按文件定位")
+check("ctx=\"恢复\", nfo_path=_p)" in _SRC, "刷新按文件定位")
+
+_nsRI = {"logger": logger}
+exec(_grab_method(_SRC, "_emby_role_item_id"), _nsRI)
+
+
+class _Pdb2:
+    def emby_item_id_by_nfo_path(self, **k):
+        return "32087" if str(k.get("nfo_path") or "").endswith("E02.nfo") else ""
+
+    def item_identity(self, **k):
+        return {"emby_item_id": "32085", "media_provider": "", "media_id": "", "item_type": ""}
+
+
+class _Rid:
+    _emby_role_item_id = _nsRI["_emby_role_item_id"]
+    _people_db = _Pdb2()
+
+    def __init__(self):
+        self.__dict__["_emby_role_id_cache"] = {}
+
+
+_o = _Rid()
+check(_o._emby_role_item_id(None, server_id="s1", item_id="296101", nfo_path="/v/S01E02.nfo") == "32087",
+      "按文件定位到本集（E02=32087），不再永远是同剧第一集（E01=32085）")
+check(_o._emby_role_item_id(None, server_id="s1", item_id="296101") == "32085",
+      "不给 nfo_path → 退回 item_identity（旧行为不变）")
+
+# ② 改名复读校验：空字段被 Emby 省略不再误判
+_nsRN = {"logger": logger, "Optional": __import__("typing").Optional}
+exec(_grab_method(_EMBY, "rename_person"), _nsRN)
+
+
+class _RenCli:
+    _PERSON_KEEP_FIELDS = ("Overview", "LockedFields", "ProviderIds", "ImageTags")
+
+    def __init__(self, before, after):
+        self._b, self._a, self._n = before, after, 0
+
+    def get_person_detail(self, pid):
+        self._n += 1
+        return self._b if self._n == 1 else self._a
+
+    def _post(self, path, data=None):
+        return True
+
+
+_c1 = _RenCli({"Name": "a", "Overview": "", "LockedFields": [], "ProviderIds": {}, "ImageTags": {}},
+              {"Name": "b"})   # 空字段被 Emby 全部省略 → None
+check(_nsRN["rename_person"](_c1, "p1", "b") is True,
+      "改名前 '' / [] / {} → 复读后字段不存在（None）不再误判失败")
+_c2 = _RenCli({"Name": "a", "Overview": "旧简介"}, {"Name": "b", "Overview": ""})
+check(_nsRN["rename_person"](_c2, "p1", "b") is False, "真有内容被改（旧简介→空）仍判失败")
+_c3 = _RenCli({"Name": "a", "ImageTags": {"Primary": "x"}}, {"Name": "b", "ImageTags": {}})
+check(_nsRN["rename_person"](_c3, "p1", "b") is False, "非空→空的丢字段仍判失败")
+
+# ─────────────────────────────────────────────
+print("\n[T13] v4.7.9：入库通知「已有译文」口径补上第二排（role_after）")
+# ─────────────────────────────────────────────
+_dbd = (PLUGIN_DIR / "db.py").read_text(encoding="utf-8")
+check("(role_after IS NOT NULL AND role_after<>'' AND role_after<>role_before) " in _dbd,
+      "item_translation_counts 把角色译文也算「已翻」")
+_pdb13 = _db.PeopleDb()
+_PID13, _SRV13 = "EmbyPeopleLocalizeProbe13", "srv13"
+_pdb13.delete_item(plugin_id=_PID13, item_id="I1", server_id=None)
+_pdb13.upsert_people(plugin_id=_PID13, server_id=_SRV13, item_id="I1", item_type="Episode",
+                     title="E1", season_num=1, episode_num=1,
+                     people=[{"before_name": "越谷夏海", "Name": "越谷夏海",   # 人名未译（汉字日文名）
+                              "before_role": "役名", "Role": "角色名"}],      # 第二排已译
+                     nfo_path="/v/I1.nfo", emby_item_id="1")
+_c13 = _pdb13.item_translation_counts(plugin_id=_PID13, pairs=[(_SRV13, "I1")]).get((_SRV13, "I1")) or {}
+check(int(_c13.get("translated") or 0) == 1,
+      f"只翻第二排也算「已有译文」（total={_c13.get('total')} translated={_c13.get('translated')}）")
+_pdb13.delete_item(plugin_id=_PID13, item_id="I1", server_id=None)
 
 print("\n" + "=" * 72)
 if _N[1] == 0:

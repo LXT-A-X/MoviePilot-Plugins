@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  python:
+    name: Python 编译 + 单元测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: 安装依赖（已验证区间 constraints）
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -c constraints.txt -r requirements.txt
+      - name: 编译检查
+        run: python -m compileall -q __init__.py constants.py db.py nfo.py emby_client.py llm_client.py
+      - name: 单元测试（逐个直接运行，失败即非零退出）
+        run: |
+          set -e
+          for f in tests/test_*.py; do
+            echo "== $f =="
+            python "$f"
+          done
+
+  frontend:
+    name: 前端构建
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run build

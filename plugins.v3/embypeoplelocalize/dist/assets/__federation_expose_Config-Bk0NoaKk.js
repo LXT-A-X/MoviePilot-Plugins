@@ -1,4 +1,4 @@
-import Page from './__federation_expose_Page-BFgrthrC.js';
+import Page from './__federation_expose_Page-CFKNRkox.js';
 
 const _sfc_main = Page;
 

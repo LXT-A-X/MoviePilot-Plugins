@@ -242,6 +242,8 @@ print("\n[T4] 行为级：_annotate_db_items 洗版清理限频 120s")
 # ─────────────────────────────────────────────
 _an = _ns_for()
 exec(compile(_grab_method(_SRC, "_annotate_db_items"), "<t4>", "exec"), _an)
+# v4.7.9（审查 P2-01）：观察期解析改走 `_nfo_grace_hours()`（尊重显式 0）
+exec(compile(_grab_method(_SRC, "_nfo_grace_hours"), "<t4h>", "exec"), _an)
 _annotate = _an["_annotate_db_items"]
 
 
@@ -263,6 +265,7 @@ class _CountDb:
 class _AnSelf:
     _enabled = True
     _nfo_dead_grace_hours = 24
+    _nfo_grace_hours = _an["_nfo_grace_hours"]
 
     def _all_nfo_roots(self):
         return []

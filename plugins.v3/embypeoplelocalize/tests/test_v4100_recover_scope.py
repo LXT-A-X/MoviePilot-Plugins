@@ -105,10 +105,19 @@ check(_body.index("if _sweep_ok:") < _body.index("_db.is_deleted_by_media("),
 check(_body.index("elif _sweep_ok:") < _body.index("deleted_weak_candidates("),
       "弱匹配 deleted_weak_candidates 被 elif _sweep_ok 守卫")
 _tail = _body[_body.index("if recovered:"):]
-check("if _sweep_ok:" in _tail and _tail.index("if _sweep_ok:") < _tail.index("clear_deleted_by_media("),
-      "清除 clear_deleted_by_media 被 if _sweep_ok 守卫")
-check("_db.clear_deleted(plugin_id=_pid, nfo_path=nfo_path" in _tail,
-      "行级 clear_deleted 不受 _sweep_ok 限制（剧级 NFO 仍可解除剧级行）")
+# v4.7.9（审查 P1-01）：解除观察期的动作已从「判定 recovered 后立刻做」搬到
+# `_clear_recovered_observation()`，且在**入库写入成功之后**才调用 → 断言改指向新家。
+_help = _grab_method(_SRC, "_clear_recovered_observation")
+check("if sweep_ok:" in _help and _help.index("if sweep_ok:") < _help.index("clear_deleted_by_media("),
+      "清除 clear_deleted_by_media 被 if sweep_ok 守卫")
+check("_db.clear_deleted(plugin_id=plugin_id, nfo_path=nfo_path" in _help,
+      "行级 clear_deleted 不受 sweep_ok 限制（剧级 NFO 仍可解除剧级行）")
+check('res["recovered"] = 1 if recovered else 0' in _body
+      and "self._clear_recovered_observation(" in _body[_body.index('res["recovered"] = 1 if recovered else 0'):],
+      "解除观察期必须在「入库写入成功（res[ok]/recovered 赋值）」之后（P1-01）")
+_np = _body[_body.index("if not name_orig and not role_orig:"):]
+check("self._clear_recovered_observation(" in _np[:400],
+      "无演职人员分支也解除观察期（P2-03）")
 
 # ─────────────────────────────────────────────
 print("\n[T2] 行为级：剧级身份谓词「越界」能力 + 门禁后剧级判定为 False")

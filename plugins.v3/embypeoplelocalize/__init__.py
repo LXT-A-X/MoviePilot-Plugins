@@ -154,7 +154,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
     plugin_name = "Emby 演职人员中文化"
     plugin_desc = "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回；拉取人名时可用 TMDB 刮削补中文名/简介/头像"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/embypeoplelocalize.png"
-    plugin_version = "4.7.8"
+    plugin_version = "4.7.9"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "embypeoplelocalize_"
@@ -533,6 +533,9 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                     "item_id": str(_v.get("item_id") or ""),
                     "delay": int(_v.get("delay") or 0),
                     "brief": _v.get("brief") if isinstance(_v.get("brief"), dict) else {},
+                    # v4.7.9（审查 P1-04）：added_count 必须一起落盘 —— Worker 用它判定
+                    # 「整剧都是新加的 / 只收新增集」，不持久化则重启后处理范围会变。
+                    "added_count": int(_v.get("added_count") or 0),
                 }
             return out
         except Exception:
@@ -673,6 +676,9 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                         "item_id": str(_v.get("item_id") or ""),
                         "delay": int(_v.get("delay") or getattr(self, "_webhook_delay", 60) or 60),
                         "brief": _v.get("brief") if isinstance(_v.get("brief"), dict) else {},
+                        # v4.7.9（审查 P1-04）：added_count 一并还原 —— 否则重启后
+                        # 「整剧都是新加的」判定退化，同一事件会用不同范围处理。
+                        "added_count": int(_v.get("added_count") or 0),
                     }
                 if _restored:
                     with self._webhook_lock:
@@ -5109,7 +5115,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         target_scope 随登记落库（person/role/both）—— 就绪判定按候选记录的任务范围，
         不再依赖瞬时 _tx_target_scope（防「只翻第二排」任务结束后第一排 pending 重新阻塞写回）。
         reason（v4.7.7）：'' = 自动写回；'restore' = 恢复登记（不受「自动写回」开关约束）。
-        nfo_path（v4.7.8 · 仅恢复用）：本次真正重新入库的 nfo 文件 —— 恢复只写它（多集累加合并）。"""
+        nfo_path（v4.7.9 · 仅恢复用）：本次真正重新入库的 nfo 文件 —— 恢复只写它（多集累加合并）。"""
         _item = str(item_id or "").strip()
         if not _item:
             return "skip"
@@ -5118,8 +5124,11 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             _fp = ""
             rec = wdb.get(plugin_id=self.__class__.__name__,
                           server_id=str(server_id or ""), item_id=_item)
-            if rec is not None and str(rec.get("status") or "") == "writing":
-                return "skip"
+            # v4.7.9（审查 P1-02）：**写回进行中不再直接丢弃登记** —— 此前这里
+            # `status=='writing' → return "skip"`，导致「删除→观察期→重新入库」的恢复登记
+            # 若撞上正在跑的写回就被静默丢掉（该恢复永远不写、也没有任何日志）。
+            # 现在交给 db.register 处理：writing 时只把新一代内容（reason / 恢复路径 / 范围）
+            # 并进队列并 gen+1，那一轮收尾时发现 gen 已变会交回 pending 重跑。
             if rec is not None and str(rec.get("status") or "") in ("done", "failed", "missing"):
                 _fp = self._wb_item_fp(_item, server_id)
             _r = wdb.register(plugin_id=self.__class__.__name__, server_id=str(server_id or ""),
@@ -5234,7 +5243,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         # v4.7.7（解耦）：恢复（reason='restore'）按行判定并**忽略**该阻塞 —— 库里有多少写多少，
         # Emby 重刮带进来的新词条没翻完也不卡住已有译文的恢复；普通候选仍受「自动写回」门控。
         _is_restore = str(rec.get("reason") or "") == "restore"
-        # v4.7.8（文件级恢复）：只写本次真正重新入库的 nfo 文件（无记录则退回整条目，兼容旧行）
+        # v4.7.9（文件级恢复）：只写本次真正重新入库的 nfo 文件（无记录则退回整条目，兼容旧行）
         _only_paths = None
         if _is_restore:
             _rp = [p.strip() for p in str(rec.get("restore_paths") or "").splitlines() if p.strip()]
@@ -5245,6 +5254,9 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         if not chk.get("ready") and not _is_restore:
             return {"not_ready": 1, "current": title}
         # 先标 writing（防并发；失败/中断后由 reset/退避恢复），失败计数 +1
+        # v4.7.9（审查 P1-02）：记下本轮认领的「代数」—— 收尾若发现 gen 已变（写回期间又来了
+        # 新登记：新译文 / 新的恢复路径），则**不收尾、不清恢复登记**，交回 pending 重跑。
+        _claimed_gen = int(rec.get("gen") or 0)
         wdb.set_status(plugin_id=pi_d, server_id=server_id, item_id=item_id,
                        nfo_path=str(rec.get("nfo_path") or ""), status="writing",
                        error="", bump_attempt=True)
@@ -5259,25 +5271,24 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             # 顺序纪律：文件写成功 → 才标 done（写回失败不能标记成功，文档 §46）
             # 自动路径下「内容已是译文（apply 改动 0）」不落盘（noop），同样算成功
             _fp = self._wb_item_fp(item_id, server_id)
-            wdb.set_status(plugin_id=pi_d, server_id=server_id, item_id=item_id,
-                           status="done", error="", changed_count=int(d.get("changed") or 0),
-                           file_sig=_fp)
-            if _is_restore:
-                # v4.7.7：恢复写回成功 → 清回恢复登记，避免该条目后续普通写回被误当成恢复
-                try:
-                    wdb.clear_restore(plugin_id=pi_d, server_id=server_id, item_id=item_id)
-                except Exception:
-                    pass
-            return {"written": 1, "changed": int(d.get("changed") or 0),
+            _fin = wdb.finish(plugin_id=pi_d, server_id=server_id, item_id=item_id,
+                              status="done", error="", changed_count=int(d.get("changed") or 0),
+                              file_sig=_fp, claimed_gen=_claimed_gen)
+            _out = {"written": 1, "changed": int(d.get("changed") or 0),
                     "noop": 1 if d.get("noop") else 0, "current": title}
+            if _fin == "requeued":
+                _out["requeued"] = 1
+                self._wb_wake()
+            return _out
         if d.get("missing") or d.get("skip"):
             # 文件全不存在（删除/观察期）或早期 API 在线记录（无本地 nfo）—— 不是普通失败，不再空转重试
-            wdb.set_status(plugin_id=pi_d, server_id=server_id, item_id=item_id,
-                           status="missing", error=_recent, file_sig=self._wb_item_fp(item_id, server_id))
+            wdb.finish(plugin_id=pi_d, server_id=server_id, item_id=item_id,
+                       status="missing", error=_recent,
+                       file_sig=self._wb_item_fp(item_id, server_id), claimed_gen=_claimed_gen)
             return {"missing": 1, "current": title}
         # 真失败（文件占用/只读/解析失败）→ failed，绝不标成功；靠退避重试或新译文重新登记
-        wdb.set_status(plugin_id=pi_d, server_id=server_id, item_id=item_id,
-                       status="failed", error=_recent)
+        wdb.finish(plugin_id=pi_d, server_id=server_id, item_id=item_id,
+                   status="failed", error=_recent, claimed_gen=_claimed_gen)
         return {"failed": 1, "current": title, "error": _recent}
 
     def _wb_failed_retryable(self, rec: dict) -> bool:
@@ -5334,12 +5345,13 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             return {"did": False}
         stats = {"did": False, "written": 0, "changed": 0, "noop": 0,
                  "failed": 0, "missing": 0, "not_ready": 0, "skip_writing": 0,
-                 "current": "", "error": ""}
+                 "restore": 0, "current": "", "error": ""}
         for rec in rows:
             if self._wb_stop_requested():
                 break
             # v4.7.7（解耦）：自动写回关 → 只处理「恢复」登记（reason='restore'），普通候选跳过。
-            if not self._wb_writeback_enabled() and str(rec.get("reason") or "") != "restore":
+            _is_r = str(rec.get("reason") or "") == "restore"
+            if not self._wb_writeback_enabled() and not _is_r:
                 continue
             # 让位：手动「全部写回」在跑 / 扫描在跑（扫描当前仍内联写 nfo，避免同文件两个写者）
             if self._task_running("writeback") or self._task_running("scan"):
@@ -5352,6 +5364,10 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             for _k in ("written", "changed", "noop", "failed", "missing",
                        "not_ready", "skip_writing"):
                 stats[_k] = int(stats.get(_k) or 0) + int(_r.get(_k) or 0)
+            # v4.7.9：本轮里「恢复」实际干活的条数 —— 供 worker 区分「恢复写回 / 自动写回」口径
+            if _is_r and (_r.get("written") or _r.get("failed") or _r.get("missing")
+                          or _r.get("skip_writing")):
+                stats["restore"] = int(stats.get("restore") or 0) + 1
             if _r.get("current"):
                 stats["current"] = str(_r.get("current"))
             if _r.get("error"):
@@ -5359,6 +5375,21 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             if _r.get("written") or _r.get("failed") or _r.get("missing") or _r.get("skip_writing"):
                 stats["did"] = True
         return stats
+
+    def _wb_status_idle(self) -> None:
+        """常驻写回 worker 空闲 → 复位自己的 running（只动自己的 phase）。
+
+        v4.7.9：修「恢复写完后仪表盘卡片永久挂着」—— 恢复那一轮会置 `running=True`，
+        此后 worker 若在门控/让位分支直接 `continue`，就走不到复位那行，卡片会一直显示
+        （`phase='restore'/'writeback'` 才清；手动「全部写回」的 `phase='writeback_all'`
+        由 `_writeback_all_worker` 自己管，不能误清）。
+        """
+        try:
+            _st = self._writeback_status
+            if _st.get("running") and str(_st.get("phase") or "") in ("", "writeback", "restore"):
+                _st["running"] = False
+        except Exception:
+            pass
 
     def _writeback_worker(self) -> None:
         """常驻写回 worker 主体（文档 §3.10：常驻 + 空闲退避轮询）。"""
@@ -5377,9 +5408,11 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 if _ev is None:
                     self._wb_event = _ev = threading.Event()
                 if self._wb_stop_requested():
+                    self._wb_status_idle()
                     _ev.wait(1.0); _ev.clear(); continue
                 # 让位（同 _writeback_pending_round 内判断，这里先睡再查，避免空转）
                 if self._task_running("writeback") or self._task_running("scan"):
+                    self._wb_status_idle()
                     _ev.wait(1.0); _ev.clear(); continue
                 if not self._wb_writeback_enabled():
                     # 自动写回关 / 预览模式开：待命。
@@ -5390,27 +5423,32 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                     except Exception:
                         _has_restore = False
                     if not _has_restore:
+                        self._wb_status_idle()
                         _ev.wait(1.0); _ev.clear(); continue
                 _st = self._writeback_pending_round(_pid)
                 if not _st or not _st.get("did"):
                     _idle += 1
                     _wait = 1.0 if _idle < 3 else (2.0 if _idle < 10 else 5.0)
-                    if self._writeback_status.get("running"):
-                        self._writeback_status["running"] = False
+                    self._wb_status_idle()
                     _ev.wait(_wait); _ev.clear(); continue
                 _idle = 0
+                _wr = int(_st.get("written") or 0)
+                _rs = int(_st.get("restore") or 0)
                 self._writeback_status.update({
-                    "running": True, "phase": "writeback",
-                    "total": int(_st.get("written") or 0) + int(_st.get("failed") or 0)
-                             + int(_st.get("missing") or 0),
-                    "done": int(_st.get("written") or 0),
+                    "running": True,
+                    # v4.7.9：恢复写回不再冒充「自动写回」（phase 供前端区分显示）
+                    "phase": ("restore" if _rs else "writeback"),
+                    "total": _wr + int(_st.get("failed") or 0) + int(_st.get("missing") or 0),
+                    "done": _wr,
                     "failed": int(_st.get("failed") or 0),
                     "missing": int(_st.get("missing") or 0),
                     "current": str(_st.get("current") or ""),
                 })
                 if time.time() - _last_log >= 15:
                     _last_log = time.time()
-                    self._push_log("INFO", f"自动写回：本轮完成 {_st.get('written', 0)} 个条目"
+                    _label = "恢复写回" if _rs else "自动写回"
+                    _mix = f"（其中恢复 {_rs} 个）" if (_rs and _rs < _wr) else ""
+                    self._push_log("INFO", f"{_label}：本轮完成 {_wr} 个条目{_mix}"
                                            f"（改动 {_st.get('changed', 0)} 条 · 已是译文 {_st.get('noop', 0)}）"
                                            f"，失败 {_st.get('failed', 0)}，文件缺失 {_st.get('missing', 0)}，"
                                            f"等待翻译 {_st.get('not_ready', 0)}")
@@ -6003,15 +6041,18 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 try:
                     _db0 = getattr(self, "_people_db", None)
                     if _db0 is not None:
-                        _gh = float(getattr(self, "_nfo_dead_grace_hours", 24) or 24)
-                        _purged = _db0.purge_expired(plugin_id=_pid, grace_hours=_gh)
-                        if _purged:
+                        _gh = self._nfo_grace_hours()
+                        _purged = int(_db0.purge_expired(plugin_id=_pid, grace_hours=_gh) or 0)
+                        if _purged < 0:
+                            logger.warning("[NFO] 扫描收尾：清理过期记录失败（数据库错误）—— 未删除任何记录，下次重试")
+                        elif _purged > 0:
                             # v4.6.77：记录真删除后同步清掉对应失效事件（不留「待恢复」假象）
                             try:
                                 self._cleanup_dirty_webhook_events()
                             except Exception:
                                 pass
-                            self._push_log("INFO", f"已清理 {_purged} 个超过宽限期未恢复的条目（判定为真删除）")
+                            # v4.7.9（审查 P2-04）：报**实际删除行数**，不再用候选条目数
+                            self._push_log("INFO", f"已清理 {_purged} 行记录（超过宽限期未恢复，判定为真删除）")
                 except Exception:
                     pass
             _emby_sync_line = ""
@@ -6749,6 +6790,59 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         return (f"待翻 {_n} 个词条未自动翻译"
                 f"（设置页「入库后自动翻译」未开启，可在库页点「全部翻译」手动触发）")
 
+    def _clear_recovered_observation(self, *, plugin_id: str, nfo_path: str = "", sname: str = "",
+                                     season_num=None, episode_num=None, server_id: str = "",
+                                     in_iid: str = "", media_provider: str = "", media_id: str = "",
+                                     series_media_id: str = "", emby_item_id: str = "",
+                                     sweep_ok: bool = False) -> None:
+        """解除「恢复」条目的观察期（v4.7.9 · 第三方审查 P1-01 / P2-03）。
+
+        由 `_ingest_nfo_pending` 在**入库写入成功之后**调用 —— 此前在 collect / upsert / 登记
+        之前就清 deleted，中途失败会「状态显示已恢复、数据其实没恢复」，且观察期事件已被清掉，
+        没有可靠的重新触发理由。合法但无演职人员的 NFO 也走这里（那种情况没有名单要写，
+        但同样不该把条目永远留在「待恢复」并被宽限期清理）。
+        失败只记 debug，不抛 —— 记录仍留在观察期，下次重新入库再恢复。
+
+        v4.6.100 语义保持：身份清扫（含历史别名登记）只在 sweep_ok 时进行 ——
+        剧级 tvshow.nfo 无季集上下文，绝不能按「整剧身份」清观察期。
+        """
+        try:
+            _db = getattr(self, "_people_db", None)
+            if _db is None:
+                return
+            if sweep_ok:
+                # 登记洗版历史别名（旧身份 → 新身份）：供后续查询归一 / 日志排查。
+                try:
+                    for _s in (_db.sample_deleted_identities(
+                            plugin_id=plugin_id, item_id=in_iid, media_provider=media_provider,
+                            media_id=media_id, series_media_id=series_media_id,
+                            emby_item_id=emby_item_id,
+                            season_num=season_num, episode_num=episode_num,
+                            server_id=server_id) or []):
+                        _o_iid = str(_s.get("item_id") or "")
+                        _o_eid = str(_s.get("emby_item_id") or "")
+                        if _o_iid == in_iid and _o_eid == emby_item_id:
+                            continue
+                        _db.alias_put(
+                            plugin_id=plugin_id, server_id=str(_s.get("server_id") or ""),
+                            provider=media_provider, provider_id=media_id,
+                            old_media_id=_o_iid, old_emby_item_id=_o_eid,
+                            old_nfo_path=str(_s.get("nfo_path") or ""),
+                            old_title=str(_s.get("title") or ""), new_media_id=in_iid)
+                except Exception:
+                    pass
+                # 解除观察期（强身份 + 唯一候选弱匹配 —— 均带季集范围）
+                _db.clear_deleted_by_media(
+                    plugin_id=plugin_id, item_id=in_iid, media_provider=media_provider,
+                    media_id=media_id, series_media_id=series_media_id,
+                    emby_item_id=emby_item_id,
+                    season_num=season_num, episode_num=episode_num, server_id=server_id)
+            # 行级精确解除（nfo_path 命中；剧级 NFO 只走这一条，不会越界到其它集）
+            _db.clear_deleted(plugin_id=plugin_id, nfo_path=nfo_path, series_name=sname,
+                              season_num=season_num, episode_num=episode_num, server_id=server_id)
+        except Exception as _e:
+            logger.debug(f"[Restore] 解除观察期失败（非致命，下次重新入库再试）: {_e}")
+
     def _ingest_nfo_pending(self, nfo_path: str, item_id: str = "", server_id: str = "",
                             item: Optional[dict] = None,
                             recovered: Optional[bool] = None,
@@ -6835,41 +6929,13 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                                                    f"{_sname or _in_title} S{_ssn}E{_epn}")
             except Exception:
                 recovered = False
+        # v4.7.9（审查 P1-01）：解除观察期的动作**从「判定 recovered 之后立刻做」挪到
+        # 「入库写入成功之后」**（见下方 _clear_recovered_observation 调用）——
+        # 此前先清 deleted 再 collect / upsert / 登记，中途失败会「显示已恢复、数据没恢复」，
+        # 且观察期事件已被清掉 → 没有可靠的重新触发理由。
         if recovered:
-            try:
-                _db = getattr(self, "_people_db", None)
-                if _db is not None:
-                    # v4.6.100：身份清扫（含历史别名登记）只在 _sweep_ok 时进行 ——
-                    # 剧级 tvshow.nfo 无季集上下文，绝不能按「整剧身份」清观察期。
-                    if _sweep_ok:
-                        # 登记洗版历史别名（旧身份 → 新身份）：供后续查询归一 / 日志排查。
-                        try:
-                            for _s in (_db.sample_deleted_identities(
-                                    plugin_id=_pid, item_id=_in_iid, media_provider=_in_mp,
-                                    media_id=_in_mid, series_media_id=_in_smi, emby_item_id=_emby_in,
-                                    season_num=_ssn, episode_num=_epn, server_id=_sid_arg) or []):
-                                _o_iid = str(_s.get("item_id") or "")
-                                _o_eid = str(_s.get("emby_item_id") or "")
-                                if _o_iid == _in_iid and _o_eid == _emby_in:
-                                    continue
-                                _db.alias_put(
-                                    plugin_id=_pid, server_id=str(_s.get("server_id") or ""),
-                                    provider=_in_mp, provider_id=_in_mid,
-                                    old_media_id=_o_iid, old_emby_item_id=_o_eid,
-                                    old_nfo_path=str(_s.get("nfo_path") or ""),
-                                    old_title=str(_s.get("title") or ""), new_media_id=_in_iid)
-                        except Exception:
-                            pass
-                        # 解除观察期（强身份 + nfo_path + 唯一候选弱匹配 —— 均带季集范围）
-                        _db.clear_deleted_by_media(
-                            plugin_id=_pid, item_id=_in_iid, media_provider=_in_mp, media_id=_in_mid,
-                            series_media_id=_in_smi, emby_item_id=_emby_in,
-                            season_num=_ssn, episode_num=_epn, server_id=_sid_arg)
-                    # 行级精确解除（nfo_path 命中；剧级 NFO 只走这一条，不会越界到其它集）
-                    _db.clear_deleted(plugin_id=_pid, nfo_path=nfo_path, series_name=_sname,
-                                      season_num=_ssn, episode_num=_epn, server_id=_sid_arg)
-            except Exception:
-                pass
+            logger.info(f"[Restore] 命中恢复：{os.path.basename(nfo_path)} "
+                        f"(identity={(_sid_arg or '')}:{_in_iid or ''}) —— 待入库写入成功后再解除观察期")
         # 采集词条（v4.4.7 P0-6/§二十二：采集与翻译开关解耦 —— 用 collect 表；仅按人数上限筛）
         try:
             _ctt = self._collect_trans_types(_lv)
@@ -6884,6 +6950,15 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         res["names"] = len(name_orig)
         res["roles"] = len(role_orig)
         if not name_orig and not role_orig:
+            # v4.7.9（审查 P2-03）：合法但**无演职人员**的 NFO —— 不半途丢恢复状态：
+            # 这种条目没有名单要写，但既然判定为恢复，就该解除观察期
+            # （否则它会一直挂「待恢复」，并在宽限期后被当「真删除」清理掉）。
+            if recovered:
+                self._clear_recovered_observation(
+                    plugin_id=_pid, nfo_path=nfo_path, sname=_sname,
+                    season_num=_ssn, episode_num=_epn, server_id=_sid_arg,
+                    in_iid=_in_iid, media_provider=_in_mp, media_id=_in_mid,
+                    series_media_id=_in_smi, emby_item_id=_emby_in, sweep_ok=_sweep_ok)
             res["ok"] = True
             res["recovered"] = 1 if recovered else 0
             return res
@@ -6911,6 +6986,13 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             return res
         res["ok"] = True
         res["recovered"] = 1 if recovered else 0
+        if recovered:
+            # v4.7.9（审查 P1-01）：**入库写入成功之后**才解除观察期（此前在 collect/upsert 之前）。
+            self._clear_recovered_observation(
+                plugin_id=_pid, nfo_path=nfo_path, sname=_sname,
+                season_num=_ssn, episode_num=_epn, server_id=_sid_arg,
+                in_iid=_in_iid, media_provider=_in_mp, media_id=_in_mid,
+                series_media_id=_in_smi, emby_item_id=_emby_in, sweep_ok=_sweep_ok)
         # v4.6.66（P0-6）：单集入库时确保「剧级行」存在 —— 库页隐藏「纯 Episode 组」，
         # 若 tvshow.nfo 未被单独入库（Emby 未就绪 / 路径映射差异），整部剧会从库页消失。
         if _lv == "episode" and _sid:
@@ -7932,6 +8014,47 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             return legacy
         return []
 
+    def _nfo_grace_hours(self) -> float:
+        """失效观察期（小时）—— v4.7.9（审查 P2-01）：**尊重显式 0**（0 = 无观察期，立即判定）。
+        此前一律 `getattr(self, "_nfo_dead_grace_hours", 24) or 24` → 配置成 0 会被悄悄换成 24。
+        只有非法值（None / 空串）才回退 24。"""
+        try:
+            return max(0.0, float(getattr(self, "_nfo_dead_grace_hours", 24)))
+        except (TypeError, ValueError):
+            return 24.0
+
+    def _nfo_roots_health(self) -> dict:
+        """「NFO 根目录健康」闸（v4.7.9 · 第三方审查 P0-01）。
+
+        NAS/SMB/NFS 挂载短暂断开、权限变化、路径映射改错时，`os.path.isdir()` 会对**整库**
+        返回 False。若据此标 missing、再在宽限期后物理删除记录，一次挂载故障就会变成大批
+        人物/角色数据被清 —— 所以「缺失判定 / 物理清理」必须先过这道闸。
+
+        :return {"ok", "roots", "bad", "reason"}；**只有 ok=True 才允许**标 missing / purge。
+        """
+        try:
+            roots = [str(p) for p in (self._all_nfo_roots() or []) if str(p or "").strip()]
+            if not roots:
+                return {"ok": False, "roots": 0, "bad": [],
+                        "reason": "未选择任何媒体库（无可信根目录，无法证明「目录消失 = 媒体真被删」）"}
+            bad = []
+            for _r in roots:
+                if not os.path.isdir(_r):
+                    bad.append(_r)
+                    continue
+                try:
+                    with os.scandir(_r) as _it:
+                        next(_it, None)      # 能打开且能读出一项 → 视为可枚举
+                except Exception:
+                    bad.append(_r)
+            if bad:
+                return {"ok": False, "roots": len(roots), "bad": bad,
+                        "reason": (f"{len(bad)}/{len(roots)} 个根目录不可访问"
+                                   f"（挂载断开 / 权限不足 / 路径映射变化）")}
+            return {"ok": True, "roots": len(roots), "bad": [], "reason": ""}
+        except Exception as _e:
+            return {"ok": False, "roots": 0, "bad": [], "reason": f"根目录健康检查异常: {_e}"}
+
     def _in_selected_library(self, path: str) -> bool:
         """库白名单判断 —— 条目的 Path 是否落在已选中的库目录下。
 
@@ -8508,17 +8631,27 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         翻译 worker 是常驻线程、不置 _translate_running 位，「翻译中」只体现为消费许可
         _tx_requested；此前翻译期间清人名池/清库不会被拦截（用户：这边在翻译，那边给它删了）。
         此处把「已下发翻译许可」也视为运行中一并拒绝，直到任务结束或终止。"""
+        _unknown = False
         with self._scan_lock:
             _busy = bool(self._is_running) or bool(getattr(self, "_tx_requested", False))
         if not _busy:
             # v4.6.76（规范 §十一）：统一「数据变更锁」口径 —— 扫描/翻译/写回/人名池/探测库
             # 任一在跑（或池正在拉取）都视为忙碌；此前只看 _is_running + 翻译许可，
             # 导致写回/池/探测运行中仍可改 name_map / 人物池 / 起池翻译。
+            # v4.7.9（审查 P1-07）：查询异常 → **fail-closed**（此前 `except: _busy = False`
+            # 属 fail-open，真有任务在跑时也会放行冲突写操作）。
             try:
-                _busy = bool(self._task_state().get("data_mutation_locked"))
-            except Exception:
-                _busy = False
+                _ts = self._task_state() or {}
+                _busy = bool(_ts.get("data_mutation_locked"))
+                _unknown = str(_ts.get("state") or "") == "UNKNOWN"
+            except Exception as _te:
+                logger.warning(f"[Task] 数据变更锁判定异常 → 按忙碌拦截: {_te}")
+                _busy = True
+                _unknown = True
         if _busy:
+            if _unknown:
+                return {"success": False,
+                        "message": "任务状态读取异常，为保护数据已拦截本次操作（请稍后重试；若持续请重启插件）"}
             return {"success": False,
                     "message": "任务正在运行中，请先「终止」或等待完成后，再进行此操作"}
         return None
@@ -8593,7 +8726,10 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                     "tasks": {"scan": _scan, "translate": _tx, "writeback": _wb,
                               "pool": _pool, "probe": _probe}}
         except Exception:
-            return {"state": "IDLE", "data_mutation_locked": False,
+            # v4.7.9（审查 P1-07）：状态查询异常 → **fail-closed**（宁可拦住写操作，也不要在
+            # 真有任务运行时放行）。此前返回 IDLE + locked=False 属于 fail-open。
+            logger.warning("[Task] 任务状态查询异常 → 按「状态未知、数据已锁」处理（fail-closed）")
+            return {"state": "UNKNOWN", "data_mutation_locked": True,
                     "tasks": {"scan": False, "translate": False, "writeback": False,
                               "pool": False, "probe": False}}
 
@@ -10078,7 +10214,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             execute_at = now + delay
             schedule_key = f"{server_id}:{item_id}" if server_id else item_id
             _brief = self._webhook_item_brief(raw_data)
-            # v4.7.8：收到事件时就查我们库 —— 若命中观察期记录，这条是「恢复入库」，
+            # v4.7.9：收到事件时就查我们库 —— 若命中观察期记录，这条是「恢复入库」，
             # 接收通知按恢复口径报（而不是笼统的「收到入库事件」）。
             if _brief:
                 try:
@@ -10122,7 +10258,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             self._push_webhook_event(item_id, _brief.get("name") or _brief.get("series_name") or item_id,
                                      "received", f"已接收入库事件，{delay} 秒后处理",
                                      series_name=_brief.get("series_name") or "",
-                                     season=_brief.get("season"), episode=_brief.get("episode"))
+                                     season=_brief.get("season"), episode=_brief.get("episode"),
+                                     server_id=str(server_id or ""))
             self._enqueue_received_notification(_brief, item_id)
             logger.info(f"[Webhook] 已调度: ItemId={item_id}, 将在 {delay} 秒后执行")
 
@@ -10161,7 +10298,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
     def _webhook_recovery_ingress(self, brief: dict, server_id: str = "") -> bool:
         """收到入库事件时判断：这是不是我们库里「观察期」条目的重新入库（即恢复）。
 
-        v4.7.8：**查我们库**（观察期行）来决定通知口径 —— 剧名（或电影标题）+ 季/集，
+        v4.7.9：**查我们库**（观察期行）来决定通知口径 —— 剧名（或电影标题）+ 季/集，
         与删除端 `_handle_webhook_delete` 的弱匹配口径一致。
         仅用于**通知文案**（📥 新入库 vs 🔁 恢复入库）；真正的恢复判定仍在入库时按
         `recovered` 严格做（此处只要「有观察期候选」即可提示，宽松在有无、不做唯一性）。
@@ -10262,7 +10399,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             pass
 
     def _update_or_push_webhook_event(self, item_id: str, name: str, status: str, msg: str,
-                                      series_name: str = "", season=None, episode=None) -> None:
+                                      series_name: str = "", season=None, episode=None,
+                                      server_id: str = "") -> None:
         """把该条目最近的**非终态**事件行（已接收 / 处理中 / 等待）原地更新为最新状态，
         找不到才插入新行 —— 让「入库事件」列表**一个事件只占一行、状态原地流转**：
         已接收 → 处理中 → 完成/失败。
@@ -10270,35 +10408,47 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         v4.6.66：避免同一集出现两行（已接收 + 完成）。
         v4.6.84（用户实测）：此前只匹配 status=='received'，一旦中间态（running/waiting）
         用 _push_webhook_event 另起一行，后续就不再命中 → 列表里一个事件仍显示两行
-        （「已接收/处理中」+「完成」）。现改为匹配全部非终态，串起整条状态链。"""
+        （「已接收/处理中」+「完成」）。现改为匹配全部非终态，串起整条状态链。
+        v4.7.9（审查 P1-03）：**事件必须按 (server_id, item_id) 定位** —— 多台 Emby 下
+        同一 item_id 会撞车，此前只比 item_id，会把另一台服务器的同名事件行状态覆盖掉。"""
         try:
             events = getattr(self, "_webhook_events", None) or []
             _iid = str(item_id or "")
+            _sid = str(server_id or "")
             if _iid:
                 for e in events:
-                    if str(e.get("item_id") or "") == _iid \
-                            and str(e.get("status")) in ("received", "running", "waiting"):
-                        e["status"] = status
-                        e["msg"] = msg or ""
-                        from datetime import datetime as _dt
-                        e["time"] = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
-                        if name:
-                            e["name"] = name
-                        if series_name:
-                            e["series_name"] = series_name
-                        if season is not None:
-                            e["season"] = season
-                        if episode is not None:
-                            e["episode"] = episode
-                        try:
-                            self._save_state()
-                        except Exception:
-                            pass
-                        return
+                    if str(e.get("item_id") or "") != _iid:
+                        continue
+                    if str(e.get("status")) not in ("received", "running", "waiting"):
+                        continue
+                    # 两边都带 server_id 时必须一致才算同一条（缺失一侧则退回旧口径，兼容历史行）
+                    _e_sid = str(e.get("server_id") or "")
+                    if _sid and _e_sid and _sid != _e_sid:
+                        continue
+                    e["status"] = status
+                    e["msg"] = msg or ""
+                    from datetime import datetime as _dt
+                    e["time"] = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
+                    if name:
+                        e["name"] = name
+                    if series_name:
+                        e["series_name"] = series_name
+                    if season is not None:
+                        e["season"] = season
+                    if episode is not None:
+                        e["episode"] = episode
+                    if _sid and not _e_sid:
+                        e["server_id"] = _sid      # 补齐历史行（老版本没记 server_id）
+                    try:
+                        self._save_state()
+                    except Exception:
+                        pass
+                    return
         except Exception:
             pass
         self._push_webhook_event(item_id, name, status, msg,
-                                 series_name=series_name, season=season, episode=episode)
+                                 series_name=series_name, season=season, episode=episode,
+                                 server_id=server_id)
 
     def _rebuild_missing_events_from_db(self) -> int:
         """从库中「观察期」记录重建「失效/待恢复」事件行 ——
@@ -10315,7 +10465,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 events = self._webhook_events = []
             _exist = {(str(e.get("item_id") or ""), e.get("season"), e.get("episode"))
                       for e in events if str(e.get("status")) == "missing"}
-            _gh = float(getattr(self, "_nfo_dead_grace_hours", 24) or 24)
+            _gh = self._nfo_grace_hours()
             _n = 0
             for r in rows:
                 _k = (r.get("item_id"), r.get("season_num"), r.get("episode_num"))
@@ -11047,7 +11197,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                         except Exception:
                             _mk = 0
                     if _mk > 0:
-                        _mgh = float(getattr(self, "_nfo_dead_grace_hours", 24) or 24)
+                        _mgh = self._nfo_grace_hours()
                         _mdead = time.strftime("%Y-%m-%d %H:%M",
                                                time.localtime(time.time() + _mgh * 3600))
                         _eps_txt = "、".join(f"S{_s:02d}E{_e:02d}" for _s, _e in _miss_pairs[:12])
@@ -11105,7 +11255,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                             server_id=_sid_arg, include_legacy=_include_legacy) or 0)
                 except Exception:
                     n = 0
-            _gh = float(getattr(self, "_nfo_dead_grace_hours", 24) or 24)
+            _gh = self._nfo_grace_hours()
             _dead_text = time.strftime("%Y-%m-%d %H:%M", time.localtime(time.time() + _gh * 3600))
             if itype.lower() == "episode":
                 _tag = "单集"
@@ -11162,7 +11312,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             rec = {"series_name": sn, "name": nm,
                    "season": brief.get("season"), "episode": brief.get("episode"),
                    "type": str(brief.get("type") or ""),
-                   # v4.7.8：入库时命中观察期记录 → 接收通知按「恢复入库」口径报
+                   # v4.7.9：入库时命中观察期记录 → 接收通知按「恢复入库」口径报
                    "recovered_ingress": bool(brief.get("recovered_ingress"))}
             with self._webhook_lock:
                 _seen_set = getattr(self, "_webhook_recv_notified", None)
@@ -11236,7 +11386,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 self._webhook_delete_timer = None
             if not bq:
                 return
-            _gh = float(getattr(self, "_nfo_dead_grace_hours", 24) or 24)
+            _gh = self._nfo_grace_hours()
             _dead_text = time.strftime("%Y-%m-%d %H:%M", time.localtime(time.time() + _gh * 3600))
             _names, _marked = [], 0
             for r in bq:
@@ -11312,7 +11462,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                     parts.append(f"{_line}（电影）" if _is_movie_rec(recs[0]) else _line)
             _all_recs = [x for _k in order for x in (bq.get(_k) or [])]
             _all_movies = bool(_all_recs) and all(_is_movie_rec(x) for x in _all_recs)
-            # v4.7.8：这批入库是不是「恢复入库」（收到事件时已查过我们库的观察期记录）
+            # v4.7.9：这批入库是不是「恢复入库」（收到事件时已查过我们库的观察期记录）
             _recov_n = sum(1 for x in _all_recs if x.get("recovered_ingress"))
             _all_recov = bool(_all_recs) and _recov_n == len(_all_recs)
             _items_txt = "\n".join(f"  • {p}" for p in parts[:8])
@@ -11326,7 +11476,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             except Exception:
                 _auto = False
             if _all_recov:
-                # v4.7.8：恢复入库 —— 明确区别于普通新入库（判定依据是**我们库里的观察期记录**）
+                # v4.7.9：恢复入库 —— 明确区别于普通新入库（判定依据是**我们库里的观察期记录**）
                 _ov_on = bool(getattr(self, "_overwrite_emby", False))
                 _head = "🔁 恢复入库"
                 _head_reset = "🔁 又有恢复入库事件（已并入本轮）"
@@ -11531,11 +11681,20 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         logger.info("[Webhook] Worker 线程已启动")
         while not self._webhook_worker_event.is_set():
             if not getattr(self, "_enabled", False):
+                # v4.7.9（审查 P1-04）：禁用语义统一为 **pause**（与「Webhook 开关关闭」一致）——
+                # 不再静默丢弃未处理事件：队列留在内存并落盘（state.json），
+                # 重新启用后由 _resume_webhook_queue 按序续跑（本线程随禁用退出）。
                 with self._webhook_lock:
-                    if self._webhook_schedule:
-                        logger.info(f"[Webhook] 插件已关闭，丢弃 {len(self._webhook_schedule)} 个未处理任务")
-                    self._webhook_schedule.clear()
-                logger.info("[Webhook] 插件已关闭，Worker 停止消费（不再监测入库事件）")
+                    _held_n = len(self._webhook_schedule)
+                if _held_n:
+                    logger.info(f"[Webhook] 插件未启用：暂存 {_held_n} 个未处理事件（不丢弃），启用后按序续跑")
+                    self._push_log("INFO", f"插件未启用：{_held_n} 个入库事件已暂存（不丢弃），启用后续跑")
+                else:
+                    logger.info("[Webhook] 插件已关闭，Worker 停止消费（不再监测入库事件）")
+                try:
+                    self._save_state()
+                except Exception:
+                    pass
                 break
             if not getattr(self, "_webhook_enabled", False):
                 self._webhook_worker_event.wait(1.0)
@@ -11598,7 +11757,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                             self._update_or_push_webhook_event(
                                 str(_mm.get("item_id") or ""), _sname, "running",
                                 f"整合翻译启动：{len(_members)} 集合并收集词条（{_eps_txt}）",
-                                series_name=_sname)
+                                series_name=_sname,
+                                server_id=str(_mm.get("server_id") or ""))
                         if getattr(self, "_notify_on_complete", False):
                             try:
                                 self.post_message(
@@ -11646,7 +11806,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 if svc is None:
                     self._webhook_skipped += 1
                     self._push_webhook_event(item_id, f"Item_{item_id}", "skipped",
-                                             f"未匹配到 server_id={server_id} 的 Emby 服务器，已跳过（不改名到错误服务器）")
+                                             f"未匹配到 server_id={server_id} 的 Emby 服务器，已跳过（不改名到错误服务器）",
+                                             server_id=server_id)
                     continue
                 client = EmbyClient(self._get_service_url(svc), self._get_service_api_key(svc), svc,
                                     user_id=self._get_service_user_id(svc), use_proxy=self._use_proxy)
@@ -11657,7 +11818,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                         continue
                     self._webhook_failed += 1
                     self._push_webhook_event(item_id, f"Item_{item_id}", "failed",
-                                             "条目未就绪（重试 2 次后放弃），跳过")
+                                             "条目未就绪（重试 2 次后放弃），跳过",
+                                             server_id=server_id)
                     continue
                 item = self._normalize_webhook_item(item, server_id)
                 if not self._in_selected_library(str(item.get("Path") or "")):
@@ -11666,7 +11828,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                                              "未选择该媒体库，已忽略",
                                              series_name=str(item.get("SeriesName") or ""),
                                              season=item.get("ParentIndexNumber"),
-                                             episode=item.get("IndexNumber"))
+                                             episode=item.get("IndexNumber"),
+                                             server_id=server_id)
                     continue
                 if _first_item is None:
                     _first_item = item
@@ -11694,7 +11857,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                                              f"未找到 nfo（重试 2 次后放弃），预期路径：{_expect}",
                                              series_name=str(item.get("SeriesName") or ""),
                                              season=item.get("ParentIndexNumber"),
-                                             episode=item.get("IndexNumber"))
+                                             episode=item.get("IndexNumber"),
+                                             server_id=server_id)
                     if getattr(self, "_notify_on_complete", False):
                         try:
                             self.post_message(mtype=NotificationType.Manual, title=self.plugin_name,
@@ -11748,7 +11912,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                         ((f"聚合翻译完成，改动 {res['changed']} 条" +
                           (f"，{self._ingest_tx_phrase(self._nfo_ingest_trigger(), _pl)}" if _pl else "")) if res['done'] else "聚合翻译失败，见日志"),
                         series_name=str(_it.get("SeriesName") or ""),
-                        season=_it.get("ParentIndexNumber"), episode=_it.get("IndexNumber"))
+                        season=_it.get("ParentIndexNumber"), episode=_it.get("IndexNumber"),
+                        server_id=str(_sid or ""))
                 except Exception:
                     pass
             # v4.6.67（P0-C）：入库阶段没有「翻译词条数」—— translated 恒 0，
@@ -11835,7 +12000,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             self._update_or_push_webhook_event(item_id, display_title, "waiting", _msg,
                                                series_name=str((item or {}).get("SeriesName") or ""),
                                                season=(item or {}).get("ParentIndexNumber"),
-                                               episode=(item or {}).get("IndexNumber"))
+                                               episode=(item or {}).get("IndexNumber"),
+                                               server_id=server_id)
             logger.info(f"[Webhook] {display_title}: {_msg}")
             return True
         except Exception:
@@ -11870,7 +12036,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             self._update_or_push_webhook_event(item_id, display_title, "waiting",
                                                "该目录不在已选媒体库的映射路径内（可能容器挂载不一致），已挂起等待：调整「路径前缀替换」后到本页点「继续处理」",
                                                series_name=str(item.get("SeriesName") or ""),
-                                               season=item.get("ParentIndexNumber"), episode=item.get("IndexNumber"))
+                                               season=item.get("ParentIndexNumber"), episode=item.get("IndexNumber"),
+                                               server_id=server_id)
             self._push_log("WARNING", f"Webhook 挂起（库路径映射不命中）：{display_title}（{_p}）—— 请到设置页检查「路径前缀替换」")
             logger.warning(f"[Webhook] 库路径映射不命中，事件挂起等待: {display_title}（{_p}）")
             self._save_state()
@@ -12067,12 +12234,21 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             with self._scan_lock:
                 if self._is_running:
                     return
+            # v4.7.9（审查 P1-08）：**先确认 worker 真正启动成功、再写「上次执行时刻」** ——
+            # 此前先写时间戳再启动，启动失败或被互斥挡住也会把下一次扫描推迟一整个周期。
+            try:
+                _lr = self._launch_nfo_worker({})
+            except Exception as _le:
+                logger.warning(f"[NFO] 定时扫库启动失败（不计入「上次执行」，下轮重试）: {_le}")
+                return
+            if _lr:
+                logger.info(f"[NFO] 定时扫库本轮跳过：{_lr.get('message') or '已有任务在运行'}")
+                return
             self._last_full_scan_ts = now
             self._save_state()
             _h = int(interval // 3600)
             logger.info(f"[NFO] 定时全量扫库已触发（间隔 {_h} 小时，断点续扫增量，兜底漏入库条目）")
             self._push_log("INFO", f"定时全量扫库已触发（间隔 {_h} 小时，断点续扫增量，兜底关插件/漏接 webhook 期间的漏入库条目）")
-            self._launch_nfo_worker({})
         except Exception as e:
             logger.warning(f"[NFO] 定时扫库失败: {e}")
 
@@ -12461,7 +12637,18 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             if not self._probe_stop:
                 self._probe_reverse_mark(inventory, keys, res)
             self._probe_process(batch, res)
-            self._probe_last_deep = time.time()
+            # v4.7.9（审查 P1-05）：只有「本轮无剩余 + 清单完整 + 未被停止」才算一次**完整**
+            # 深度探测 —— 否则不更新 last_deep（否则超出 200/轮的剩余目标要等到下一个 24h
+            # 深查周期才继续，期间轻查可能根本不会重新识别它们）。
+            _probe_complete = (int(res.get("rest") or 0) == 0
+                               and not bool(inventory.get("incomplete"))
+                               and not bool(self._probe_stop))
+            if _probe_complete:
+                self._probe_last_deep = time.time()
+            else:
+                logger.info(f"[Probe] 本轮未完整（剩余 {int(res.get('rest') or 0)} 个目标"
+                            f"{'、清单不完整' if inventory.get('incomplete') else ''}）"
+                            f" → 不更新「上次完整深度探测」，下一轮继续")
             self._save_state()
         except Exception as e:
             logger.warning(f"[Probe] 探测轮异常: {e}")
@@ -12495,7 +12682,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 _legacy_ok = len(self._configured_server_keys()) <= 1
             except Exception:
                 _legacy_ok = False
-            _gh = float(getattr(self, "_nfo_dead_grace_hours", 24) or 24)
+            _gh = self._nfo_grace_hours()
             _now = time.time()
             _marked = 0
             _names: List[str] = []
@@ -12666,7 +12853,19 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             if db is None:
                 return
             _pid = self.__class__.__name__
-            _gh = float(getattr(self, "_nfo_dead_grace_hours", 24) or 24)
+            _gh = self._nfo_grace_hours()
+            # v4.7.9（审查 P0-01）：根目录不健康（挂载断开 / 权限 / 映射变化 / 未选库）时，
+            # **既不标 missing、也不做物理清理** —— 否则一次挂载故障 = 整库记录被清。
+            _hh = self._nfo_roots_health()
+            if not _hh.get("ok"):
+                _hk = f"nfo:roots-unhealthy:{_hh.get('reason')}"
+                if getattr(self, "_nfo_health_warned_key", "") != _hk:
+                    self._nfo_health_warned_key = _hk
+                    _hm = (f"[NFO] 维护：已跳过「失效判定 + 物理清理」—— {_hh.get('reason')}；"
+                           f"根目录恢复后自动继续（若确实移除了整个库，请到设置页取消勾选该库）")
+                    logger.warning(_hm)
+                    self._push_log("WARNING", _hm)
+                return
             _mcur = getattr(self, "_maint_cursor", None)
             if not isinstance(_mcur, dict):
                 _mcur = {"item_id": 0, "ep_id": 0}
@@ -12685,21 +12884,32 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             if missing:
                 # v4.6.66（P0-1 联动）：按条目各自来源标记（Webhook 行带真实 server_id，
                 # 旧代码只看 '' 来源 → P0-1 后这些行漏标、观察期机制失效）。
+                # v4.7.9（审查 P0-01-8）：**只对实际更新到行的条目**发失效事件/通知 ——
+                # 标记失败或命中 0 行时不得产生「已进入观察期」的假象。
+                _marked_items = []
                 for it in missing:
                     try:
-                        db.mark_deleted(plugin_id=_pid, item_ids=[str(it["item_id"])],
-                                        server_id=str(it.get("server_id") or ""))
-                    except Exception:
-                        pass
-                _dead_text = time.strftime("%Y-%m-%d %H:%M", time.localtime(time.time() + _gh * 3600))
-                for it in missing:
-                    self._push_webhook_event(str(it["item_id"]), str(it.get("title") or ""),
-                                             "missing",
-                                             f"检测到 nfo 目录消失，已进入观察期（{int(_gh)} 小时）；{_dead_text} 到期自动检查，"
-                                             f"观察期内重新入库时将自动尝试按媒体稳定身份恢复（Emby ID / TMDB / TVDB / IMDb）",
-                                             series_name=str(it.get("series_name") or ""),
-                                             server_id=str(it.get("server_id") or ""))
-                logger.info(f"[NFO] 维护：{len(missing)} 个条目 nfo 目录消失，进入观察期（{int(_gh)} 小时）")
+                        _n = int(db.mark_deleted(plugin_id=_pid, item_ids=[str(it["item_id"])],
+                                                 server_id=str(it.get("server_id") or "")) or 0)
+                    except Exception as _me:
+                        logger.debug(f"[NFO] 维护：标记观察期失败 {it.get('item_id')}: {_me}")
+                        _n = 0
+                    if _n > 0:
+                        _marked_items.append(it)
+                if not _marked_items:
+                    logger.warning(f"[NFO] 维护：{len(missing)} 个条目疑似 nfo 目录消失，"
+                                   f"但标记观察期**实际更新 0 行** → 不产生失效事件/通知")
+                else:
+                    _dead_text = time.strftime("%Y-%m-%d %H:%M", time.localtime(time.time() + _gh * 3600))
+                    for it in _marked_items:
+                        self._push_webhook_event(str(it["item_id"]), str(it.get("title") or ""),
+                                                 "missing",
+                                                 f"检测到 nfo 目录消失，已进入观察期（{int(_gh)} 小时）；{_dead_text} 到期自动检查，"
+                                                 f"观察期内重新入库时将自动尝试按媒体稳定身份恢复（Emby ID / TMDB / TVDB / IMDb）",
+                                                 series_name=str(it.get("series_name") or ""),
+                                                 server_id=str(it.get("server_id") or ""))
+                    logger.info(f"[NFO] 维护：{len(_marked_items)} 个条目 nfo 目录消失，"
+                                f"进入观察期（{int(_gh)} 小时）")
             try:
                 _ep_page = 1500
                 _ep_after = int(_mcur.get("ep_id") or 0)
@@ -12734,21 +12944,30 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 logger.debug(f"[NFO] 行级失效检查失败（非致命）: {_e}")
             exp = db.expired_item_ids(plugin_id=_pid, grace_hours=_gh)
             if exp:
-                db.purge_expired(plugin_id=_pid, grace_hours=_gh)
-                # v4.6.77（规范 §二十三闭环）：观察期到点未恢复 → 记录已真删除，
-                # 同步清掉对应的「失效/待恢复」事件（数据库已无对应记录），不留假象。
-                try:
-                    _cl = self._cleanup_dirty_webhook_events() or {}
-                    _n_ev = int(_cl.get("removed_count") or 0)
-                    if _n_ev:
-                        logger.info(f"[NFO] 维护：同步清理 {_n_ev} 条已过观察期条目的失效事件")
-                except Exception:
-                    pass
-                logger.info(f"[NFO] 维护：清理 {len(exp)} 个超过宽限期条目（判定为真删除）")
-                self._push_log("INFO", f"已自动清理 {len(exp)} 个超过宽限期未恢复的条目（判定为真删除）")
-                if getattr(self, "_notify_on_complete", False):
-                    self.post_message(mtype=NotificationType.Manual, title=self.plugin_name,
-                                      text=f"已自动清理 {len(exp)} 个超过宽限期（{int(_gh)} 小时）未恢复的条目（判定为真删除）。若属误判，该剧重新入库即可恢复翻译名单。")
+                # v4.7.9（审查 P2-04 / P0-01-9、10）：以**实际删除行数**为准，并区分 SQL 失败 ——
+                # 此前用「候选条目数」报数、且异常被吞成 0（UI 会谎报「已清理成功」）。
+                _purged = int(db.purge_expired(plugin_id=_pid, grace_hours=_gh) or 0)
+                if _purged < 0:
+                    logger.warning("[NFO] 维护：清理过期记录失败（数据库错误）—— 未删除任何记录，下次维护重试")
+                    self._push_log("WARNING", "清理过期记录失败（数据库错误）—— 未删除任何记录，下次维护重试")
+                elif _purged == 0:
+                    logger.warning(f"[NFO] 维护：判定应清理 {len(exp)} 个条目，但实际删除 0 行"
+                                   f" → 不产生清理通知")
+                else:
+                    # v4.6.77（规范 §二十三闭环）：观察期到点未恢复 → 记录已真删除，
+                    # 同步清掉对应的「失效/待恢复」事件（数据库已无对应记录），不留假象。
+                    try:
+                        _cl = self._cleanup_dirty_webhook_events() or {}
+                        _n_ev = int(_cl.get("removed_count") or 0)
+                        if _n_ev:
+                            logger.info(f"[NFO] 维护：同步清理 {_n_ev} 条已过观察期条目的失效事件")
+                    except Exception:
+                        pass
+                    logger.info(f"[NFO] 维护：清理 {_purged} 行记录（{len(exp)} 个条目超过宽限期，判定为真删除）")
+                    self._push_log("INFO", f"已自动清理 {_purged} 行记录（{len(exp)} 个条目超过宽限期未恢复，判定为真删除）")
+                    if getattr(self, "_notify_on_complete", False):
+                        self.post_message(mtype=NotificationType.Manual, title=self.plugin_name,
+                                          text=f"已自动清理 {_purged} 行记录（{len(exp)} 个条目超过宽限期（{int(_gh)} 小时）未恢复，判定为真删除）。若属误判，该剧重新入库即可恢复翻译名单。")
             try:
                 _day = time.strftime("%Y-%m-%d")
                 if str(getattr(self, "_last_vacuum_day", "")) != _day:
@@ -12919,13 +13138,15 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                                                                if _pl else "已恢复：被删除条目重新入库",
                                                                series_name=str(item.get("SeriesName") or ""),
                                                                season=item.get("ParentIndexNumber"),
-                                                               episode=item.get("IndexNumber"))
+                                                               episode=item.get("IndexNumber"),
+                                                               server_id=server_id)
                         else:
                             self._update_or_push_webhook_event(item_id, display_title, "done",
                                                                f"已入库，{self._ingest_tx_phrase(self._nfo_ingest_trigger(), _pl)}" if _pl else "已入库（无需翻译）",
                                                                series_name=str(item.get("SeriesName") or ""),
                                                                season=item.get("ParentIndexNumber"),
-                                                               episode=item.get("IndexNumber"))
+                                                               episode=item.get("IndexNumber"),
+                                                               server_id=server_id)
                     with self._webhook_lock:
                         _rk = self._wh_retry_key(server_id, item_id)
                         self._webhook_retry_map.pop(_rk, None)
@@ -13170,7 +13391,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             if not eps:
                 logger.warning(f"[Webhook] Series 展开：未拉到任何单集（ItemId={item_id}），跳过")
                 self._update_or_push_webhook_event(item_id, display_title, "skipped",
-                                                   "整剧入库：未拉到单集（Emby 尚未就绪），跳过")
+                                                   "整剧入库：未拉到单集（Emby 尚未就绪），跳过",
+                                                   server_id=server_id)
                 return
             # v4.6.87：标明本次覆盖了哪几季（多季入库时尤其直观）
             _s_txt = self._seasons_range_txt(
@@ -13178,7 +13400,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             _s_show = f"【{_s_txt}】" if _s_txt else ""
             logger.info(f"[Webhook] Series 展开为 {len(eps)} 个单集任务（合并翻译）{_s_show}: {display_title}")
             self._update_or_push_webhook_event(item_id, display_title, "running",
-                                               f"整剧入库：展开为 {len(eps)} 个单集任务{_s_show}，收集全部集词条合并翻译")
+                                               f"整剧入库：展开为 {len(eps)} 个单集任务{_s_show}，收集全部集词条合并翻译",
+                                               server_id=server_id)
             # 预过滤：Path 有效 + 属已选库 + 目录过根目录门禁（与单集链同口径）
             pending = []
             for ep in eps:
@@ -13258,7 +13481,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             if not nfo_items:
                 logger.warning("[Webhook] 整剧入库：所有 nfo 均未就绪（重试 2 次后放弃）")
                 self._update_or_push_webhook_event(item_id, display_title, "failed",
-                                                   "整剧入库：所有集未找到 nfo（重试 2 次后放弃）")
+                                                   "整剧入库：所有集未找到 nfo（重试 2 次后放弃）",
+                                                   server_id=server_id)
                 self._webhook_failed += 1
                 return
 
@@ -13294,7 +13518,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 f"｜采集 人名 {res['names_count']}/角色 {res['roles_count']}"
                 f"｜当前范围待翻 {_pl} 个"
                 + (f"｜跳过旧集 {_skipped_old} 个（只收新增）" if _skipped_old else "")
-                + (f"｜已有译文 {res.get('translated_existing', 0)} 条" if res.get('translated_existing') else ""))
+                + (f"｜已有译文 {res.get('translated_existing', 0)} 条" if res.get('translated_existing') else ""),
+                server_id=server_id)
             for _ep in pending:
                 try:
                     self._remove_missing_event(series_name=str(_ep.get("SeriesName") or ""),
@@ -13929,14 +14154,18 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             if _now - float(getattr(self, "_purge_scan_ts", 0.0) or 0.0) >= 120.0:
                 self._purge_scan_ts = _now
                 try:
-                    _gh = float(getattr(self, "_nfo_dead_grace_hours", 24) or 24)
+                    _gh = self._nfo_grace_hours()
                     _pid2 = self.__class__.__name__
-                    _expired = db.expired_item_ids(plugin_id=_pid2, grace_hours=_gh)
+                    _expired = db.expired_item_ids(plugin_id=_pid2, grace_hours=_gh) or []
                     if _expired:
-                        db.purge_expired(plugin_id=_pid2, grace_hours=_gh)
-                        _sexp = set(str(x) for x in _expired)
-                        items = [it for it in items if str(it.get("item_id")) not in _sexp]
-                        self._push_log("INFO", f"已清理 {len(_expired)} 个超过宽限期未恢复的条目（判定为真删除）")
+                        _purged2 = int(db.purge_expired(plugin_id=_pid2, grace_hours=_gh) or 0)
+                        if _purged2 < 0:
+                            # v4.7.9（审查 P2-04 / 验收 G）：SQL 失败 → **不隐藏记录**、不报成功
+                            logger.warning("[DB] 洗版宽限期清理失败（数据库错误）—— 本次不隐藏记录，下次重试")
+                        else:
+                            _sexp = set(str(x) for x in _expired)
+                            items = [it for it in items if str(it.get("item_id")) not in _sexp]
+                            self._push_log("INFO", f"已清理 {_purged2} 行记录（{len(_expired)} 个条目超过宽限期未恢复，判定为真删除）")
                 except Exception as _e:
                     logger.warning(f"[DB] 洗版宽限期处理失败: {_e}")
         return items
@@ -14522,7 +14751,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             此时**双写**：nfo 文件 + Emby 服务器元数据（第一排 Person 改名 + 第二排条目级
             `People[].Role`，不看「角色同步」开关），并触发 Emby 刷新。手动「全部写回 / 写入」
             一律为 False，行为与旧版完全一致（不受恢复开关影响）。
-        only_paths（v4.7.8 · 文件级恢复）：只写这些 nfo 文件（库里「集」与「剧」共用 item_id，
+        only_paths（v4.7.9 · 文件级恢复）：只写这些 nfo 文件（库里「集」与「剧」共用 item_id，
             只删某集时不能越界写同剧其它集）；None/空 = 整条目（旧行为）。
         :return: {"success", "message", "data": {...} | "skip": True}
         """
@@ -14545,7 +14774,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             if not people_records:
                 return {"success": False, "message": "库中该条目无人物记录", "data": {"skip": True}}
 
-            # v4.7.8（文件级恢复）：只写「本次真正重新入库」的那些 nfo 文件 ——
+            # v4.7.9（文件级恢复）：只写「本次真正重新入库」的那些 nfo 文件 ——
             # 库里「集」与「剧」共用 item_id，只删某集时绝不越界写同剧其它集。
             if only_paths:
                 _want = {str(_pp or "").strip() for _pp in only_paths if str(_pp or "").strip()}
@@ -14610,16 +14839,39 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                         # 用户选了「仅第一排」→ 明确说明本次不写第二排（不静默）
                         msg += "；Emby 角色：本次未包含第二排（仅写第一排）"
                     elif done and not bool(getattr(self, "_nfo_preview", False)):
-                        _ers = self._emby_sync_item_roles(
-                            item_id=item_id, server_id=server_id,
-                            ctx=("恢复·覆盖 Emby" if _ov else ("自动写回" if auto else "写回")),
-                            force=_ov) or {}
-                        if _ers.get("changed"):
-                            msg += f"；Emby 角色同步 {_ers['changed']} 处"
-                        elif str(_ers.get("status") or "") == "disabled":
-                            msg += "；Emby 角色：未开启（设置页「角色译文同步到 Emby 条目」）"
-                        elif _ers.get("status") not in ("noop", "", None):
-                            msg += f"；Emby 角色未同步（{_ers.get('reason')}）"
+                        if _ov:
+                            # v4.7.9：恢复按「本次真正写回的每个 nfo 文件」各自定位 Emby 条目
+                            # （库里「集」与「剧」共用 item_id，只按 item_id 会把整剧打到同一集）
+                            _ch = _noid = _fail = 0
+                            _tpaths = [str(_p) for _p in (path_groups or {}).keys()] or [""]
+                            for _p in _tpaths:
+                                _e = self._emby_sync_item_roles(
+                                    item_id=item_id, server_id=server_id,
+                                    ctx="恢复·覆盖 Emby", force=True, nfo_path=_p) or {}
+                                _ers = _e or _ers
+                                _stt = str(_e.get("status") or "")
+                                if _e.get("changed"):
+                                    _ch += int(_e.get("changed") or 0)
+                                elif _stt == "no_item_id":
+                                    _noid += 1
+                                elif _stt not in ("noop", "no_people", "", None):
+                                    _fail += 1
+                            if _ch:
+                                msg += f"；Emby 角色同步 {_ch} 处"
+                            elif _noid:
+                                msg += f"；Emby 角色：{_noid} 个未取到 Emby itemId"
+                            elif _fail:
+                                msg += f"；Emby 角色未同步（{_fail} 个条目失败）"
+                        else:
+                            _ers = self._emby_sync_item_roles(
+                                item_id=item_id, server_id=server_id,
+                                ctx=("自动写回" if auto else "写回"), force=False) or {}
+                            if _ers.get("changed"):
+                                msg += f"；Emby 角色同步 {_ers['changed']} 处"
+                            elif str(_ers.get("status") or "") == "disabled":
+                                msg += "；Emby 角色：未开启（设置页「角色译文同步到 Emby 条目」）"
+                            elif _ers.get("status") not in ("noop", "", None):
+                                msg += f"；Emby 角色未同步（{_ers.get('reason')}）"
                 except Exception as _re:
                     logger.debug(f"[EmbyRole] 写回后角色同步失败（非致命）: {_re}")
                 if _ov and done and not bool(getattr(self, "_nfo_preview", False)):
@@ -14649,8 +14901,14 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                     except Exception as _pe:
                         logger.debug(f"[Restore] 第一排 Emby 人名同步失败（非致命）: {_pe}")
                     try:
-                        _rf = self._emby_refresh_item(item_id, server_id, ctx="恢复") or {}
-                        if _rf.get("ok"):
+                        # v4.7.9：每个恢复的 nfo 各自触发自己的 Emby 条目刷新
+                        _rf_ok = 0
+                        for _p in ([str(_p) for _p in (path_groups or {}).keys()] or [""]):
+                            _rr = self._emby_refresh_item(item_id, server_id, ctx="恢复", nfo_path=_p) or {}
+                            _rf = _rr or _rf
+                            if _rr.get("ok"):
+                                _rf_ok += 1
+                        if _rf_ok:
                             msg += "；已触发 Emby 刷新"
                     except Exception as _rfe:
                         logger.debug(f"[Restore] 触发 Emby 刷新失败（非致命）: {_rfe}")
@@ -14663,7 +14921,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 _recs_wp = [r for r in (people_records or []) if str(r.get("nfo_path") or "").strip()]
                 _rest = ""
                 try:
-                    _gh = float(getattr(self, "_nfo_dead_grace_hours", 24) or 24)
+                    _gh = self._nfo_grace_hours()
                     _ts = []
                     for _r in _recs_wp:
                         _d = str(_r.get("deleted_at") or "").strip()
@@ -15466,29 +15724,37 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                         "[Emby] legacy/no-server-id 记录：按第一台 Emby 兼容同步（多服务器环境下建议补齐 server_id）")
         return next(iter(_clients.values())), ""
 
-    def _emby_role_item_id(self, cli, *, server_id: str, item_id: str) -> str:
+    def _emby_role_item_id(self, cli, *, server_id: str, item_id: str, nfo_path: str = "") -> str:
         """条目在 Emby 侧的 itemId（角色同步用，v4.6.114 · issue #5）—— 带进程级缓存。
 
-        优先库中 `emby_item_id`；为空（纯 NFO 扫描入库的条目该列不写）才按
-        `media_provider + media_id` 反查 Emby。反查失败 → 返回 ""（调用方按「无法同步」处理）。
-        「全部写回」几百条目时每条目反查一次太贵，故按 (server_id, item_id) 缓存；
+        v4.7.9：优先按**文件级**定位（`nfo_path`）—— 库里「集」与「剧」共用 `item_id`，
+        只按 item_id 取 `item_identity` 会永远命中同剧的同一集（恢复会把 E02 刷到 E01 上）。
+        文件级拿不到才退回 `item_identity`；`emby_item_id` 为空（纯 NFO 扫描入库该列不写）
+        再按 `media_provider + media_id` 反查 Emby。反查失败 → ""（调用方按「无法同步」处理）。
+        「全部写回」几百条目时每条目反查一次太贵，故按 (server_id, item_id, nfo_path) 缓存；
         配置变化 / 清空缓存时由 `_load_config` 清掉。
         """
         _cache = self.__dict__.get("_emby_role_id_cache")
         if not isinstance(_cache, dict):
             _cache = {}
             self.__dict__["_emby_role_id_cache"] = _cache
-        _key = (str(server_id or ""), str(item_id or ""))
+        _np = str(nfo_path or "").strip()
+        _key = (str(server_id or ""), str(item_id or ""), _np)
         if _key in _cache:
             return str(_cache[_key] or "")
         _out = ""
         try:
             _db = getattr(self, "_people_db", None)
             _ident = None
-            if _db is not None:
+            if _db is not None and _np:
+                # 文件级：这一集自己的 Emby itemId（入库时按 webhook ItemId 落库）
+                _out = str(_db.emby_item_id_by_nfo_path(
+                    plugin_id=self.__class__.__name__, nfo_path=_np,
+                    server_id=server_id) or "").strip()
+            if not _out and _db is not None:
                 _ident = _db.item_identity(plugin_id=self.__class__.__name__,
                                            item_id=item_id, server_id=server_id)
-            if _ident:
+            if not _out and _ident:
                 _out = str(_ident.get("emby_item_id") or "").strip()
                 if not _out and cli is not None:
                     _prov = str(_ident.get("media_provider") or "").strip().lower()
@@ -15506,7 +15772,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         return _out
 
     def _emby_sync_item_roles(self, *, item_id: str, server_id: str = "", ctx: str = "",
-                              force: bool = False) -> dict:
+                              force: bool = False, nfo_path: str = "") -> dict:
         """把该条目**第二排角色译文**写入 Emby 条目级 `People[].Role`（v4.6.114 · issue #5）。
 
         为什么需要：第一排走 Person 实体改名（服务器级），Emby 之后写 nfo 的 `<name>`
@@ -15539,7 +15805,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             if _cli is None:
                 return {"ok": False, "changed": 0, "status": "no_client",
                         "reason": _cerr or "Emby 未配置或不可用"}
-            _eid = self._emby_role_item_id(_cli, server_id=server_id, item_id=item_id)
+            _eid = self._emby_role_item_id(_cli, server_id=server_id, item_id=item_id, nfo_path=nfo_path)
             if not _eid:
                 return {"ok": False, "changed": 0, "status": "no_item_id",
                         "reason": "未取到 Emby itemId（库中 emby_item_id 为空且按媒体 ID 反查失败）"}
@@ -15557,15 +15823,17 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             logger.debug(f"[EmbyRole] 角色同步异常（非致命）: {e}")
             return {"ok": False, "changed": 0, "status": "exception", "reason": str(e)}
 
-    def _emby_refresh_item(self, item_id: str, server_id: str = "", ctx: str = "") -> dict:
+    def _emby_refresh_item(self, item_id: str, server_id: str = "", ctx: str = "",
+                           nfo_path: str = "") -> dict:
         """恢复模式下，覆盖 Emby 元数据后触发一次 Emby 刷新（v4.7.4）——
         宿主 Emby 开着「把元数据写入 NFO」时，它以自己库里的元数据为准重写 nfo；
-        不触发刷新，nfo 会停留在旧的原文。失败不致命（只回报状态）。"""
+        不触发刷新，nfo 会停留在旧的原文。失败不致命（只回报状态）。
+        v4.7.9：可按 `nfo_path` 定位到**本次恢复的那一集**（集与剧共用 item_id）。"""
         try:
             _cli, _cerr = self._emby_client_for_server(server_id)
             if _cli is None:
                 return {"ok": False, "status": "no_client", "reason": _cerr or "Emby 未配置或不可用"}
-            _eid = self._emby_role_item_id(_cli, server_id=server_id, item_id=item_id)
+            _eid = self._emby_role_item_id(_cli, server_id=server_id, item_id=item_id, nfo_path=nfo_path)
             if not _eid:
                 return {"ok": False, "status": "no_item_id", "reason": "未取到 Emby itemId"}
             _ok = bool(_cli.refresh_item(_eid))

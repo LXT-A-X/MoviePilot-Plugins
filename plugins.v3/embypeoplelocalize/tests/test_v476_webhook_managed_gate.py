@@ -105,6 +105,8 @@ def _mk_plugin_cls(extra_methods):
     }
     methods = ["_handle_webhook_delete", "_push_webhook_event",
                "_cleanup_dirty_webhook_events",
+               # v4.7.9（审查 P2-01）：观察期解析改走 `_nfo_grace_hours()`（尊重显式 0）
+               "_nfo_grace_hours",
                # v4.6.98：删除处理现在会先做「唯一服务器归属」判定与容器差集比对
                "_resolve_unique_server_id", "_reconcile_missing_episodes",
                # v4.6.99：服务器身份改为「白名单校验」——需要 _configured_server_keys
@@ -352,8 +354,12 @@ for _api in ["_api_name_map_update", "_api_name_map_delete", "_api_pool_translat
              "_api_pool_sync", "_api_pool_sync_one"]:
     _b = _grab(_api)
     check("_task_busy_msg()" in _b, f"{_api} 已接入统一任务忙碌门禁")
-check("_task_state().get(\"data_mutation_locked\")" in _grab("_task_busy_msg"),
+_bs = _grab("_task_busy_msg")
+check("self._task_state()" in _bs and 'data_mutation_locked' in _bs,
       "忙碌口径扩为统一数据变更锁（扫描/翻译/写回/池/探测任一在跑即拒绝）")
+# v4.7.9（审查 P1-07）：状态读取异常 → fail-closed（不再吞成「不忙」）
+check("_busy = True" in _bs and "任务状态读取异常" in _bs,
+      "状态查询异常 → 按忙碌拦截（fail-closed，P1-07）")
 
 # ─────────────────────────────────────────────
 print("\n[T10] Job Snapshot：运行中改设置不影响当前任务（规范 §十二/§十三）")
