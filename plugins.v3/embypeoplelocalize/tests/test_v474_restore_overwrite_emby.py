@@ -17,6 +17,7 @@
   T7 选项 A：入库只认 recovered 才自动恢复；恢复与「自动写回」开关解耦（v4.7.7）
   T8 v4.7.6：状态 / 文案用「自动写回」用户设置本身（`_wb_auto_setting`），不再被恢复开关顶成 true
   T9 v4.7.7：恢复改走队列标记 reason='restore'（真 SQLite：粘性 / 不受指纹幂等约束 / 清回）
+  T10 v4.7.8：文件级恢复（只写本次回来的文件）+ 接收通知区分 📥 新入库 / 🔁 恢复入库
 """
 import sys
 import os
@@ -123,7 +124,8 @@ check('if not force and not bool(getattr(self, "_emby_role_sync", constants.DEFA
 # ─────────────────────────────────────────────
 print("\n[T3] _restore_item_to_nfo：restore 参数 → 双写")
 # ─────────────────────────────────────────────
-check('scope: str = "both", restore: bool = False) -> dict:' in _SRC, "签名新增 restore 参数")
+check('scope: str = "both", restore: bool = False,' in _SRC
+      and "only_paths: Optional[set] = None) -> dict:" in _SRC, "签名新增 restore / only_paths 参数")
 _rb = _grab_method(_SRC, "_restore_item_to_nfo")
 check("_ov = bool(restore)" in _rb, "恢复标记取自 restore 参数（不再直接读全局开关）")
 check('if _sc not in ("role", "both") and not _ov:' in _rb, "恢复模式不因「仅第一排」跳过第二排")
@@ -140,7 +142,7 @@ check('_is_restore = str(rec.get("reason") or "") == "restore"' in _SRC,
       "按行判定是否恢复登记（v4.7.7 解耦，不再看全局恢复开关）")
 check('if not chk.get("ready") and not _is_restore:' in _SRC,
       "待翻词条在恢复登记不阻塞写回（普通候选仍阻塞）")
-check("item_id, server_id, auto=True, restore=_is_restore)" in _SRC,
+check("item_id, server_id, auto=True, restore=_is_restore, only_paths=_only_paths)" in _SRC,
       "常驻写回 worker 按行传 restore（恢复登记才 True）")
 
 # ─────────────────────────────────────────────
@@ -184,8 +186,9 @@ print("\n[T7] 选项 A：只认「恢复」，且优先于「自动写回」开�
 _ing = _grab_method(_SRC, "_ingest_nfo_pending")
 check('if recovered and bool(getattr(self, "_overwrite_emby", False)):' in _ing,
       "只在 recovered（删除→观察期→恢复）时自动登记，普通入库不受影响")
-check("self._wb_register_item(_riid, _rsid, target_scope=\"both\", reason=\"restore\")" in _ing,
-      "恢复即登记写回（自动，reason='restore'）")
+check("self._wb_register_item(_riid, _rsid, target_scope=\"both\"," in _ing
+      and 'reason="restore", nfo_path=nfo_path' in _ing,
+      "恢复即登记写回（自动，reason='restore' + 本次回来的 nfo 路径）")
 check("[Restore] 入库即登记恢复" in _ing, "有 INFO 自证")
 
 _wbe = _grab_method(_SRC, "_wb_writeback_enabled")
@@ -260,22 +263,23 @@ check(_nsA["_wb_auto_setting"](_A1()) is True and _nsA["_wb_auto_setting"](_A2()
 print("\n[T9] v4.7.7 解耦：恢复改走队列标记 reason='restore'（不借自动写回门）")
 # ─────────────────────────────────────────────
 check("def _wb_register_item(self, item_id: str, server_id: str = \"\", target_scope: str = \"\",\n"
-      "                          reason: str = \"\") -> str:" in _SRC,
-      "_wb_register_item 新增 reason 参数")
+      "                          reason: str = \"\", nfo_path: str = \"\") -> str:" in _SRC,
+      "_wb_register_item 新增 reason / nfo_path 参数（v4.7.8）")
 _wpr = _grab_method(_SRC, "_writeback_pending_round")
 check('if not self._wb_writeback_enabled() and str(rec.get("reason") or "") != "restore":' in _wpr,
       "本轮：自动写回关时普通候选跳过、恢复候选照常处理")
 check("has_pending_restore(plugin_id=_pid)" in _SRC, "worker 用 has_pending_restore 决定是否进入本轮")
-check("wdb.clear_reason(plugin_id=pi_d, server_id=server_id, item_id=item_id)" in _SRC,
-      "恢复写回成功后清回 reason（防后续普通写回被误当恢复）")
+check("wdb.clear_restore(plugin_id=pi_d, server_id=server_id, item_id=item_id)" in _SRC,
+      "恢复写回成功后清回恢复登记（防后续普通写回被误当恢复）")
 
 # 真 SQLite 行为：reason 粘性 + restore 不受指纹幂等约束 + has_pending_restore + clear_reason
 import importlib.util as _ilu
 _spec = _ilu.spec_from_file_location("epl_db_v477", str(PLUGIN_DIR / "db.py"))
 _db = _ilu.module_from_spec(_spec)
 _spec.loader.exec_module(_db)
-check(_db.SCHEMA_VERSION >= 15, f"SCHEMA_VERSION 升到 15+（实际 {_db.SCHEMA_VERSION}）")
+check(_db.SCHEMA_VERSION >= 16, f"SCHEMA_VERSION 升到 16+（实际 {_db.SCHEMA_VERSION}）")
 check(any(c[0] == "reason" for c in _db._WRITEBACK_V15_COLUMNS), "迁移补列含 reason")
+check(any(c[0] == "restore_paths" for c in _db._WRITEBACK_V16_COLUMNS), "迁移补列含 restore_paths")
 _db.PeopleDb.ensure_table()   # 建表 + 跑版本化迁移（writeback_state 唯一索引由 migrate 创建）
 _wdb = _db.WritebackDb()
 _wdb.ensure_table()
@@ -287,21 +291,114 @@ _wdb.set_status(plugin_id=_PID, server_id="s1", item_id="i1", status="done", fil
 _r_plain = _wdb.register(plugin_id=_PID, server_id="s1", item_id="i1", file_sig="sigX", target_scope="both")
 check(_r_plain == "skip", "普通登记：done 且指纹一致 → skip（幂等不变）")
 _r_restore = _wdb.register(plugin_id=_PID, server_id="s1", item_id="i1", file_sig="sigX",
-                           target_scope="both", reason="restore")
+                           target_scope="both", reason="restore", restore_path="/v/S01E01.nfo")
 check(_r_restore == "pending", "恢复登记：done 且指纹一致也重新置 pending（必须重写）")
 _rec = _wdb.get(plugin_id=_PID, server_id="s1", item_id="i1") or {}
 check(str(_rec.get("reason") or "") == "restore", "行上记下 reason='restore'")
+check(str(_rec.get("restore_paths") or "") == "/v/S01E01.nfo", "行上记下本次恢复路径")
 check(_wdb.has_pending_restore(plugin_id=_PID) is True, "has_pending_restore → True")
-# 粘性：随后普通登记不清掉 restore
+# v4.7.8：多集恢复（整季洗版）按条目累加合并；重复同一条不重复追加
+_wdb.register(plugin_id=_PID, server_id="s1", item_id="i1", file_sig="sigX",
+              target_scope="both", reason="restore", restore_path="/v/S01E02.nfo")
+_wdb.register(plugin_id=_PID, server_id="s1", item_id="i1", file_sig="sigX",
+              target_scope="both", reason="restore", restore_path="/v/S01E02.nfo")   # 重复
+_rec = _wdb.get(plugin_id=_PID, server_id="s1", item_id="i1") or {}
+_pths = [p for p in str(_rec.get("restore_paths") or "").splitlines() if p]
+check(_pths == ["/v/S01E01.nfo", "/v/S01E02.nfo"], f"多集恢复累加合并且去重（实际 {_pths}）")
+# 粘性：随后普通登记不清掉 restore / restore_paths
 _wdb.register(plugin_id=_PID, server_id="s1", item_id="i1", file_sig="sigX", target_scope="role")
 _rec = _wdb.get(plugin_id=_PID, server_id="s1", item_id="i1") or {}
 check(str(_rec.get("reason") or "") == "restore", "普通登记不覆盖已存在的 restore（粘性）")
+check(str(_rec.get("restore_paths") or "") != "", "普通登记不清空 restore_paths")
 # 处理成功后清回
-_wdb.clear_reason(plugin_id=_PID, server_id="s1", item_id="i1")
+_wdb.clear_restore(plugin_id=_PID, server_id="s1", item_id="i1")
 _rec = _wdb.get(plugin_id=_PID, server_id="s1", item_id="i1") or {}
-check(str(_rec.get("reason") or "") == "", "clear_reason 清回 ''（后续普通写回不再被误当恢复）")
+check(str(_rec.get("reason") or "") == "" and str(_rec.get("restore_paths") or "") == "",
+      "clear_restore 清回 reason + restore_paths（普通写回不再被误当恢复）")
 check(_wdb.has_pending_restore(plugin_id=_PID) is False, "清理后 has_pending_restore → False")
 _wdb.clear_all(plugin_id=_PID)
+
+# ─────────────────────────────────────────────
+print("\n[T10] v4.7.8 文件级恢复（只写本次回来的文件）+ 接收通知区分恢复")
+# ─────────────────────────────────────────────
+check('scope: str = "both", restore: bool = False,\n'
+      '                             only_paths: Optional[set] = None) -> dict:' in _SRC,
+      "_restore_item_to_nfo 新增 only_paths（文件级恢复）")
+_rif = _grab_method(_SRC, "_restore_item_to_nfo")
+check('in _want' in _rif and 'if str(r.get("nfo_path") or "").strip()' in _rif,
+      "按 only_paths 过滤人物记录")
+check("only_paths=_only_paths)" in _SRC, "worker 恢复时传入本次回来的路径集合")
+check('_rp = [p.strip() for p in str(rec.get("restore_paths") or "").splitlines() if p.strip()]' in _SRC,
+      "worker 从 restore_paths 解析路径集合")
+
+# 行为：只写本次回来的那一个文件（同剧其它集不越界）
+_nsR2 = {"os": os, "time": __import__("time"), "logger": logger,
+         "Optional": __import__("typing").Optional, "traceback": __import__("traceback")}
+exec(_rif, _nsR2)
+_D = Path(tempfile.mkdtemp(prefix="epl478_"))
+_p1 = _D / "S01E01.nfo"
+_p2 = _D / "S01E02.nfo"
+_p3 = _D / "S01E03.nfo"
+for _p in (_p1, _p2, _p3):
+    _p.write_text("<movie/>", encoding="utf-8")
+
+
+class _Pdb:
+    def item_meta(self, **k):
+        return {"title": "T"}
+
+    def people_of_item(self, **k):
+        return [{"nfo_path": str(_p1), "name_before": "a", "name_after": "甲"},
+                {"nfo_path": str(_p2), "name_before": "b", "name_after": "乙"},
+                {"nfo_path": str(_p3), "name_before": "c", "name_after": "丙"}]
+
+
+class _Rob:
+    _restore_item_to_nfo = _nsR2["_restore_item_to_nfo"]
+    _nfo_preview = False
+    _people_db = _Pdb()
+
+    def __init__(self):
+        self.written = []
+
+    def _norm_writeback_scope(self, s):
+        _s = str(s or "both").strip().lower()
+        return _s if _s in ("person", "role", "both") else "both"
+
+    def _write_nfo_once(self, item_id, server_id, path, people_records=None, auto=False, scope="both"):
+        self.written.append(path)
+        return {"success": True, "data": {"changed": 1}}
+
+    def _emby_sync_item_roles(self, **k):
+        return {}
+
+
+_o1 = _Rob()
+_r1 = _o1._restore_item_to_nfo("296101", "s1", only_paths={str(_p1)})
+check(_o1.written == [str(_p1)],
+      f"只写本次回来的文件（实际 {[os.path.basename(x) for x in _o1.written]}）")
+check(_r1.get("success") is True and str(_p2) not in _o1.written and str(_p3) not in _o1.written,
+      "同剧其它集不被写入（只删 E01 就只恢复 E01）")
+_o2 = _Rob()
+_o2._restore_item_to_nfo("296101", "s1")   # 不传 only_paths → 整条目（旧行为）
+check(len(_o2.written) == 3, "不传 only_paths → 整条目写（旧行为，兼容）")
+_o3 = _Rob()
+_r3 = _o3._restore_item_to_nfo("296101", "s1", only_paths={"/nonexistent.nfo"})
+check(_o3.written == [] and _r3.get("success") is False, "目标文件库里已无记录 → 跳过不写")
+
+# ② 接收通知：区分 📥 新入库 / 🔁 恢复入库（查我们库）
+check("def _webhook_recovery_ingress(self, brief: dict, server_id: str = \"\") -> bool:" in _SRC,
+      "新增 _webhook_recovery_ingress（收到事件时查我们库的观察期记录）")
+check("deleted_weak_candidates(" in _grab_method(_SRC, "_webhook_recovery_ingress"),
+      "恢复判定走我们库的观察期候选")
+check('_brief["recovered_ingress"] = self._webhook_recovery_ingress(_brief, server_id)' in _SRC,
+      "入库事件带上恢复标记")
+check('"recovered_ingress": bool(brief.get("recovered_ingress"))' in _SRC, "接收队列透传标记")
+_flush = _grab_method(_SRC, "_flush_received_notification")
+check('_head = "🔁 恢复入库"' in _flush, "命中的批次报「🔁 恢复入库」")
+check("📥 收到 {total} 条入库事件" in _flush, "未命中仍报「📥 收到 N 条入库事件」")
+check("_all_recov" in _flush, "按批次是否全为恢复分流（📥 vs 🔁）")
+check("本次仅入库" in _flush, "恢复开关关时如实说明「仅入库」")
 
 print("\n" + "=" * 72)
 if _N[1] == 0:

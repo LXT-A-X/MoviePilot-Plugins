@@ -478,8 +478,8 @@ check('<span v-else>无待翻译</span>' in _lv
 # ─────────────────────────────────────────────
 print("\n[T9] 写回范围（哪一排）：单条写入 / 全部写回 都能选，默认两排")
 # ─────────────────────────────────────────────
-check("def _restore_item_to_nfo(self, item_id: str, server_id: str = \"\", auto: bool = False,\n                             scope: str = \"both\", restore: bool = False)" in _SRC,
-      "_restore_item_to_nfo 新增 scope 参数（默认 both）+ v4.7.5 restore 恢复标记")
+check("def _restore_item_to_nfo(self, item_id: str, server_id: str = \"\", auto: bool = False,\n                             scope: str = \"both\", restore: bool = False,\n                             only_paths: Optional[set] = None)" in _SRC,
+      "_restore_item_to_nfo 新增 scope / restore / only_paths 参数（默认 both / 整条目）")
 check("def _write_nfo_once(self, item_id: str, server_id: str, nfo_path: str,\n                        people_records: Optional[list] = None, auto: bool = False,\n                        scope: str = \"both\")" in _SRC,
       "_write_nfo_once 透传 scope")
 check("auto=auto, scope=scope)" in _SRC, "落盘入口把 scope 一路传下去")

@@ -177,6 +177,10 @@ CREATE TABLE IF NOT EXISTS writeback_state (
     -- 恢复登记不依赖「自动写回」开关：常驻 worker 见到 reason='restore' 一律处理（双写 + 刷新），
     -- 处理成功后清回 ''（避免后续普通写回被误当成恢复）。
     reason TEXT DEFAULT '',
+    -- v4.7.8：恢复要写的**具体 nfo 文件**（换行分隔；可多条）——
+    -- 库里「集」与「剧」共用 item_id，恢复登记也按 item_id 建行；把本次真正回来的文件攒成
+    -- 一串，整季洗版时每集都写到，而只删了某集时绝不越界写同剧其它集。写成功后清空。
+    restore_paths TEXT DEFAULT '',
     updated_at TEXT DEFAULT ''
 );
 -- (plugin_id, server_id, item_id) 的唯一索引不能放在这里 —— _SCHEMA 每次连接
@@ -256,7 +260,7 @@ CREATE TABLE IF NOT EXISTS translate_job_batches (
 CREATE INDEX IF NOT EXISTS idx_tjob_batches ON translate_job_batches (plugin_id, job_id, batch_id);
 """
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 # 「词条 × 条目」明细对上限（v4.6.61 唯一快照用）—— 防超大库下一次拉取过多行；
 # 触顶时快照按已取部分统计（日志 debug 提示），日常规模远小于该值。
@@ -301,6 +305,12 @@ _WRITEBACK_V6_COLUMNS = (
 # 不受「自动写回」开关约束；普通登记为空串（旧库默认空，行为不变）。
 _WRITEBACK_V15_COLUMNS = (
     ("reason", "TEXT DEFAULT ''"),
+)
+
+# v4.7.8（文件级恢复）：writeback_state 补 restore_paths 列 —— 恢复要写的具体 nfo 文件
+# （换行分隔，可多条）。旧库默认空 → 恢复退回「整条目」写（4.7.7 行为，兼容）。
+_WRITEBACK_V16_COLUMNS = (
+    ("restore_paths", "TEXT DEFAULT ''"),
 )
 
 
@@ -795,6 +805,11 @@ def migrate() -> int:
             # 「恢复」登记（reason='restore'）不再依赖「自动写回」开关。
             # 旧库无损：新列默认空串，历史候选一律按普通写回处理。
             _ensure_columns("writeback_state", _WRITEBACK_V15_COLUMNS)
+        if cur_v < 16:
+            # v4.7.8（文件级恢复）：writeback_state 补 restore_paths 列 ——
+            # 恢复只写「本次真正重新入库的那个 nfo 文件」（整季洗版时攒成一串一起写）。
+            # 旧库无损：新列默认空 → 恢复退回整条目写（4.7.7 行为）。
+            _ensure_columns("writeback_state", _WRITEBACK_V16_COLUMNS)
     except Exception as e:
         logger.error(f"[DB] 迁移 v{cur_v} → v{SCHEMA_VERSION} 失败（版本号未更新，下次启动重试）: {e}")
         return cur_v
@@ -4706,7 +4721,7 @@ class WritebackDb:
 
     def register(self, *, plugin_id: str, server_id: str, item_id: str, nfo_path: str = "",
                  file_sig: str = "", target_scope: str = "", reason: str = "",
-                 db: Optional[Any] = None) -> str:
+                 restore_path: str = "", db: Optional[Any] = None) -> str:
         """登记条目为「待写回」候选（翻译 worker 每轮有新译文时调用）。
         幂等纪律（文档 §15）：
           - writing → 不动（同一个条目只能有一个写回任务）；
@@ -4716,7 +4731,9 @@ class WritebackDb:
         重复登记时按并集合并（写回就绪判定按该范围，不读瞬时状态）。
         reason（v4.7.7）：'' = 自动写回；'restore' = 恢复（删除→观察期→恢复）。
           reason='restore' **不受**指纹幂等约束（恢复必须重新写）、且为**粘性**（普通登记不覆盖它，
-          处理成功后才由 clear_reason 清回 ''）—— 常驻 worker 见到 reason='restore' 一律处理。
+          处理成功后才由 clear_restore 清回 ''）—— 常驻 worker 见到 reason='restore' 一律处理。
+        restore_path（v4.7.8）：恢复要写的具体 nfo 文件（换行分隔可多条）—— 只写本次真正回来的文件；
+          多次恢复登记按条目**累加合并**（整季洗版每集都写，只删某集则不越界），写成功后由 clear_restore 清空。
         改为单条原子 upsert（INSERT ... ON CONFLICT ... DO UPDATE）——
         依赖 (plugin_id, server_id, item_id) 唯一索引，杜绝并发登记产生的重复 pending 行；
         幂等纪律由 DO UPDATE 的 WHERE 承担（不满足即不更新 → skip），不再「先 SELECT 再决定」。
@@ -4726,10 +4743,11 @@ class WritebackDb:
         _fp = str(file_sig or "")
         _ts = _merge_scope("", target_scope)
         _rsn = "restore" if str(reason or "").strip().lower() == "restore" else ""
+        _rpath = str(restore_path or "").strip()
         try:
             n = _x("INSERT INTO writeback_state (plugin_id, server_id, item_id, nfo_path, status, "
-                   "error, file_sig, attempts, target_scope, reason, updated_at) "
-                   "VALUES (?,?,?,?,?,?,?,?,?,?,?) "
+                   "error, file_sig, attempts, target_scope, reason, restore_paths, updated_at) "
+                   "VALUES (?,?,?,?,?,?,?,?,?,?,?,?) "
                    "ON CONFLICT(plugin_id, server_id, item_id) DO UPDATE SET "
                    "status='pending', error='', file_sig=excluded.file_sig, attempts=0, "
                    # 任务范围并集合并（与 _merge_scope 同语义：空取另一、相同取自身、不同取 both）
@@ -4741,6 +4759,13 @@ class WritebackDb:
                    # reason 粘性：普通登记（''）不覆盖已存在的 'restore'
                    "reason=CASE WHEN excluded.reason<>'' THEN excluded.reason "
                    "ELSE writeback_state.reason END, "
+                   # restore_paths 累加合并（换行分隔、去重；普通登记 '' 不动它）
+                   "restore_paths=CASE "
+                   "WHEN excluded.restore_paths='' THEN writeback_state.restore_paths "
+                   "WHEN writeback_state.restore_paths='' THEN excluded.restore_paths "
+                   "WHEN instr(char(10)||writeback_state.restore_paths||char(10), "
+                   "char(10)||excluded.restore_paths||char(10))>0 THEN writeback_state.restore_paths "
+                   "ELSE writeback_state.restore_paths || char(10) || excluded.restore_paths END, "
                    "nfo_path=CASE WHEN excluded.nfo_path<>'' THEN excluded.nfo_path "
                    "ELSE writeback_state.nfo_path END, "
                    "updated_at=excluded.updated_at "
@@ -4749,7 +4774,8 @@ class WritebackDb:
                    "WHERE writeback_state.status<>'writing' "
                    "AND (excluded.reason='restore' OR NOT (writeback_state.status IN ('done','failed','missing') "
                    "AND excluded.file_sig<>'' AND writeback_state.file_sig=excluded.file_sig))",
-                   (plugin_id, server_id, item_id, str(nfo_path or ""), "pending", "", _fp, 0, _ts, _rsn, now))
+                   (plugin_id, server_id, item_id, str(nfo_path or ""), "pending", "", _fp, 0, _ts,
+                    _rsn, _rpath, now))
             return "pending" if n > 0 else "skip"
         except Exception as e:
             logger.warning(f"[Writeback] register 失败: {e}")
@@ -4765,11 +4791,13 @@ class WritebackDb:
         except Exception:
             return False
 
-    def clear_reason(self, *, plugin_id: str, server_id: str, item_id: str,
-                     db: Optional[Any] = None) -> int:
-        """清除条目的写回原因（恢复写回成功后调用）—— 否则该条目后续的普通写回会被误当成恢复。"""
+    def clear_restore(self, *, plugin_id: str, server_id: str, item_id: str,
+                      db: Optional[Any] = None) -> int:
+        """清除条目的恢复登记（reason + 待恢复路径）—— 恢复写回成功后调用。
+        否则该条目后续的普通写回会被误当成恢复（强写 Emby + 刷新）。"""
         try:
-            return _x("UPDATE writeback_state SET reason='' WHERE plugin_id=? AND server_id=? AND item_id=?",
+            return _x("UPDATE writeback_state SET reason='', restore_paths='' "
+                      "WHERE plugin_id=? AND server_id=? AND item_id=?",
                       (plugin_id, server_id, item_id))
         except Exception:
             return 0

@@ -154,7 +154,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
     plugin_name = "Emby 演职人员中文化"
     plugin_desc = "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回；拉取人名时可用 TMDB 刮削补中文名/简介/头像"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/embypeoplelocalize.png"
-    plugin_version = "4.7.7"
+    plugin_version = "4.7.8"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "embypeoplelocalize_"
@@ -5103,12 +5103,13 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             return ""
 
     def _wb_register_item(self, item_id: str, server_id: str = "", target_scope: str = "",
-                          reason: str = "") -> str:
+                          reason: str = "", nfo_path: str = "") -> str:
         """把「有新译文的条目」登记为写回候选（翻译 worker 每轮调用，文档 §3.4）。
         指纹只在需要做幂等比较时计算（状态 done/failed/missing）—— 省掉常规路径的文件 stat 开销。
         target_scope 随登记落库（person/role/both）—— 就绪判定按候选记录的任务范围，
         不再依赖瞬时 _tx_target_scope（防「只翻第二排」任务结束后第一排 pending 重新阻塞写回）。
-        reason（v4.7.7）：'' = 自动写回；'restore' = 恢复登记（不受「自动写回」开关约束）。"""
+        reason（v4.7.7）：'' = 自动写回；'restore' = 恢复登记（不受「自动写回」开关约束）。
+        nfo_path（v4.7.8 · 仅恢复用）：本次真正重新入库的 nfo 文件 —— 恢复只写它（多集累加合并）。"""
         _item = str(item_id or "").strip()
         if not _item:
             return "skip"
@@ -5123,7 +5124,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 _fp = self._wb_item_fp(_item, server_id)
             _r = wdb.register(plugin_id=self.__class__.__name__, server_id=str(server_id or ""),
                               item_id=_item, file_sig=_fp, target_scope=str(target_scope or ""),
-                              reason=str(reason or ""))
+                              reason=str(reason or ""),
+                              restore_path=(str(nfo_path or "") if reason == "restore" else ""))
             if _r in ("new", "pending"):
                 self._wb_wake()
             return _r
@@ -5232,6 +5234,12 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         # v4.7.7（解耦）：恢复（reason='restore'）按行判定并**忽略**该阻塞 —— 库里有多少写多少，
         # Emby 重刮带进来的新词条没翻完也不卡住已有译文的恢复；普通候选仍受「自动写回」门控。
         _is_restore = str(rec.get("reason") or "") == "restore"
+        # v4.7.8（文件级恢复）：只写本次真正重新入库的 nfo 文件（无记录则退回整条目，兼容旧行）
+        _only_paths = None
+        if _is_restore:
+            _rp = [p.strip() for p in str(rec.get("restore_paths") or "").splitlines() if p.strip()]
+            if _rp:
+                _only_paths = set(_rp)
         chk = self.translation_pending_for_item(item_id=item_id, server_id=server_id,
                                                 scope=str(rec.get("target_scope") or ""))
         if not chk.get("ready") and not _is_restore:
@@ -5242,7 +5250,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                        error="", bump_attempt=True)
         try:
             r = self._restore_item_to_nfo(
-                item_id, server_id, auto=True, restore=_is_restore)
+                item_id, server_id, auto=True, restore=_is_restore, only_paths=_only_paths)
         except Exception as e:
             r = {"success": False, "message": str(e)}
         d = r.get("data") or {}
@@ -5255,9 +5263,9 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                            status="done", error="", changed_count=int(d.get("changed") or 0),
                            file_sig=_fp)
             if _is_restore:
-                # v4.7.7：恢复写回成功 → 清回 reason，避免该条目后续普通写回被误当成恢复
+                # v4.7.7：恢复写回成功 → 清回恢复登记，避免该条目后续普通写回被误当成恢复
                 try:
-                    wdb.clear_reason(plugin_id=pi_d, server_id=server_id, item_id=item_id)
+                    wdb.clear_restore(plugin_id=pi_d, server_id=server_id, item_id=item_id)
                 except Exception:
                     pass
             return {"written": 1, "changed": int(d.get("changed") or 0),
@@ -6948,10 +6956,11 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                         except Exception:
                             _rsid = ""
                 if _riid:
-                    _rr = self._wb_register_item(_riid, _rsid, target_scope="both", reason="restore")
+                    _rr = self._wb_register_item(_riid, _rsid, target_scope="both",
+                                                 reason="restore", nfo_path=nfo_path)
                     if _rr in ("new", "pending"):
                         logger.info(f"[Restore] 入库即登记恢复：{os.path.basename(nfo_path)} "
-                                    f"(item={_riid}) → 将按「以库为准」覆盖 Emby 两排 + 刷新")
+                                    f"(item={_riid}) → 将按「以库为准」覆盖该文件 + Emby 两排 + 刷新")
             except Exception as _re:
                 logger.debug(f"[Restore] 入库后自动登记恢复失败（非致命）: {_re}")
         # 唤醒常驻翻译 worker 消费 pending（翻译完成 → 写回 worker 自动落盘）
@@ -10069,6 +10078,13 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             execute_at = now + delay
             schedule_key = f"{server_id}:{item_id}" if server_id else item_id
             _brief = self._webhook_item_brief(raw_data)
+            # v4.7.8：收到事件时就查我们库 —— 若命中观察期记录，这条是「恢复入库」，
+            # 接收通知按恢复口径报（而不是笼统的「收到入库事件」）。
+            if _brief:
+                try:
+                    _brief["recovered_ingress"] = self._webhook_recovery_ingress(_brief, server_id)
+                except Exception:
+                    _brief["recovered_ingress"] = False
             # v4.6.92：解析通知里的「本次新增条目数」（如「Emby 上已添加了 4 项到 剧名」）——
             # 整剧入库判定「整剧都是新加的」用它（数量 ≥ 集总数 → 全收）；解析不到为 0（退回其它判定）。
             _added_n = self._parse_added_count(raw_data)
@@ -10141,6 +10157,40 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             }
         except Exception:
             return {}
+
+    def _webhook_recovery_ingress(self, brief: dict, server_id: str = "") -> bool:
+        """收到入库事件时判断：这是不是我们库里「观察期」条目的重新入库（即恢复）。
+
+        v4.7.8：**查我们库**（观察期行）来决定通知口径 —— 剧名（或电影标题）+ 季/集，
+        与删除端 `_handle_webhook_delete` 的弱匹配口径一致。
+        仅用于**通知文案**（📥 新入库 vs 🔁 恢复入库）；真正的恢复判定仍在入库时按
+        `recovered` 严格做（此处只要「有观察期候选」即可提示，宽松在有无、不做唯一性）。
+        """
+        try:
+            _db = getattr(self, "_people_db", None)
+            if _db is None:
+                return False
+            _b = brief or {}
+            _sn = str(_b.get("series_name") or "").strip()
+            _nm = str(_b.get("name") or "").strip()
+            if not _sn and not _nm:
+                return False
+
+            def _int_or_none(v):
+                try:
+                    return int(v) if v not in (None, "") else None
+                except Exception:
+                    return None
+
+            _n = int(_db.deleted_weak_candidates(
+                plugin_id=self.__class__.__name__,
+                series_name=_sn, title=(_nm if not _sn else ""),
+                season_num=_int_or_none(_b.get("season")),
+                episode_num=_int_or_none(_b.get("episode")),
+                server_id=(server_id or None)) or 0)
+            return _n > 0
+        except Exception:
+            return False
 
     @staticmethod
     def _parse_added_count(source) -> int:
@@ -11111,7 +11161,9 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             key = sn or nm or f"#item:{item_id}"
             rec = {"series_name": sn, "name": nm,
                    "season": brief.get("season"), "episode": brief.get("episode"),
-                   "type": str(brief.get("type") or "")}
+                   "type": str(brief.get("type") or ""),
+                   # v4.7.8：入库时命中观察期记录 → 接收通知按「恢复入库」口径报
+                   "recovered_ingress": bool(brief.get("recovered_ingress"))}
             with self._webhook_lock:
                 _seen_set = getattr(self, "_webhook_recv_notified", None)
                 if _seen_set is None:
@@ -11260,6 +11312,9 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                     parts.append(f"{_line}（电影）" if _is_movie_rec(recs[0]) else _line)
             _all_recs = [x for _k in order for x in (bq.get(_k) or [])]
             _all_movies = bool(_all_recs) and all(_is_movie_rec(x) for x in _all_recs)
+            # v4.7.8：这批入库是不是「恢复入库」（收到事件时已查过我们库的观察期记录）
+            _recov_n = sum(1 for x in _all_recs if x.get("recovered_ingress"))
+            _all_recov = bool(_all_recs) and _recov_n == len(_all_recs)
             _items_txt = "\n".join(f"  • {p}" for p in parts[:8])
             if len(parts) > 8:
                 _items_txt += f"\n  • …等 {len(parts)} 组"
@@ -11270,36 +11325,50 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 _auto = (str(self._nfo_ingest_trigger()) == "auto_trigger")
             except Exception:
                 _auto = False
-            if _auto:
-                _st_line = "⏳ 状态：已接收，已安排翻译（插件将自动处理）"
-                _delay_line = (f"🕒 延迟：约 {_delay} 秒后开始（等待 Emby 刮削/文件落位）")
-                _st_merge = "⏳ 状态：已合并"
+            if _all_recov:
+                # v4.7.8：恢复入库 —— 明确区别于普通新入库（判定依据是**我们库里的观察期记录**）
+                _ov_on = bool(getattr(self, "_overwrite_emby", False))
+                _head = "🔁 恢复入库"
+                _head_reset = "🔁 又有恢复入库事件（已并入本轮）"
+                _st_line = ("⏳ 状态：该条目此前被删除、现重新入库 —— 已命中库中观察期记录"
+                            + ("，将按「以库为准」自动恢复（覆盖该 nfo + Emby 两排 + 刷新）"
+                               if _ov_on else "（「恢复：以库为准直接覆盖 Emby」未开，本次仅入库）"))
+                _delay_line = f"🕒 延迟：约 {_delay} 秒后开始恢复（等待 Emby 刮削/文件落位）"
+                _st_merge = "⏳ 状态：已合并（恢复入库）"
             else:
-                _st_line = ("⏳ 状态：已接收，仅入库 —— 未自动翻译"
-                            "（设置页「Webhook 入库后自动翻译」未开启；可在库页点「全部翻译」手动触发）")
-                _delay_line = (f"🕒 延迟：约 {_delay} 秒后开始入库（等待 Emby 刮削/文件落位；此延迟与翻译无关）")
-                _st_merge = "⏳ 状态：已合并（仅入库，未自动翻译）"
+                _head = f"📥 收到 {total} 条入库事件"
+                _head_reset = f"📥 又有 {total} 条入库事件（已并入本轮）"
+                if _auto:
+                    _st_line = "⏳ 状态：已接收，已安排翻译（插件将自动处理）"
+                    _delay_line = (f"🕒 延迟：约 {_delay} 秒后开始（等待 Emby 刮削/文件落位）")
+                    _st_merge = "⏳ 状态：已合并"
+                else:
+                    _st_line = ("⏳ 状态：已接收，仅入库 —— 未自动翻译"
+                                "（设置页「Webhook 入库后自动翻译」未开启；可在库页点「全部翻译」手动触发）")
+                    _delay_line = (f"🕒 延迟：约 {_delay} 秒后开始入库（等待 Emby 刮削/文件落位；此延迟与翻译无关）")
+                    _st_merge = "⏳ 状态：已合并（仅入库，未自动翻译）"
             if _all_movies:
                 if _is_reset:
-                    text = (f"📥 又有 {total} 条入库事件（已并入本轮）\n"
+                    text = (f"{_head_reset}\n"
                             f"{_items_txt}\n"
                             f"{_st_merge}\n"
                             f"🔄 计时重置：重新等待约 {_delay} 秒后开始")
                 else:
-                    text = (f"📥 收到 {total} 条入库事件\n"
+                    text = (f"{_head}\n"
                             f"{_items_txt}\n"
                             f"{_st_line}\n"
                             f"{_delay_line}")
             elif _is_reset:
-                text = (f"📥 又有 {total} 条入库事件（已并入本轮）\n"
+                text = (f"{_head_reset}\n"
                         f"{_items_txt}\n"
                         f"{_st_merge}，同剧会统一处理\n"
                         f"🔄 计时重置：重新等待约 {_delay} 秒后开始（避免边下边翻）")
             else:
-                text = (f"📥 收到 {total} 条入库事件\n"
+                _tail = "" if _all_recov else "（期间同剧新集自动合并并重置计时）"
+                text = (f"{_head}\n"
                         f"{_items_txt}\n"
                         f"{_st_line}\n"
-                        f"{_delay_line}（期间同剧新集自动合并并重置计时）")
+                        f"{_delay_line}{_tail}")
             self.post_message(mtype=NotificationType.Manual, title=self.plugin_name, text=text)
         except Exception as e:
             logger.debug(f"[Webhook] 接收通知聚合发送失败（非致命）: {e}")
@@ -14439,7 +14508,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             return {"success": False, "message": str(e)}
 
     def _restore_item_to_nfo(self, item_id: str, server_id: str = "", auto: bool = False,
-                             scope: str = "both", restore: bool = False) -> dict:
+                             scope: str = "both", restore: bool = False,
+                             only_paths: Optional[set] = None) -> dict:
         """把某条目库中已翻译名单写回本地 nfo 文件（不调 LLM）—— 单条版与「全部写回」共用。
 
         仅支持 NFO 条目（库中带 nfo_path 的记录）。旧版 API 在线记录
@@ -14452,6 +14522,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             此时**双写**：nfo 文件 + Emby 服务器元数据（第一排 Person 改名 + 第二排条目级
             `People[].Role`，不看「角色同步」开关），并触发 Emby 刷新。手动「全部写回 / 写入」
             一律为 False，行为与旧版完全一致（不受恢复开关影响）。
+        only_paths（v4.7.8 · 文件级恢复）：只写这些 nfo 文件（库里「集」与「剧」共用 item_id，
+            只删某集时不能越界写同剧其它集）；None/空 = 整条目（旧行为）。
         :return: {"success", "message", "data": {...} | "skip": True}
         """
         # v4.7.0（issue #7）：补上归一化 —— 此前本函数用 `_sc` 却从未定义它，
@@ -14472,6 +14544,18 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             people_records = db.people_of_item(plugin_id=_pid, item_id=item_id, server_id=server_id)
             if not people_records:
                 return {"success": False, "message": "库中该条目无人物记录", "data": {"skip": True}}
+
+            # v4.7.8（文件级恢复）：只写「本次真正重新入库」的那些 nfo 文件 ——
+            # 库里「集」与「剧」共用 item_id，只删某集时绝不越界写同剧其它集。
+            if only_paths:
+                _want = {str(_pp or "").strip() for _pp in only_paths if str(_pp or "").strip()}
+                if _want:
+                    people_records = [r for r in (people_records or [])
+                                      if str(r.get("nfo_path") or "").strip() in _want]
+                    if not people_records:
+                        return {"success": False,
+                                "message": "本次恢复的目标文件在库中已无记录（可能已重扫改名）",
+                                "data": {"skip": True}}
 
             path_groups: Dict[str, list] = {}
             _n_with_path = 0
