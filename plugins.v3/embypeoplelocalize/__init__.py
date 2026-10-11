@@ -122,7 +122,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
     plugin_name = "Emby 演职人员中文化"
     plugin_desc = "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回；拉取人名时可用 TMDB 刮削补中文名/简介/头像"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/embypeoplelocalize.png"
-    plugin_version = "4.7.0"
+    plugin_version = "4.7.1"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "embypeoplelocalize_"
@@ -4394,11 +4394,18 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
 
         def _flush_noop_marks() -> None:
             try:
-                if db is not None and (_noop_lib["name"] or _noop_lib["role"]):
-                    db.mark_person_noop(plugin_id=pid, name_terms=sorted(_noop_lib["name"]),
-                                        role_terms=sorted(_noop_lib["role"]))
+                _nn = sorted(_noop_lib["name"])
+                _rn = sorted(_noop_lib["role"])
+                if db is not None and (_nn or _rn):
+                    _marked = int(db.mark_person_noop(plugin_id=pid, name_terms=_nn,
+                                                      role_terms=_rn) or 0)
                     _noop_lib["name"].clear()
                     _noop_lib["role"].clear()
+                    # v4.7.1（issue #6 附带）：空转作业「为什么 0 次 AI 请求 / 剩余不减」要能自证 ——
+                    # 一条 INFO 汇总（此前的 debug 分支既不落文件、也无从判断到底跳了什么）。
+                    logger.info(f"[Translate] 本轮 {len(_nn) + len(_rn)} 条「无需操作」词条已落持久标记"
+                                f"（人名 {len(_nn)} / 角色 {len(_rn)}，影响 {_marked} 行）—— "
+                                f"下一轮起不再计入待翻（空转作业不再复现；如需强制重翻请用「重新翻译」）")
             except Exception as _ne:
                 logger.debug(f"[Translate] 落 noop 持久标记失败（非致命）: {_ne}")
 
@@ -8227,7 +8234,11 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             if root_logger:
                 bridge = _LogBridgeHandler()
                 bridge._epl_bridge = True
-                bridge.setLevel(logging.INFO)
+                # v4.7.1（issue #6 / #7 附带）：不再写死 INFO —— DEBUG 记录此前在处理器层
+                # 就被过滤掉，把插件日志级别调成 DEBUG 也一条都不落文件，排障无从下手。
+                # 设为 NOTSET（0）：处理器不设门槛，**跟随 logger 自身的有效级别**
+                # （logger 级别为 INFO 时 DEBUG 本就不会到达处理器；调成 DEBUG 时才会）。
+                bridge.setLevel(logging.NOTSET)
                 bridge.setFormatter(logging.Formatter("%(message)s"))
                 root_logger.addHandler(bridge)
                 EmbyPeopleLocalize._active_instance = self

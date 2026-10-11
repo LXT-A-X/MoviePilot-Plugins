@@ -266,6 +266,12 @@ check("_flush_noop_marks()" in _SRC and "db.mark_person_noop(plugin_id=pid" in _
 check("def _flush_noop_marks()" in _SRC and _SRC.count("_flush_noop_marks()") >= 2,
       "_flush_noop_marks 定义 + 至少两处调用（收词后 / 模型 noop 后）")
 
+# 附带（同一排障诉求）：DEBUG 日志不再被桥接层写死 INFO 挡住 + noop 落标记有 INFO 自证
+check("bridge.setLevel(logging.NOTSET)" in _SRC and "bridge.setLevel(logging.INFO)" not in _SRC,
+      "日志桥接不再写死 INFO（跟随 logger 有效级别，调 DEBUG 才能落文件）")
+check("条「无需操作」词条已落持久标记" in _SRC,
+      "noop 落标记有 INFO 自证日志（空转作业可自查，不再只有 debug 分支）")
+
 print("\n" + "=" * 72)
 if _N[1] == 0:
     print(f"结果: {_N[0]} 通过 / 0 失败")
