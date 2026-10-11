@@ -129,6 +129,11 @@ class Stub:
     def _tx_scope(self):
         return "both"
 
+    @staticmethod
+    def _norm_writeback_scope(scope, default="both"):
+        _sc = str(scope or default or "").strip().lower()
+        return _sc if _sc in ("person", "role", "both") else str(default or "both")
+
     def _collect_trans_types(self):
         return {"translate": {"person": True, "role": True, "actor": True,
                               "guest": False, "director": False, "writer": False,

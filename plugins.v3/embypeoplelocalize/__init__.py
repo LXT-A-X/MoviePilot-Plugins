@@ -122,7 +122,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
     plugin_name = "Emby 演职人员中文化"
     plugin_desc = "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回；拉取人名时可用 TMDB 刮削补中文名/简介/头像"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/embypeoplelocalize.png"
-    plugin_version = "4.6.116"
+    plugin_version = "4.7.0"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "embypeoplelocalize_"
@@ -3463,6 +3463,17 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 _b["deferred"].append(str(_i))
         return _out
 
+    @staticmethod
+    def _norm_writeback_scope(scope, default: str = "both") -> str:
+        """归一化「本次写回/翻译哪一排」→ person / role / both（v4.7.0 · issue #7）。
+
+        统一入口：此前同一「排范围」概念在 `_tx_pending_snapshot` / `_restore_nfo_from_db_locked`
+        / `_restore_item_to_nfo` 各写一份，`_restore_item_to_nfo` 还漏抄了归一化行 →
+        写回必抛 `NameError: name '_sc' is not defined`。集中到本方法，避免同类漏抄。
+        """
+        _sc = str(scope or default or "").strip().lower()
+        return _sc if _sc in ("person", "role", "both") else str(default or "both")
+
     def _tx_scope(self) -> str:
         """本次翻译/写回目标范围 —— person / role / both。
 
@@ -4088,9 +4099,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                  "items_scope","terms_scope","person_on","role_on","disabled",[items_list]}
         """
         _pid = self.__class__.__name__
-        _sc = str(scope or "").strip().lower()
-        if _sc not in ("person", "role", "both"):
-            _sc = self._tx_scope()
+        # v4.7.0（issue #7）：归一化统一走 _norm_writeback_scope（空/非法值回退当前任务范围）
+        _sc = self._norm_writeback_scope(scope, self._tx_scope())
         # v4.6.106（LIB-013）：按本次作业来源门控库内统计（与 worker 收词口径一致）
         _src_lib = (not source_gate) or self._tx_source_allows("library")
         _with_person = _sc in ("person", "both") and _src_lib
@@ -4377,6 +4387,21 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         # 再按需从候选队列取够即止 —— 不再「把上万条全过滤一遍，最后只挑 30 条」。
         _batch = max(1, int(getattr(self, "_tx_batch_max", 0) or self.TX_BATCH))
 
+        # v4.7.0（issue #6）：本轮「已确认无需翻译」的**库内**词条（人名 / 角色分开），
+        # 收词时命中 noop / 无任何可译内容即登记，轮末落 person 表持久标记（name_noop/role_noop）。
+        # 这样预估 / 角标 / 收词同口径过滤，它们不再永久挂在「待翻译」、也不再每会话重发一轮。
+        _noop_lib: Dict[str, set] = {"name": set(), "role": set()}
+
+        def _flush_noop_marks() -> None:
+            try:
+                if db is not None and (_noop_lib["name"] or _noop_lib["role"]):
+                    db.mark_person_noop(plugin_id=pid, name_terms=sorted(_noop_lib["name"]),
+                                        role_terms=sorted(_noop_lib["role"]))
+                    _noop_lib["name"].clear()
+                    _noop_lib["role"].clear()
+            except Exception as _ne:
+                logger.debug(f"[Translate] 落 noop 持久标记失败（非致命）: {_ne}")
+
         def _accept(_o: dict) -> bool:
             """逐条过滤（与原先 for 循环里的条件逐字一致，只是改成「取够即停」时按需调用）。"""
             _t = str(_o.get("text") or "")
@@ -4394,6 +4419,9 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                     return False
                 if self._tx_untranslatable(_t):
                     self._tx_noop_terms_set().add(_t)
+                    # v4.7.0（issue #6）：无任何可译内容（单字符代号等）→ 一并登记持久标记，
+                    # 否则它会每一轮都被判待翻却被本短路丢弃 → 空转、角标永不消。
+                    _noop_lib["role" if _o.get("kind") == "role" else "name"].add(_t)
                     return False
             if _o.get("kind") == "role":
                 return bool(_take_role and self._tx_role_type_enabled(_o.get("person_type")))
@@ -4430,6 +4458,9 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         except Exception as e:
             self._tx_occ_err = str(e)
             logger.warning(f"[Translate] 读取人物库待翻失败: {e}")
+        # v4.7.0（issue #6）：库内收词阶段确认的「无需翻译」立即落持久标记
+        # （即使本轮最终没有可翻词条、下面提前 return，标记也已生效）。
+        _flush_noop_marks()
         # 人名池待翻（池管理条目：有原文无译文）
         pool_rows: List[dict] = []
         _person_in_scope = False   # v4.6.105：提前声明，供末尾诊断日志判定「池为什么没收」
@@ -4609,9 +4640,14 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 if not _is_role2 and not _o2.get("item_id"):
                     # 池行（无条目身份）—— 需要把「无需翻译」这个结论**持久化到池里**
                     _noop_pool.append((str(_o2.get("server_id") or ""), str(_o2.get("text") or "")))
+                elif _o2.get("item_id"):
+                    # v4.7.0（issue #6）：库内 occurrence 的「无需翻译」→ 落 person 表持久标记
+                    _noop_lib["role" if _is_role2 else "name"].add(str(_o2.get("text") or ""))
         if _noop_n:
             logger.info(f"[Translate] 本轮 {_noop_n} 条判定「无需翻译」（模型如实返回原文）；"
                         f"池行将标记为「无需操作」，不再重复发给模型")
+        # v4.7.0（issue #6）：库内 occurrence 的「无需翻译」落持久标记（下一轮起不再计入待翻）
+        _flush_noop_marks()
         for _bk, _is_role in ((_nr, False), (_rr, True)):
             _zh_map: Dict[str, str] = {}
             _src_map: Dict[str, str] = {}
@@ -6958,9 +6994,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             # v4.6.115（用户需求）：本次写回哪一排 —— 与「翻译」的 target_scope 同一语义。
             # person=只写第一排（人名）/ role=只写第二排（角色）/ both=两排都写（默认）。
             # 未选中那排的映射保持为空 → apply() 自然不动那些文本。
-            _sc = str(scope or "both").strip().lower()
-            if _sc not in ("person", "role", "both"):
-                _sc = "both"
+            _sc = self._norm_writeback_scope(scope)
             _want_person = _sc in ("person", "both")
             _want_role = _sc in ("role", "both")
             person_map, role_map = {}, {}
@@ -14226,6 +14260,10 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         scope（v4.6.115）：本次写回哪一排 —— person=仅第一排 / role=仅第二排 / both=两排（默认）。
         :return: {"success", "message", "data": {...} | "skip": True}
         """
+        # v4.7.0（issue #7）：补上归一化 —— 此前本函数用 `_sc` 却从未定义它，
+        # 只要条目有可写 nfo 就必抛 `NameError`（文件已写成功却报失败、状态不更新、
+        # v4.6.114 的 Emby 条目级角色同步因此执行不到）。统一走 _norm_writeback_scope。
+        _sc = self._norm_writeback_scope(scope)
         try:
             item_id = str(item_id or "").strip()
             if not item_id:
@@ -14304,7 +14342,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                 return {"success": failed == 0, "message": msg,
                         "data": {"files": done, "changed": changed_total, "failed": failed,
                                  "skipped": skipped, "noop": noop, "skipped_missing": max(0, _miss),
-                                 "scope": str(scope or "both").lower(), "emby_roles": _ers}}
+                                 "scope": _sc, "emby_roles": _ers}}
 
             if _n_with_path:
                 _recs_wp = [r for r in (people_records or []) if str(r.get("nfo_path") or "").strip()]
@@ -14337,6 +14375,12 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                     "data": {"skip": True}}
         except Exception as e:
             logger.error(f"[DB] 恢复失败: {e}\n{traceback.format_exc()}")
+            # v4.7.0（issue #7）：编程错误（NameError/AttributeError/TypeError/KeyError）不再
+            # 只当成普通「写回失败」—— 这类问题的症状是「文件已改、状态没改」，用户无从自查；
+            # 单独标记 bug=True，提示反馈作者而不是反复重试。
+            if isinstance(e, (NameError, AttributeError, TypeError, KeyError)):
+                return {"success": False, "bug": True,
+                        "message": f"插件内部错误（{type(e).__name__}: {e}）—— 请把日志反馈给作者"}
             return {"success": False, "message": str(e)}
 
     def _api_db_translate_library(self, data: Optional[dict] = None):

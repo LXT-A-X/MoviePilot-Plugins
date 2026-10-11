@@ -73,7 +73,13 @@ CREATE TABLE IF NOT EXISTS person (
     series_media_id TEXT DEFAULT '',
     -- 文件指纹（nfo 内容 + 大小签名），辅助识别「同一文件被重新刮削」——
     -- 仅作参考，稳定恢复仍以 provider 身份为准。
-    file_fingerprint TEXT DEFAULT ''
+    file_fingerprint TEXT DEFAULT '',
+    -- v4.7.0（issue #6）：持久「已确认无需操作（noop）」标记 —— 模型如实返回原文 / 无任何
+    -- 可译内容（单字符代号等）的人名 / 角色落此标记；预估与消费据此同口径过滤，
+    -- 避免这些词条永久计入「待翻译」（点全部翻译 0 次 AI 请求、剩余恒不减）。
+    -- 列分开存（人名 / 角色各自独立），因为同一行同时含 name_before 与 role_before。
+    name_noop INTEGER DEFAULT 0,
+    role_noop INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_person_lookup ON person (plugin_id, item_id, server_id, season_num, episode_num, person_index);
 -- 库列表分页（library_items_page）聚合索引：GROUP BY COALESCE(server_id,''), COALESCE(item_id,'')
@@ -246,7 +252,7 @@ CREATE TABLE IF NOT EXISTS translate_job_batches (
 CREATE INDEX IF NOT EXISTS idx_tjob_batches ON translate_job_batches (plugin_id, job_id, batch_id);
 """
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 # 「词条 × 条目」明细对上限（v4.6.61 唯一快照用）—— 防超大库下一次拉取过多行；
 # 触顶时快照按已取部分统计（日志 debug 提示），日常规模远小于该值。
@@ -766,6 +772,14 @@ def migrate() -> int:
             # 供重启恢复时沿用原任务的翻译范围 / 人数上限 / 写回策略（而不是套用重启后的当前配置）。
             # 旧库无损：新列默认空（旧任务无快照 → 恢复时按「无快照」处理，回退当前配置）。
             _ensure_columns("translate_jobs", [("cfg_snapshot", "TEXT DEFAULT ''")])
+        if cur_v < 14:
+            # v4.7.0（issue #6）：person 补 name_noop / role_noop 持久标记列 ——
+            # 「已确认无需操作（noop）」的词条不再永久计入待翻（详见 person 建表注释）。
+            # 旧库无损：新列默认 0；历史「译文==原文」的行由调用方按需补标。
+            _ensure_columns("person", [("name_noop", "INTEGER DEFAULT 0"),
+                                       ("role_noop", "INTEGER DEFAULT 0")])
+            _x("CREATE INDEX IF NOT EXISTS idx_person_noop "
+               "ON person (plugin_id, name_noop, role_noop)")
     except Exception as e:
         logger.error(f"[DB] 迁移 v{cur_v} → v{SCHEMA_VERSION} 失败（版本号未更新，下次启动重试）: {e}")
         return cur_v
@@ -2828,10 +2842,14 @@ class PeopleDb:
             _marks = (" AND (person_type IS NULL OR person_type='' "
                       f"OR person_type NOT IN ({','.join('?' * len(_dt))}))")
         _pend_sql = ""
+        # v4.7.0（issue #6）：持久「已确认无需操作（noop）」标记 → 不再计入待翻。
+        # 只在 only_pending 时排除（force/「重新翻译」用 only_pending=False，仍可重试）。
+        _noop_sql = ""
         if only_pending:
             _pend_sql = f" AND ({_after}='' OR {_after} IS NULL OR {_after}={_col})"
+            _noop_sql = f" AND COALESCE({'role_noop' if _col == 'role_before' else 'name_noop'},0)=0"
         if not limits:
-            _where = (f"FROM person WHERE plugin_id=? AND {_col}<>''" + _pend_sql + _marks
+            _where = (f"FROM person WHERE plugin_id=? AND {_col}<>''" + _pend_sql + _noop_sql + _marks
                       + _excl_ep_sql(exclude_episodes))
             if str(item_id or "").strip():
                 _where += " AND item_id=? AND server_id=?"
@@ -2864,7 +2882,7 @@ class PeopleDb:
         # 于是「超出上限」的那些人**逐个轮转补位**：上限=3、共 6 人时，翻完前 3 个后立刻又冒出后 3 个 →
         # 「完成 3 / 剩余 3」永远翻不完、待翻译明细一直挂着（用户实测「明明翻成功还显示待翻」）。
         # 结构化：r = 「前 N 个人」的固定集合（带 rn/lim 与 before/after 原始列），外层再筛未翻译。
-        _inner = (f"FROM person WHERE plugin_id=? AND {_col}<>''" + _marks + scope
+        _inner = (f"FROM person WHERE plugin_id=? AND {_col}<>''" + _noop_sql + _marks + scope
                   + _excl_ep_sql(exclude_episodes))
         _iparams: List[Any] = []
         # v4.6.64：条目级过滤（「重新翻译」按 item 取 occurrence，用同一套人数上限/类型口径）
@@ -3447,6 +3465,37 @@ class PeopleDb:
                      int(r.get("person_index") or 0), _t))
             except Exception as e:
                 logger.warning(f"[DB] occurrence 写库失败: {e}")
+        return n
+
+    def mark_person_noop(self, *, plugin_id: str, name_terms=None, role_terms=None,
+                         db: Optional[Any] = None) -> int:
+        """把「已确认无需操作（noop）」的人名 / 角色落**持久标记**（v4.7.0 · issue #6）。
+
+        与池的 `source='noop'` 同语义：模型如实返回原文 / 无任何可译内容（单字符代号）的词条，
+        标记后不再计入「待翻译」（预估 / 角标 / worker 收词同口径），也不会每个会话重发一遍。
+        只标记、绝不覆盖已有译文（带 `after='' OR NULL` 守卫）；「重新翻译」走
+        only_pending=False，不受此标记影响，仍可人工重试。
+        :param name_terms / role_terms: 原文（name_before / role_before）列表
+        :return: 标记行数
+        """
+        n = 0
+        try:
+            _ns = sorted({str(t).strip() for t in (name_terms or []) if str(t or "").strip()})
+            _rs = sorted({str(t).strip() for t in (role_terms or []) if str(t or "").strip()})
+            # 守卫与「未翻译」谓词同口径：空 / NULL / 占位（after==before）都算未译 → 可标记；
+            # 已有真实译文（after 与 before 不同）的行**绝不**标记（不覆盖译文）。
+            if _ns:
+                n += _x("UPDATE person SET name_noop=1 WHERE plugin_id=? AND name_before IN ("
+                        + ",".join("?" * len(_ns))
+                        + ") AND (name_after='' OR name_after IS NULL OR name_after=name_before)",
+                        (plugin_id, *_ns))
+            if _rs:
+                n += _x("UPDATE person SET role_noop=1 WHERE plugin_id=? AND role_before IN ("
+                        + ",".join("?" * len(_rs))
+                        + ") AND (role_after='' OR role_after IS NULL OR role_after=role_before)",
+                        (plugin_id, *_rs))
+        except Exception as e:
+            logger.warning(f"[DB] mark_person_noop 失败: {e}")
         return n
 
     def delete_by_nfo_path_prefix(self, *, plugin_id: str, path_prefix: str,
