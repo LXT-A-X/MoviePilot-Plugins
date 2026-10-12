@@ -101,6 +101,15 @@ CFG_EMBY_NAME_SYNC = "emby_name_sync"
 # 缓存的英文 Role 覆盖回去。开启后与第一排同层级，Emby 自己写 nfo 带的即是中文。
 CFG_EMBY_ROLE_SYNC = "emby_role_sync"
 DEFAULT_EMBY_ROLE_SYNC = False
+# v4.7.10（issue #9）：角色译文是否**同时写进每个单集条目**的 People[].Role。
+# Emby 剧集第二排取的是各单集条目自己的 Role（它写 episode.nfo 也以单集数据为准），
+# 只写剧条目时插件写完 nfo 仍会被 Emby 反写回英文。默认开（父开关本就默认关，
+# 开启角色同步的用户要的正是「第二排稳定」）；不想要大量 Emby 写请求时可单独关掉。
+CFG_EMBY_ROLE_EP_SYNC = "emby_role_ep_sync"
+DEFAULT_EMBY_ROLE_EP_SYNC = True
+# 单集同步的**单轮上限**（issue #9 建议：长剧 220+ 集，一次几分钟；限流兜底，
+# 避免超长剧一轮打满 Emby）。超出部分留给下一轮。
+EMBY_ROLE_EP_MAX = 800
 # v4.7.4：恢复（以库为准 · 直接覆盖 Emby）。洗版 / 重新刮削后 Emby 会把 nfo 刷回原文，
 # 开启后写回不受「还有待翻词条就不写」的限制，直接把库里已有译文覆盖到 Emby 元数据
 # （第一排 Person 改名 + 第二排条目级 People[].Role，**两排一起写**），并触发 Emby 刷新；

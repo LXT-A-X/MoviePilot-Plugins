@@ -16,6 +16,7 @@ const DEFAULT = {
   lock_cast: false,
   emby_name_sync: true,
   emby_role_sync: false,
+  emby_role_ep_sync: true,
   restore_overwrite_emby: false,
   translate_actor: true,
   translate_director: false,
@@ -699,9 +700,16 @@ onMounted(() => {
           <div class="epl-switch-row">
             <div class="flex-grow-1">
               <div class="epl-switch-title">角色译文同步到 Emby 条目</div>
-              <div class="epl-switch-desc">把「第二排角色名」的中文译文写入 Emby 条目级 People[].Role（只改 Role、不动 Name）。不写条目级时，Emby 刷新会用它缓存的英文角色名把 nfo 覆盖回去。<strong>「写入 / 全部写回」弹窗选哪排决定写哪排 nfo；本开关决定第二排要不要写进 Emby</strong>（关 = 只写 nfo）。默认关，建议开启。</div>
+              <div class="epl-switch-desc">把「第二排角色名」的中文译文写入 Emby 条目级 People[].Role（只改 Role、不动 Name），写剧与单集两个层级。不写条目级时，Emby 刷新会用它缓存的英文角色名把 nfo 覆盖回去。<strong>「写入 / 全部写回」弹窗选哪排决定写哪排 nfo；本开关决定第二排要不要写进 Emby</strong>（关 = 只写 nfo）。默认关，建议开启。</div>
             </div>
             <v-switch v-model="config.emby_role_sync" color="primary" hide-details></v-switch>
+          </div>
+          <div v-if="config.emby_role_sync" class="epl-switch-row">
+            <div class="flex-grow-1">
+              <div class="epl-switch-title">角色译文同步到单集条目（剧集）</div>
+              <div class="epl-switch-desc">Emby 剧集的第二排取的是<strong>每个单集条目自己的</strong> Role，它写 episode.nfo 也以单集数据为准 —— 只写剧条目时，插件写完 nfo 仍会被 Emby 反写回英文（长剧尤其明显）。开启后同一份角色译文会再写进各单集条目（只写确有差异的集，一轮最多 800 集）。默认开；不想对 Emby 发大量写请求时可关闭（关 = 只写剧条目 + nfo 文件）。</div>
+            </div>
+            <v-switch v-model="config.emby_role_ep_sync" color="primary" hide-details></v-switch>
           </div>
           <div class="epl-switch-row">
             <div class="flex-grow-1">

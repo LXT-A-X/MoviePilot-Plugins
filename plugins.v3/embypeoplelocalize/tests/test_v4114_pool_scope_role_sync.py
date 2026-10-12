@@ -18,6 +18,7 @@
 """
 import sys
 import re
+import time
 import types
 import textwrap
 import tempfile
@@ -257,15 +258,19 @@ check(pdb.item_identity(plugin_id=PID, item_id="tmdb:none", server_id="") is Non
 # ─────────────────────────────────────────────
 print("\n[T4] _emby_sync_item_roles：开关 / 无译文 / itemId 反查")
 # ─────────────────────────────────────────────
-_nsRole = {"logger": logger, "Dict": Dict, "constants": cst, "Any": Any, "Optional": Optional}
+_nsRole = {"logger": logger, "Dict": Dict, "constants": cst, "Any": Any, "Optional": Optional,
+           "time": time, "item_level_from_types": dbm.item_level_from_types,
+           "ITEM_FOUND": clim.ITEM_FOUND, "ITEM_NOT_FOUND": clim.ITEM_NOT_FOUND}
 exec(_grab_method(_SRC, "_emby_sync_item_roles"), _nsRole)
 exec(_grab_method(_SRC, "_emby_role_item_id"), _nsRole)
+exec(_grab_method(_SRC, "_emby_sync_episode_roles"), _nsRole)
 
 
 class _CliRole:
     def __init__(self, status="ok", changed=2):
         self.status, self.changed = status, changed
         self.calls = []
+        self.ep_calls = 0
 
     def update_item_roles(self, iid, role_map):
         self.calls.append((iid, dict(role_map)))
@@ -274,10 +279,17 @@ class _CliRole:
     def search_item_by_provider(self, prov, mid, include_types=None):
         return "E-FOUND"
 
+    def get_series_episodes_status(self, sid, limit=200):
+        # v4.7.10：非剧集 itemId → Emby 404（单集级同步自然跳过，不误写）
+        self.ep_calls += 1
+        return clim.ITEM_NOT_FOUND, [], "http_404"
+
 
 class _RoleSelf:
     _emby_sync_item_roles = _nsRole["_emby_sync_item_roles"]
     _emby_role_item_id = _nsRole["_emby_role_item_id"]
+    _emby_sync_episode_roles = _nsRole["_emby_sync_episode_roles"]
+    _emby_role_ep_sync = True
 
     def __init__(self, db=None, enabled=True, cli=None, err="", role_rows=None):
         self._people_db = db

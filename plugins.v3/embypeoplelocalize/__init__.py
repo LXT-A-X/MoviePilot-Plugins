@@ -81,7 +81,8 @@ from .emby_client import EmbyClient, ITEM_FOUND, ITEM_NOT_FOUND, ITEM_UNAVAILABL
 from .llm_client import (LLMClient, LLMError, RateLimited, QuotaExceeded,
                          AuthenticationError, ContextLengthExceeded)
 from .db import (PeopleDb, NameMapDb, WritebackDb, TranslateJobDb, pool_target_name,
-                 _is_kana_text, split_media_id, db_rev, get_meta, set_meta)
+                 _is_kana_text, split_media_id, db_rev, get_meta, set_meta,
+                 item_level_from_types)
 from . import constants
 from .task_manager import TaskStateMixin
 from .path_utils import PathUtilsMixin
@@ -154,7 +155,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
     plugin_name = "Emby 演职人员中文化"
     plugin_desc = "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回；拉取人名时可用 TMDB 刮削补中文名/简介/头像"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/embypeoplelocalize.png"
-    plugin_version = "4.7.9"
+    plugin_version = "4.7.10"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "embypeoplelocalize_"
@@ -208,6 +209,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
     _lock_cast: bool = False
     # v4.6.114（issue #5）：第二排角色译文写入 Emby 条目级 People[].Role（默认关，设置页可开）
     _emby_role_sync: bool = constants.DEFAULT_EMBY_ROLE_SYNC
+    # v4.7.10（issue #9）：角色译文同时写进**每个单集条目**（默认开；不想发大量 Emby 写请求可关）
+    _emby_role_ep_sync: bool = constants.DEFAULT_EMBY_ROLE_EP_SYNC
     # v4.7.4：恢复（以库为准 · 直接覆盖 Emby）—— 洗版/重刮后把库里译文强制覆盖到 Emby
     # 元数据（第一排 Person 名 + 第二排条目级角色，两排一起写），不受「待翻未完成」限制。
     _overwrite_emby: bool = constants.DEFAULT_RESTORE_OVERWRITE_EMBY
@@ -9108,6 +9111,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             self._lock_cast = False
             self._emby_name_sync = True
             self._emby_role_sync = constants.DEFAULT_EMBY_ROLE_SYNC
+            self._emby_role_ep_sync = constants.DEFAULT_EMBY_ROLE_EP_SYNC
             self._overwrite_emby = constants.DEFAULT_RESTORE_OVERWRITE_EMBY
             self._run_clear_cache = False
             self._llm_base_url = ""
@@ -9431,6 +9435,9 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             except Exception:
                 pass
         self._emby_role_sync = _ers
+        # v4.7.10（issue #9）：角色译文是否同时写进**每个单集条目**（默认开）
+        self._emby_role_ep_sync = constants.safe_bool(
+            config.get(constants.CFG_EMBY_ROLE_EP_SYNC), constants.DEFAULT_EMBY_ROLE_EP_SYNC)
         # v4.7.4：恢复（以库为准 · 直接覆盖 Emby）—— 两排一起写服务器，忽略待翻阻塞
         self._overwrite_emby = constants.safe_bool(
             config.get(constants.CFG_RESTORE_OVERWRITE_EMBY),
@@ -9561,6 +9568,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             constants.CFG_EMBY_NAME_SYNC: getattr(self, "_emby_name_sync", True),
             constants.CFG_EMBY_ROLE_SYNC: bool(getattr(self, "_emby_role_sync",
                                                        constants.DEFAULT_EMBY_ROLE_SYNC)),
+            constants.CFG_EMBY_ROLE_EP_SYNC: bool(getattr(self, "_emby_role_ep_sync",
+                                                         constants.DEFAULT_EMBY_ROLE_EP_SYNC)),
             constants.CFG_RESTORE_OVERWRITE_EMBY: bool(getattr(self, "_overwrite_emby",
                                                               constants.DEFAULT_RESTORE_OVERWRITE_EMBY)),
             constants.CFG_POOL_FETCH_SCOPE: (getattr(self, "_pool_fetch_scope", "") or constants.DEFAULT_POOL_FETCH_SCOPE),
@@ -15731,6 +15740,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         只按 item_id 取 `item_identity` 会永远命中同剧的同一集（恢复会把 E02 刷到 E01 上）。
         文件级拿不到才退回 `item_identity`；`emby_item_id` 为空（纯 NFO 扫描入库该列不写）
         再按 `media_provider + media_id` 反查 Emby。反查失败 → ""（调用方按「无法同步」处理）。
+        v4.7.10（issue #10）：反查落空时**退回再试**（Series/Movie → 不带类型限制），
+        退回命中会落一条 INFO；层级已由 `item_identity` 聚合判定。
         「全部写回」几百条目时每条目反查一次太贵，故按 (server_id, item_id, nfo_path) 缓存；
         配置变化 / 清空缓存时由 `_load_config` 清掉。
         """
@@ -15761,10 +15772,25 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                     _mid = str(_ident.get("media_id") or "").strip()
                     _itype = str(_ident.get("item_type") or "").strip().lower()
                     if _prov and _mid and _prov != "nfo":
+                        # v4.7.10（issue #10）：首次按推导层级落空后**退回再试** ——
+                        # 库里层级偶尔仍与 Emby 侧不一致（混合入库来源），只认推导类型会
+                        # 整库静默失败。退回顺序：Series+Movie → 不带类型限制（实测这样救回）。
                         _types = (["Series"] if _itype == "series"
                                   else (["Episode"] if _itype == "episode" else ["Movie", "Series"]))
-                        _out = str(cli.search_item_by_provider(_prov, _mid,
-                                                               include_types=_types) or "").strip()
+                        _chain = [(_types, ""), (["Series", "Movie"], "Series/Movie"), (None, "")]
+                        _seen = set()
+                        for _t2, _lbl in _chain:
+                            _kk = frozenset(_t2) if _t2 else None
+                            if _kk in _seen:
+                                continue
+                            _seen.add(_kk)
+                            _out = str(cli.search_item_by_provider(_prov, _mid,
+                                                                   include_types=_t2) or "").strip()
+                            if _out:
+                                if _lbl:
+                                    logger.info(f"[EmbyRole] itemId 反查需退回{_lbl}才命中："
+                                                f"{item_id}（库里层级={_itype or '空'}）→ {_out}")
+                                break
         except Exception as e:
             logger.debug(f"[EmbyRole] 反查 itemId 失败（非致命）{item_id}: {e}")
             _out = ""
@@ -15780,6 +15806,14 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         缓存的英文 Role 把 nfo 覆盖回去 → 插件里译好了、用户看到的仍是英文。
         写到条目级 People[].Role 后与第一排同层级，Emby 自己写 nfo 带的即是中文。
 
+        v4.7.10：
+        · issue #9 —— 非电影条目再枚举**每个单集条目**写同一份 role_map（Emby 剧集第二排
+          取自各单集条目自己的 Role，只写剧条目时 episode.nfo 仍会被反写回英文）；
+          受「角色译文同步到单集条目」开关（默认开）与每轮单集上限约束。
+        · issue #9 坑 2 —— role_map 不再只看单个来源：空来源/遗留行打底 + 目标服务器行覆盖。
+        · issue #10 —— 层级走 `item_identity` 的聚合判定；no_item_id / noop / no_people
+          各补一条 INFO，不再出现「Emby 没变化但日志里一行都看不到」。
+
         :return {"ok","changed","status","reason"}；未开启 / 无译文 / 取不到 itemId 都返回
                 明确原因（调用方据此拼接提示，绝不静默）。
         """
@@ -15791,37 +15825,124 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             _db = getattr(self, "_people_db", None)
             if _db is None:
                 return {"ok": False, "changed": 0, "status": "no_db", "reason": "翻译记录数据库未初始化"}
-            _recs = _db.people_of_item(plugin_id=self.__class__.__name__,
-                                       item_id=item_id, server_id=server_id) or []
+            # v4.7.10（issue #9 坑 2）：多来源并集 —— 「在线来源」条目按 server_id 只能取到
+            # 零星几行（实测 11 行 / 全量 3228 行），role_map 会严重不全而漏写。
+            _scopes = [""]
+            if str(server_id or "").strip():
+                _scopes.append(str(server_id))
             _map: Dict[str, str] = {}
-            for _r in _recs:
-                _rb = str(_r.get("role_before") or "").strip()
-                _ra = str(_r.get("role_after") or "").strip()
-                if _rb and _ra and _ra != _rb:
-                    _map[_rb] = _ra
+            _types: list = []
+            for _scp in _scopes:
+                try:
+                    _recs = _db.people_of_item(plugin_id=self.__class__.__name__,
+                                               item_id=item_id, server_id=_scp) or []
+                except Exception:
+                    _recs = []
+                for _r in _recs:
+                    _types.append(_r.get("item_type"))
+                    _rb = str(_r.get("role_before") or "").strip()
+                    _ra = str(_r.get("role_after") or "").strip()
+                    if _rb and _ra and _ra != _rb:
+                        _map[_rb] = _ra
             if not _map:
                 return {"ok": True, "changed": 0, "status": "noop", "reason": "该条目没有可同步的角色译文"}
+            _level = item_level_from_types(_types)
             _cli, _cerr = self._emby_client_for_server(server_id)
             if _cli is None:
                 return {"ok": False, "changed": 0, "status": "no_client",
                         "reason": _cerr or "Emby 未配置或不可用"}
             _eid = self._emby_role_item_id(_cli, server_id=server_id, item_id=item_id, nfo_path=nfo_path)
             if not _eid:
+                logger.info(f"[EmbyRole] {ctx or '写回'}：{item_id}（server_id={server_id or '空'}）"
+                            f"未取到 Emby itemId → 第二排无法写入 Emby 条目级"
+                            f"（库中 emby_item_id 为空、按媒体 ID 反查未命中）")
                 return {"ok": False, "changed": 0, "status": "no_item_id",
                         "reason": "未取到 Emby itemId（库中 emby_item_id 为空且按媒体 ID 反查失败）"}
             _st, _ch = _cli.update_item_roles(_eid, _map)
-            if _st == "ok":
+            # v4.7.10（issue #9）：电影没有单集；剧/未知层级再写各单集条目（同一份 role_map）
+            _ep = {"checked": 0, "items": 0, "changed": 0, "capped": False, "reason": ""}
+            if (_level != "movie" and _st != "not_found"
+                    and bool(getattr(self, "_emby_role_ep_sync", constants.DEFAULT_EMBY_ROLE_EP_SYNC))):
+                _ep = self._emby_sync_episode_roles(_cli, series_id=_eid, role_map=_map,
+                                                    ctx=ctx, item_id=item_id) or _ep
+            _series_ch = int(_ch or 0)
+            _ep_changed = int(_ep.get("changed") or 0)
+            _tot = _series_ch + _ep_changed
+            if str(_ep.get("reason") or ""):
+                logger.debug(f"[EmbyRole] {ctx or '写回'}：{item_id} 单集角色同步跳过（{_ep['reason']}）")
+            if _tot:
+                _det = (f"（剧条目 {_series_ch} 处 + 单集 {int(_ep.get('items') or 0)} 个条目命中）"
+                        if int(_ep.get("checked") or 0) else "")
                 logger.info(f"[EmbyRole] {ctx or '写回'}：{item_id} → Emby itemId={_eid} "
-                            f"角色同步 {_ch} 处")
-                return {"ok": True, "changed": int(_ch or 0), "status": _st, "reason": f"已同步 {_ch} 处"}
-            if _st in ("noop", "no_people"):
+                            f"角色同步 {_tot} 处{_det}")
+                if _ep.get("capped"):
+                    logger.info(f"[EmbyRole] {ctx or '写回'}：{item_id} 单集数超过单轮上限 "
+                                f"{constants.EMBY_ROLE_EP_MAX} —— 本轮只处理前 {int(_ep.get('checked') or 0)} 个")
+                return {"ok": True, "changed": _tot, "status": "ok", "reason": f"已同步 {_tot} 处"}
+            if _st == "no_people":
+                logger.info(f"[EmbyRole] {ctx or '写回'}：{item_id} → Emby itemId={_eid} "
+                            f"的 People 名单为空（无法同步）")
+                return {"ok": True, "changed": 0, "status": _st, "reason": "Emby 该条目没有 People 名单"}
+            if _st == "noop":
+                logger.info(f"[EmbyRole] {ctx or '写回'}：{item_id} → Emby itemId={_eid} "
+                            f"未命中任何待写角色（候选 {len(_map)} 个，"
+                            f"可能 Emby 已是译文或 Role 文本不一致）")
                 return {"ok": True, "changed": 0, "status": _st,
-                        "reason": ("Emby 该条目没有 People 名单" if _st == "no_people"
-                                   else "Emby 里没有匹配到的角色原文（可能已是译文）")}
+                        "reason": "Emby 里没有匹配到的角色原文（可能已是译文）"}
+            if _st == "ok":
+                return {"ok": True, "changed": 0, "status": _st, "reason": "Emby 该条目无可同步角色"}
             return {"ok": False, "changed": 0, "status": _st, "reason": f"Emby 角色写入失败（{_st}）"}
         except Exception as e:
             logger.debug(f"[EmbyRole] 角色同步异常（非致命）: {e}")
             return {"ok": False, "changed": 0, "status": "exception", "reason": str(e)}
+
+    def _emby_sync_episode_roles(self, cli, *, series_id: str, role_map: Dict[str, str],
+                                 ctx: str = "", item_id: str = "") -> dict:
+        """同一份 role_map 写进该剧**每个单集条目**的 `People[].Role`（v4.7.10 · issue #9）。
+
+        为什么需要：Emby 剧集第二排取的是**每个单集条目自己的** Role，它往磁盘写
+        `episode.nfo` 也以单集条目数据为准 —— 只写剧条目时，插件写完 nfo 仍会被 Emby
+        反写回英文（实测：补上单集同步后重排该条目，抽样 435 个角色 387 个保持中文，
+        对照「未做单集同步」的条目零退回）。
+
+        单集与剧条目的角色原文大多相同，故复用同一张 role_map；`update_item_roles` 的
+        安全约定（精确命中才改、一条不命中不发写请求、只改 Role 不动 Name、整份 DTO 回传）
+        对单集完全适用。非剧集 itemId（Emby 404 / 不可用）自然跳过，不会误写。
+        :return {"ok","checked","items","changed","capped","reason"}
+        """
+        _out = {"ok": True, "checked": 0, "items": 0, "changed": 0, "capped": False, "reason": ""}
+        _sid = str(series_id or "").strip()
+        if not _sid or not role_map or cli is None:
+            return _out
+        try:
+            _st, _eps, _why = cli.get_series_episodes_status(_sid, limit=500)
+        except Exception as e:
+            _out["ok"], _out["reason"] = False, f"枚举单集异常: {e}"
+            return _out
+        if _st != ITEM_FOUND:
+            _out["ok"] = False
+            _out["reason"] = ("该 itemId 不是剧集（Emby 404）" if _st == ITEM_NOT_FOUND
+                              else f"枚举单集不可用（{_why}）")
+            return _out
+        _list = [e for e in (_eps or []) if isinstance(e, dict)]
+        _cap = max(1, int(constants.EMBY_ROLE_EP_MAX))
+        if len(_list) > _cap:
+            _out["capped"] = True
+            _list = _list[:_cap]
+        for _ep in _list:
+            _epid = str(_ep.get("Id") or "").strip()
+            if not _epid or _epid == _sid:
+                continue
+            _out["checked"] += 1
+            try:
+                _s2, _c2 = cli.update_item_roles(_epid, role_map)
+            except Exception:
+                _s2, _c2 = "exception", 0
+            if _s2 == "ok":
+                _out["items"] += 1
+                _out["changed"] += int(_c2 or 0)
+            time.sleep(0.05)   # 节流：长剧几十上百个单集，避免把 Emby 打满
+        return _out
 
     def _emby_refresh_item(self, item_id: str, server_id: str = "", ctx: str = "",
                            nfo_path: str = "") -> dict:

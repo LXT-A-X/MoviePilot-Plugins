@@ -982,6 +982,24 @@ def _scope_sql_soft(server_id: Optional[str], include_legacy: bool = True) -> tu
     return " AND server_id=?", [_s]
 
 
+def item_level_from_types(types) -> str:
+    """条目层级聚合判定（v4.7.10 · issue #10）。
+
+    库里「集」与「剧」**共用同一个 item_id**（NFO/在线入库下 `item_id` 是剧的媒体 id），
+    所以**单行**的 `item_type` 不能代表条目层级：长剧常见「3217 行 Episode + 13 行 Series」
+    （实测斗破苍穹 79481），只取 person_index 最小的一行会判成 episode → 反查 Emby
+    itemId 带 `IncludeItemTypes=Episode` + 剧级 tmdb id → 必然 0 命中 → 第二排整体失效。
+
+    聚合口径：任一行 series → series；否则任一行 movie → movie；否则 episode；都没有 → ""。
+    与 `item_identity` / `_emby_sync_item_roles` 共用，避免两处判定分叉。
+    """
+    _t = {str(x or "").strip().lower() for x in (types or [])}
+    for _c in ("series", "movie", "episode"):
+        if _c in _t:
+            return _c
+    return ""
+
+
 _ALIVE_SQL = " AND (deleted_at='' OR deleted_at IS NULL)"
 
 
@@ -2291,14 +2309,30 @@ class PeopleDb:
         只有 Webhook / Emby 拉取路径才会写 —— 纯扫描入库的条目该列为空，
         因此调用方拿到本结构后：**优先用 emby_item_id，为空才按 media_provider + media_id
         反查 Emby itemId**（`search_item_by_provider`）。server_id 见 `_scope_sql_soft`。
+
+        v4.7.10（issue #10）：`item_type` 改为**条目层级聚合**判定（`item_level_from_types`）——
+        集与剧共用 item_id，只有 13 行 Series 的条目曾因「取 person_index 最小行」被判成
+        episode，反查必然失败且完全静默。行选取也优先「与该层级一致」的行（拿剧级
+        emby_item_id / 媒体身份），再退到带 emby_item_id、带媒体身份的行。
         """
         _sc, _scp = _scope_sql_soft(server_id)
         try:
+            _lvl = ""
+            try:
+                _lrows = _q("SELECT item_type FROM person WHERE plugin_id=? AND item_id=?" + _sc +
+                            " GROUP BY LOWER(COALESCE(item_type,''))",
+                            (plugin_id, item_id, *_scp))
+                _lvl = item_level_from_types([r.get("item_type") for r in (_lrows or [])])
+            except Exception as e:
+                logger.debug(f"[DB] item_identity 层级聚合失败（回退单行判定）: {e}")
             rows = _q("SELECT emby_item_id, media_provider, media_id, item_type, server_id, title "
                       "FROM person WHERE plugin_id=? AND item_id=?" + _sc +
-                      " ORDER BY CASE WHEN COALESCE(emby_item_id,'')<>'' THEN 0 ELSE 1 END, "
+                      " ORDER BY CASE WHEN LOWER(COALESCE(item_type,''))=? THEN 0 ELSE 1 END, "
+                      "CASE WHEN COALESCE(emby_item_id,'')<>'' THEN 0 ELSE 1 END, "
+                      "CASE WHEN COALESCE(media_provider,'')<>'' AND COALESCE(media_id,'')<>'' "
+                      "THEN 0 ELSE 1 END, "
                       "person_index LIMIT 1",
-                      (plugin_id, item_id, *_scp))
+                      (plugin_id, item_id, *_scp, _lvl))
         except Exception as e:
             logger.warning(f"[DB] item_identity 查询失败: {e}")
             return None
@@ -2309,7 +2343,7 @@ class PeopleDb:
             "emby_item_id": str(row.get("emby_item_id") or ""),
             "media_provider": str(row.get("media_provider") or ""),
             "media_id": str(row.get("media_id") or ""),
-            "item_type": str(row.get("item_type") or ""),
+            "item_type": _lvl or str(row.get("item_type") or ""),
             "server_id": str(row.get("server_id") or ""),
             "title": str(row.get("title") or ""),
         }
