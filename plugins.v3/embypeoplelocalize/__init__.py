@@ -155,7 +155,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
     plugin_name = "Emby 演职人员中文化"
     plugin_desc = "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回；拉取人名时可用 TMDB 刮削补中文名/简介/头像"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/embypeoplelocalize.png"
-    plugin_version = "4.7.10"
+    plugin_version = "4.7.11"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "embypeoplelocalize_"
@@ -768,6 +768,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             # 出现清单（只展示不编辑）：与库页共用同一实现
             {"path": "/pool/occurrences", "endpoint": self._api_person_occurrences, "methods": ["GET"], "auth": "bear"},
             {"path": "/pool/sync_one", "endpoint": self._api_pool_sync_one, "methods": ["POST"], "auth": "bear"},
+            {"path": "/pool/cleanup", "endpoint": self._api_pool_cleanup, "methods": ["POST"], "auth": "bear"},
             {"path": "/pool/refetch_one", "endpoint": self._api_pool_refetch_one, "methods": ["POST"], "auth": "bear"},
             {"path": "/pool/export", "endpoint": self._api_pool_export, "methods": ["GET"], "auth": "bear"},
             {"path": "/pool/import", "endpoint": self._api_pool_import, "methods": ["POST"], "auth": "bear"},
@@ -1729,7 +1730,11 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             if _p2 and _p2.get("Id"):
                 return {"ok": True, "skipped": True, "reason": "已是目标名",
                         "person_id": str(_p2.get("Id") or "")}
-            return {"ok": False, "reason": "Emby 中未找到该人物（原文名与目标名都搜不到）"}
+            # v4.7.11（issue #12）：原文名与目标中文名都搜不到 Person 实体 → 永久性「不适用」，
+            # 不是「改名失败」。带 no_entity 标记上抛，由调用方落独立终态，
+            # 不再计入「同步失败」角标（此前只能手工改库才消得掉）。
+            return {"ok": False, "no_entity": True,
+                    "reason": "Emby 中未找到该人物（原文名与目标名都搜不到）—— 该 Person 实体不存在，无需同步"}
         if str(person.get("Name") or "").strip() == target:
             return {"ok": True, "skipped": True, "reason": "已是目标名",
                     "person_id": str(person.get("Id") or "")}
@@ -1789,7 +1794,8 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             rows = _dbm.list_translated_pending_sync(plugin_id=_pid, server_id=server_id) or []
         except Exception:
             rows = []
-        _res = {"total": len(rows), "renamed": 0, "skipped": 0, "failed": 0, "fails": [], "message": ""}
+        _res = {"total": len(rows), "renamed": 0, "skipped": 0, "failed": 0, "no_entity": 0,
+                "fails": [], "message": ""}
         if not rows:
             _res["message"] = "没有待同步的人名"
             return _res
@@ -1857,14 +1863,23 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                     except Exception:
                         pass
                 else:
-                    _res["failed"] += 1
-                    if len(_res["fails"]) < 8:
-                        _res["fails"].append(f"{_orig} → {_target}（{_sr.get('reason')}）")
+                    # v4.7.11（issue #12）：Emby 查无此 Person（永久性不适用）→ 落 no_entity 终态，
+                    # 不计「同步失败」、不进待同步（重试多少次都不会成功）。
+                    # failed 只留给「实体存在但改不动」（Emby 报错、同名多候选、权限）。
+                    _no_ent = bool(_sr.get("no_entity"))
+                    if _no_ent:
+                        _res["no_entity"] = int(_res.get("no_entity") or 0) + 1
+                    else:
+                        _res["failed"] += 1
+                        if len(_res["fails"]) < 8:
+                            _res["fails"].append(f"{_orig} → {_target}（{_sr.get('reason')}）")
                     try:
                         # 同步失败只记原因，绝不改译文/状态为成功（文档 §46）
-                        _dbm.update_pool_status(plugin_id=_pid, server_id=_skey, emby_person_id=_person_id,
-                                                name_original=_orig, sync_status="failed",
-                                                sync_error=str(_sr.get("reason") or ""))
+                        _dbm.update_pool_status(
+                            plugin_id=_pid, server_id=_skey, emby_person_id=_person_id,
+                            name_original=_orig,
+                            sync_status=("no_entity" if _no_ent else "failed"),
+                            sync_error=str(_sr.get("reason") or ""))
                     except Exception:
                         pass
         finally:
@@ -1883,7 +1898,9 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             _left_sync = 0
         _res["left_sync"] = _left_sync
         _res["message"] = (f"改名 {_res['renamed']} 个 · 已是译文 {_res['skipped']} 个 · "
-                           f"未找到/失败 {_res['failed']} 个（本轮处理 {_res['total']} 个"
+                           f"未找到/失败 {_res['failed']} 个"
+                           f"{(' · Emby 无此人物 ' + str(_res['no_entity']) + ' 个') if _res.get('no_entity') else ''}"
+                           f"（本轮处理 {_res['total']} 个"
                            f"{('，' + ctx) if ctx else ''}）· 剩余待同步 {_left_sync}")
         self._push_log("INFO", f"🔄 人名池同步：{_res['message']}")
         for _f in _res["fails"]:
@@ -2201,6 +2218,39 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         except Exception as e:
             return {"success": False, "message": str(e)}
 
+    def _api_pool_cleanup(self, data: Optional[dict] = None):
+        """人名池「Emby 无此人物」批量清理入口（v4.7.11 · issue #12）。
+
+        action='mark'   → 标记为无需同步（no_entity 终态：不计「同步失败」，也不进「待同步」）
+        action='remove' → 移除这些池行（只删人名池行；person 表译文 / nfo / 条目均不受影响）
+        按当前页筛选条件（status/keyword/type/server_id）批量执行，避免用户只能手工改库。
+        """
+        _g = self._api_gate()
+        if _g:
+            return _g
+        _tb = self._task_busy_msg()
+        if _tb:
+            return _tb
+        try:
+            data = data or {}
+            action = str(data.get("action") or "mark").strip().lower()
+            if action not in ("mark", "remove"):
+                return {"success": False, "message": "action 只支持 mark / remove"}
+            dbm = getattr(self, "_name_map_db", None) or NameMapDb()
+            _r = dbm.cleanup_no_entity(plugin_id=self.__class__.__name__, action=action,
+                                       status=str(data.get("status") or "no_entity"),
+                                       keyword=str(data.get("keyword") or ""),
+                                       ptype=str(data.get("type") or ""),
+                                       server_id=str(data.get("server_id") or ""))
+            if _r.get("error"):
+                return {"success": False, "message": str(_r.get("error"))}
+            _n = int(_r.get("affected") or 0)
+            _txt = "已移除" if action == "remove" else "已标记为无需同步"
+            self._push_log("INFO", f"人名池清理：{_txt} {_n} 行（Emby 无此人物）")
+            return {"success": True, "affected": _n, "message": f"{_txt} {_n} 行"}
+        except Exception as e:
+            return {"success": False, "message": str(e)}
+
     def _api_pool_sync_one(self, data: Optional[dict] = None):
         """单条同步到 Emby（池编辑弹窗的「同步到 Emby」按钮）。"""
         _g = self._api_gate()
@@ -2239,10 +2289,18 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                                        name_current=_target)
                 self._push_log("INFO", f"人名池同步：{_orig} → {_target} · {_sr.get('reason')}")
                 return {"success": True, "message": f"{_sr.get('reason')}：{_disp}", "data": _sr}
+            # v4.7.11（issue #12）：与批量路径同口径 —— Emby 查无此 Person 落 no_entity 终态，
+            # 只对「实体存在但改不动」记 failed。
+            _no_ent = bool(_sr.get("no_entity"))
             dbm.update_pool_status(plugin_id=self.__class__.__name__, server_id=_skey,
                                    emby_person_id=str(data.get("emby_person_id") or ""),
-                                   name_original=_orig, sync_status="failed",
+                                   name_original=_orig,
+                                   sync_status=("no_entity" if _no_ent else "failed"),
                                    sync_error=str(_sr.get("reason") or ""))
+            if _no_ent:
+                self._push_log("INFO", f"人名池同步：{_orig} 在 Emby 无此人物，已标记为无需同步")
+                return {"success": False, "no_entity": True,
+                        "message": f"Emby 无此人物「{_orig}」· 无需同步（已标记，不计入同步失败）"}
             self._push_log("WARNING", f"人名池同步失败：{_orig} → {_target}（{_sr.get('reason')}）")
             return {"success": False, "message": f"同步失败：{_sr.get('reason')}"}
         except Exception as e:
@@ -5399,6 +5457,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
         _pid = self.__class__.__name__
         _idle = 0
         _last_log = 0.0
+        _nr_log = 0.0
         while True:
             try:
                 # 热加载防重：已被新实例的 worker 接管 → 本线程退出（防双份消费）
@@ -5430,6 +5489,14 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                         _ev.wait(1.0); _ev.clear(); continue
                 _st = self._writeback_pending_round(_pid)
                 if not _st or not _st.get("did"):
+                    # v4.7.11（issue #11）：not_ready 占满整轮时此前**完全无痕**（did=False →
+                    # 直接退避，日志里一行都没有），用户只看到角标永久挂着却查不出原因。
+                    # 这里补一条限流 INFO（60s 一次），说明「为什么这条一直不写」。
+                    _nr = int(_st.get("not_ready") or 0) if _st else 0
+                    if _nr and time.time() - _nr_log >= 60:
+                        _nr_log = time.time()
+                        self._push_log("INFO", f"自动写回：本轮 {_nr} 个条目未就绪（仍有待翻词条），"
+                                               f"暂不写回，等待翻译完成；若长期不变请查看该条目的待翻清单")
                     _idle += 1
                     _wait = 1.0 if _idle < 3 else (2.0 if _idle < 10 else 5.0)
                     self._wb_status_idle()

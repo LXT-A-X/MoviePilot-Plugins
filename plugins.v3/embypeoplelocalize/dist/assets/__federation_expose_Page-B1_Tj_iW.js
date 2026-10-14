@@ -2469,10 +2469,10 @@ const _hoisted_85$2 = {
   key: 0,
   class: "epl-edit-orig"
 };
-const _hoisted_86$1 = { class: "epl-cast-hint" };
-const _hoisted_87$1 = { class: "epl-tx-preview" };
-const _hoisted_88$1 = { class: "epl-tx-num" };
-const _hoisted_89$1 = { class: "epl-tx-num" };
+const _hoisted_86$2 = { class: "epl-cast-hint" };
+const _hoisted_87$2 = { class: "epl-tx-preview" };
+const _hoisted_88$2 = { class: "epl-tx-num" };
+const _hoisted_89$2 = { class: "epl-tx-num" };
 const _hoisted_90$1 = {
   key: 1,
   class: "epl-tx-current",
@@ -5189,7 +5189,7 @@ return (_ctx, _cache) => {
                                               _: 1
                                             }, 8, ["modelValue"]))
                                       ]),
-                                      _createElementVNode$3("div", _hoisted_86$1, _toDisplayString$3(roleScopeHint()), 1)
+                                      _createElementVNode$3("div", _hoisted_86$2, _toDisplayString$3(roleScopeHint()), 1)
                                     ], 64))
                                   : _createCommentVNode$3("", true)
                               ]),
@@ -5360,18 +5360,18 @@ return (_ctx, _cache) => {
                   ]))]),
                   _: 1
                 }),
-                _createElementVNode$3("div", _hoisted_87$1, [
+                _createElementVNode$3("div", _hoisted_87$2, [
                   _createElementVNode$3("div", {
                     class: _normalizeClass$2(["epl-tx-preview-row", { 'epl-tx-off': !txEstimate.value.wantP }])
                   }, [
                     _cache[91] || (_cache[91] = _createElementVNode$3("span", null, "第一排（人物姓名）", -1)),
-                    _createElementVNode$3("span", _hoisted_88$1, _toDisplayString$3(txPreview.value.loading ? '…' : `待翻 ${txEstimate.value.names} 个 / 范围内 ${txEstimate.value.namesScope} 个`), 1)
+                    _createElementVNode$3("span", _hoisted_88$2, _toDisplayString$3(txPreview.value.loading ? '…' : `待翻 ${txEstimate.value.names} 个 / 范围内 ${txEstimate.value.namesScope} 个`), 1)
                   ], 2),
                   _createElementVNode$3("div", {
                     class: _normalizeClass$2(["epl-tx-preview-row", { 'epl-tx-off': !txEstimate.value.wantR }])
                   }, [
                     _cache[92] || (_cache[92] = _createElementVNode$3("span", null, "第二排（角色名）", -1)),
-                    _createElementVNode$3("span", _hoisted_89$1, _toDisplayString$3(txPreview.value.loading ? '…' : `待翻 ${txEstimate.value.roles} 个 / 范围内 ${txEstimate.value.rolesScope} 个`), 1)
+                    _createElementVNode$3("span", _hoisted_89$2, _toDisplayString$3(txPreview.value.loading ? '…' : `待翻 ${txEstimate.value.roles} 个 / 范围内 ${txEstimate.value.rolesScope} 个`), 1)
                   ], 2)
                 ]),
                 (!txPreview.value.loading && txEstimate.value.pending === 0 && txEstimate.value.scope === 0)
@@ -5731,117 +5731,127 @@ const _hoisted_19$1 = { class: "epl-pool-chips" };
 const _hoisted_20$1 = ["onClick"];
 const _hoisted_21$1 = { class: "epl-pool-chips" };
 const _hoisted_22$1 = ["onClick"];
-const _hoisted_23$1 = { class: "epl-pool-table epl-pool-desktop-table" };
-const _hoisted_24$1 = {
+const _hoisted_23$1 = {
+  key: 2,
+  class: "epl-pool-cleanup"
+};
+const _hoisted_24$1 = { class: "epl-pool-cleanup-tip" };
+const _hoisted_25$1 = { class: "epl-pool-table epl-pool-desktop-table" };
+const _hoisted_26$1 = {
   key: 1,
   class: "epl-pool-empty"
 };
-const _hoisted_25$1 = { class: "epl-pool-tr" };
-const _hoisted_26$1 = ["title"];
-const _hoisted_27$1 = ["title"];
-const _hoisted_28$1 = { class: "c-type" };
-const _hoisted_29$1 = { class: "c-status" };
-const _hoisted_30$1 = { class: "c-occ" };
-const _hoisted_31$1 = { class: "c-op" };
-const _hoisted_32$1 = {
+const _hoisted_27$1 = { class: "epl-pool-tr" };
+const _hoisted_28$1 = ["title"];
+const _hoisted_29$1 = ["title"];
+const _hoisted_30$1 = { class: "c-type" };
+const _hoisted_31$1 = { class: "c-status" };
+const _hoisted_32$1 = { class: "c-occ" };
+const _hoisted_33$1 = { class: "c-op" };
+const _hoisted_34$1 = {
   key: 0,
   class: "epl-pool-occ"
 };
-const _hoisted_33$1 = { class: "epl-pool-occ-head" };
-const _hoisted_34$1 = {
+const _hoisted_35$1 = { class: "epl-pool-occ-head" };
+const _hoisted_36$1 = {
   key: 0,
   class: "epl-pool-occ-empty"
 };
-const _hoisted_35$1 = {
+const _hoisted_37$1 = {
   key: 1,
   class: "epl-pool-occ-empty"
 };
-const _hoisted_36$1 = {
+const _hoisted_38$1 = {
   key: 2,
   class: "epl-pool-occ-list"
 };
-const _hoisted_37$1 = { class: "epl-occ-title" };
-const _hoisted_38$1 = {
+const _hoisted_39$1 = { class: "epl-occ-title" };
+const _hoisted_40$1 = {
   key: 0,
   class: "epl-occ-count"
 };
-const _hoisted_39$1 = {
+const _hoisted_41$1 = {
   key: 1,
   class: "epl-occ-del"
 };
-const _hoisted_40$1 = { class: "epl-pool-mobile-list" };
-const _hoisted_41$1 = {
+const _hoisted_42$1 = { class: "epl-pool-mobile-list" };
+const _hoisted_43$1 = {
   key: 0,
   class: "epl-pool-empty"
 };
-const _hoisted_42$1 = { class: "person-card-top" };
-const _hoisted_43$1 = ["title"];
-const _hoisted_44$1 = { class: "person-card-main" };
+const _hoisted_44$1 = { class: "person-card-top" };
 const _hoisted_45$1 = ["title"];
-const _hoisted_46$1 = { class: "person-card-tools" };
-const _hoisted_47$1 = {
+const _hoisted_46$1 = { class: "person-card-main" };
+const _hoisted_47$1 = ["title"];
+const _hoisted_48$1 = { class: "person-card-tools" };
+const _hoisted_49$1 = {
   key: 0,
   class: "person-card-detail"
 };
-const _hoisted_48$1 = { class: "person-card-row" };
-const _hoisted_49$1 = { class: "person-card-v" };
 const _hoisted_50$1 = { class: "person-card-row" };
 const _hoisted_51$1 = { class: "person-card-v" };
-const _hoisted_52$1 = { class: "person-card-actions" };
-const _hoisted_53$1 = {
+const _hoisted_52$1 = { class: "person-card-row" };
+const _hoisted_53$1 = { class: "person-card-v" };
+const _hoisted_54$1 = { class: "person-card-actions" };
+const _hoisted_55$1 = {
   key: 0,
   class: "epl-pool-occ"
 };
-const _hoisted_54$1 = { class: "epl-pool-occ-head" };
-const _hoisted_55$1 = {
+const _hoisted_56$1 = { class: "epl-pool-occ-head" };
+const _hoisted_57$1 = {
   key: 0,
   class: "epl-pool-occ-empty"
 };
-const _hoisted_56$1 = {
+const _hoisted_58$1 = {
   key: 1,
   class: "epl-pool-occ-empty"
 };
-const _hoisted_57$1 = {
+const _hoisted_59$1 = {
   key: 2,
   class: "epl-pool-occ-list"
 };
-const _hoisted_58$1 = { class: "epl-occ-title" };
-const _hoisted_59$1 = {
+const _hoisted_60$1 = { class: "epl-occ-title" };
+const _hoisted_61$1 = {
   key: 0,
   class: "epl-occ-count"
 };
-const _hoisted_60$1 = {
+const _hoisted_62$1 = {
   key: 1,
   class: "epl-occ-del"
 };
-const _hoisted_61$1 = {
-  key: 2,
+const _hoisted_63$1 = {
+  key: 3,
   class: "epl-pool-page"
 };
-const _hoisted_62$1 = { class: "epl-dlg" };
-const _hoisted_63$1 = { class: "epl-dlg-body" };
-const _hoisted_64$1 = { class: "epl-field" };
-const _hoisted_65$1 = { class: "epl-field-v" };
+const _hoisted_64$1 = { class: "epl-dlg" };
+const _hoisted_65$1 = { class: "epl-dlg-body" };
 const _hoisted_66$1 = { class: "epl-field" };
 const _hoisted_67$1 = { class: "epl-field-v" };
 const _hoisted_68$1 = { class: "epl-field" };
 const _hoisted_69$1 = { class: "epl-field-v" };
-const _hoisted_70$1 = { class: "epl-dlg-acts" };
-const _hoisted_71$1 = { class: "epl-dlg" };
-const _hoisted_72$1 = { class: "epl-dlg-body" };
-const _hoisted_73$1 = { class: "epl-dlg-acts" };
-const _hoisted_74$1 = { class: "epl-dlg" };
-const _hoisted_75$1 = { class: "epl-dlg-body" };
-const _hoisted_76$1 = { class: "epl-field" };
-const _hoisted_77$1 = { class: "epl-field-v" };
+const _hoisted_70$1 = { class: "epl-field" };
+const _hoisted_71$1 = { class: "epl-field-v" };
+const _hoisted_72$1 = { class: "epl-dlg-acts" };
+const _hoisted_73$1 = { class: "epl-dlg" };
+const _hoisted_74$1 = { class: "epl-dlg-body" };
+const _hoisted_75$1 = { class: "epl-dlg-acts" };
+const _hoisted_76$1 = { class: "epl-dlg" };
+const _hoisted_77$1 = { class: "epl-dlg-body" };
 const _hoisted_78$1 = { class: "epl-field" };
 const _hoisted_79$1 = { class: "epl-field-v" };
-const _hoisted_80$1 = { class: "epl-dlg-acts" };
-const _hoisted_81$1 = { class: "epl-dlg" };
-const _hoisted_82$1 = { class: "epl-dlg-body" };
-const _hoisted_83$1 = { class: "epl-field" };
-const _hoisted_84$1 = { class: "epl-field-v" };
-const _hoisted_85$1 = { class: "epl-dlg-acts" };
+const _hoisted_80$1 = { class: "epl-field" };
+const _hoisted_81$1 = { class: "epl-field-v" };
+const _hoisted_82$1 = { class: "epl-dlg-acts" };
+const _hoisted_83$1 = { class: "epl-dlg" };
+const _hoisted_84$1 = { class: "epl-dlg-body" };
+const _hoisted_85$1 = { class: "epl-field" };
+const _hoisted_86$1 = { class: "epl-field-v" };
+const _hoisted_87$1 = {
+  key: 0,
+  class: "epl-field"
+};
+const _hoisted_88$1 = { class: "epl-field-v" };
+const _hoisted_89$1 = { class: "epl-dlg-acts" };
 
 const {computed: computed$2,inject: inject$2,onActivated: onActivated$1,onBeforeUnmount,onDeactivated,onMounted: onMounted$2,ref: ref$2,watch: watch$1} = await importShared('vue');
 
@@ -5892,6 +5902,7 @@ const STATUS_FILTERS = [
   { value: 'translated', title: '待同步' },
   { value: 'synced', title: '已同步' },
   { value: 'failed', title: '同步失败' },
+  { value: 'no_entity', title: '无此人物' },
 ];
 
 const rows = ref$2([]);
@@ -5913,7 +5924,7 @@ function onDocPointerDown(e) {
   if (el && !el.contains(e.target)) filterOpen.value = false;
 }
 
-const counts = ref$2({ total: 0, pending: 0, no_change: 0, translated: 0, synced: 0, failed: 0 });
+const counts = ref$2({ total: 0, pending: 0, no_change: 0, translated: 0, synced: 0, failed: 0, no_entity: 0 });
 const fetchState = ref$2({ running: false, total: 0, done: 0, current: '', added: 0, updated: 0, unchanged: 0, filtered: 0, failed: 0 });
 const txState = ref$2({});
 const poolTaskRunning = ref$2(false);
@@ -6001,6 +6012,8 @@ function statusChip(r) {
   if (r.status === '无需操作') return { text: '无需操作', color: 'success', dot: '🟩' }
   if (r.status === '待同步') return { text: '待同步', color: 'warning', dot: '🟡' }
   if (r.status === '同步失败') return { text: '同步失败', color: 'error', dot: '⚠️' }
+  // v4.7.11（issue #12）：Emby 无此 Person 实体 = 永久性不适用，不是同步链路故障
+  if (r.status === '无此人物') return { text: '无此人物', color: 'info', dot: '⚪' }
   return { text: '已同步', color: 'success', dot: '🟢' }
 }
 
@@ -6040,12 +6053,15 @@ function recomputeRowStatus(r) {
   if (!target) sync = 'unknown';
   else if (cur && cur === target) sync = 'synced';
   else if (r?.sync_status === 'failed') sync = 'failed';
+  // v4.7.11（issue #12）：Emby 无此人物 = 独立终态（不是失败，也无需再同步）
+  else if (r?.sync_status === 'no_entity') sync = 'no_entity';
   // v4.6.93：原文已是中文 + Emby 当前名未知（扫描缓存行/无身份）→ 无同步可言（不报待同步）
   else if (!cur && translation === 'no_change') sync = 'unknown';
   else sync = 'pending';
   let ui;
   if (translation === 'pending' || translation === 'failed') ui = '待翻译';
   else if (sync === 'failed') ui = '同步失败';
+  else if (sync === 'no_entity') ui = '无此人物';
   else if (sync === 'pending') ui = '待同步';
   else if (translation === 'no_change') ui = '无需操作';
   else ui = '已同步';
@@ -6240,6 +6256,32 @@ async function clearPool() {
     notify(r?.message || '人名池已清空', 'success');
     refreshAll(true);
   } catch (e) { notify((e && e.message) || '清除失败', 'error'); } finally { poolBusy.value = ''; }
+}
+
+// v4.7.11（issue #12）：Emby 无此人物批量清理 —— 按当前筛选条件标记终态 / 移除池行
+async function cleanupNoEntity(action) {
+  const _st = status.value === 'failed' ? 'failed' : 'no_entity';
+  const _removing = action === 'remove';
+  if (!guard.check(_removing ? '移除池行' : '标记为无需同步')) return
+  const _n = _st === 'failed' ? counts.value.failed : counts.value.no_entity;
+  const _scope = _st === 'failed' ? '「同步失败」' : '「无此人物」';
+  if (!await askConfirm({
+    title: _removing ? '移除这些池行' : '标记为无需同步',
+    text: `确认${_removing ? '移除' : '标记'}当前筛选下的 ${_n} 条${_scope}记录？`,
+    detail: _removing
+      ? '只删除人名池里的这些行；条目译文、nfo 与库页翻译记录都不受影响（这些名字已不在 Emby，重新采集会再入池）。'
+      : '标记为终态「无此人物」：不计入同步失败、也不再进入待同步 —— Emby 里没有这个 Person 实体，重试不会成功。',
+    okText: _removing ? '确认移除' : '确认标记',
+    color: _removing ? 'error' : 'warning',
+  })) return
+  poolBusy.value = _removing ? 'cleanup_rm' : 'cleanup_mark';
+  try {
+    const r = await api.post(props.api, '/pool/cleanup', {
+      action, status: _st, keyword: keyword.value, type: type.value, server_id: '',
+    });
+    notify(r?.message || '操作完成', 'success');
+    refreshAll(true);
+  } catch (e) { notify((e && e.message) || '操作失败', 'error'); } finally { poolBusy.value = ''; }
 }
 
 // ── 出现清单 ──
@@ -6494,7 +6536,7 @@ return (_ctx, _cache) => {
 
   return (_openBlock$2(), _createElementBlock$2("div", _hoisted_1$2, [
     _createElementVNode$2("div", _hoisted_2$2, [
-      _createElementVNode$2("span", _hoisted_3$2, "共 " + _toDisplayString$2(counts.value.total) + " 人 · 待翻 " + _toDisplayString$2(counts.value.pending) + " · 待同步 " + _toDisplayString$2(counts.value.translated) + " · 已同步 " + _toDisplayString$2(counts.value.synced) + "（其中原文已是中文 " + _toDisplayString$2(counts.value.no_change) + "）", 1),
+      _createElementVNode$2("span", _hoisted_3$2, "共 " + _toDisplayString$2(counts.value.total) + " 人 · 待翻 " + _toDisplayString$2(counts.value.pending) + " · 待同步 " + _toDisplayString$2(counts.value.translated) + " · 无此人物 " + _toDisplayString$2(counts.value.no_entity) + " · 已同步 " + _toDisplayString$2(counts.value.synced) + "（其中原文已是中文 " + _toDisplayString$2(counts.value.no_change) + "）", 1),
       _createElementVNode$2("div", _hoisted_4$2, [
         _createVNode$2(_component_v_btn, {
           size: "small",
@@ -6506,7 +6548,7 @@ return (_ctx, _cache) => {
           title: poolFetchTitle.value,
           onClick: openFetch
         }, {
-          default: _withCtx$2(() => [...(_cache[20] || (_cache[20] = [
+          default: _withCtx$2(() => [...(_cache[22] || (_cache[22] = [
             _createTextVNode$2("拉取人名", -1)
           ]))]),
           _: 1
@@ -6520,7 +6562,7 @@ return (_ctx, _cache) => {
           title: pluginOffTitle.value,
           onClick: openTranslate
         }, {
-          default: _withCtx$2(() => [...(_cache[21] || (_cache[21] = [
+          default: _withCtx$2(() => [...(_cache[23] || (_cache[23] = [
             _createTextVNode$2("批量翻译", -1)
           ]))]),
           _: 1
@@ -6534,7 +6576,7 @@ return (_ctx, _cache) => {
           title: poolFetchTitle.value || pluginOffTitle.value,
           onClick: openSync
         }, {
-          default: _withCtx$2(() => [...(_cache[22] || (_cache[22] = [
+          default: _withCtx$2(() => [...(_cache[24] || (_cache[24] = [
             _createTextVNode$2("批量同步", -1)
           ]))]),
           _: 1
@@ -6549,7 +6591,7 @@ return (_ctx, _cache) => {
           loading: poolBusy.value === 'clear',
           onClick: clearPool
         }, {
-          default: _withCtx$2(() => [...(_cache[23] || (_cache[23] = [
+          default: _withCtx$2(() => [...(_cache[25] || (_cache[25] = [
             _createTextVNode$2("清除人名池", -1)
           ]))]),
           _: 1
@@ -6563,7 +6605,7 @@ return (_ctx, _cache) => {
           loading: poolBusy.value === 'export',
           onClick: exportPool
         }, {
-          default: _withCtx$2(() => [...(_cache[24] || (_cache[24] = [
+          default: _withCtx$2(() => [...(_cache[26] || (_cache[26] = [
             _createTextVNode$2("导出", -1)
           ]))]),
           _: 1
@@ -6577,7 +6619,7 @@ return (_ctx, _cache) => {
           loading: poolBusy.value === 'import',
           onClick: pickPoolImport
         }, {
-          default: _withCtx$2(() => [...(_cache[25] || (_cache[25] = [
+          default: _withCtx$2(() => [...(_cache[27] || (_cache[27] = [
             _createTextVNode$2("导入", -1)
           ]))]),
           _: 1
@@ -6596,7 +6638,7 @@ return (_ctx, _cache) => {
       ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_5$2, [
           _createElementVNode$2("div", _hoisted_6$2, [
             _createVNode$2(_component_v_icon, { size: "16" }, {
-              default: _withCtx$2(() => [...(_cache[26] || (_cache[26] = [
+              default: _withCtx$2(() => [...(_cache[28] || (_cache[28] = [
                 _createTextVNode$2("mdi-progress-download", -1)
               ]))]),
               _: 1
@@ -6622,7 +6664,7 @@ return (_ctx, _cache) => {
                   disabled: !pluginEnabled.value,
                   onClick: pauseFetch
                 }, {
-                  default: _withCtx$2(() => [...(_cache[27] || (_cache[27] = [
+                  default: _withCtx$2(() => [...(_cache[29] || (_cache[29] = [
                     _createTextVNode$2("暂停", -1)
                   ]))]),
                   _: 1
@@ -6638,7 +6680,7 @@ return (_ctx, _cache) => {
                   disabled: !pluginEnabled.value,
                   onClick: resumeFetch
                 }, {
-                  default: _withCtx$2(() => [...(_cache[28] || (_cache[28] = [
+                  default: _withCtx$2(() => [...(_cache[30] || (_cache[30] = [
                     _createTextVNode$2("继续", -1)
                   ]))]),
                   _: 1
@@ -6658,7 +6700,7 @@ return (_ctx, _cache) => {
       ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_11$1, [
           _createElementVNode$2("div", _hoisted_12$1, [
             _createVNode$2(_component_v_icon, { size: "16" }, {
-              default: _withCtx$2(() => [...(_cache[29] || (_cache[29] = [
+              default: _withCtx$2(() => [...(_cache[31] || (_cache[31] = [
                 _createTextVNode$2("mdi-translate", -1)
               ]))]),
               _: 1
@@ -6688,7 +6730,7 @@ return (_ctx, _cache) => {
                   disabled: !pluginEnabled.value,
                   onClick: pauseTranslate
                 }, {
-                  default: _withCtx$2(() => [...(_cache[30] || (_cache[30] = [
+                  default: _withCtx$2(() => [...(_cache[32] || (_cache[32] = [
                     _createTextVNode$2("暂停", -1)
                   ]))]),
                   _: 1
@@ -6702,7 +6744,7 @@ return (_ctx, _cache) => {
                   disabled: !pluginEnabled.value,
                   onClick: resumeTranslate
                 }, {
-                  default: _withCtx$2(() => [...(_cache[31] || (_cache[31] = [
+                  default: _withCtx$2(() => [...(_cache[33] || (_cache[33] = [
                     _createTextVNode$2("继续", -1)
                   ]))]),
                   _: 1
@@ -6753,7 +6795,7 @@ return (_ctx, _cache) => {
         ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_17$1, [
             _createElementVNode$2("div", _hoisted_18$1, [
               _createElementVNode$2("div", _hoisted_19$1, [
-                _cache[32] || (_cache[32] = _createElementVNode$2("span", { class: "epl-pool-chips-label" }, "类型", -1)),
+                _cache[34] || (_cache[34] = _createElementVNode$2("span", { class: "epl-pool-chips-label" }, "类型", -1)),
                 (_openBlock$2(), _createElementBlock$2(_Fragment$2, null, _renderList$2(TYPE_FILTERS, (t) => {
                   return _createElementVNode$2("button", {
                     key: 't' + t.value,
@@ -6764,7 +6806,7 @@ return (_ctx, _cache) => {
                 }), 64))
               ]),
               _createElementVNode$2("div", _hoisted_21$1, [
-                _cache[33] || (_cache[33] = _createElementVNode$2("span", { class: "epl-pool-chips-label" }, "状态", -1)),
+                _cache[35] || (_cache[35] = _createElementVNode$2("span", { class: "epl-pool-chips-label" }, "状态", -1)),
                 (_openBlock$2(), _createElementBlock$2(_Fragment$2, null, _renderList$2(STATUS_FILTERS, (s) => {
                   return _createElementVNode$2("button", {
                     key: 's' + s.value,
@@ -6781,7 +6823,7 @@ return (_ctx, _cache) => {
               class: "epl-pool-reset",
               onClick: resetFilter
             }, {
-              default: _withCtx$2(() => [...(_cache[34] || (_cache[34] = [
+              default: _withCtx$2(() => [...(_cache[36] || (_cache[36] = [
                 _createTextVNode$2("重置", -1)
               ]))]),
               _: 1
@@ -6789,8 +6831,43 @@ return (_ctx, _cache) => {
           ]))
         : _createCommentVNode$2("", true)
     ], 512),
-    _createElementVNode$2("div", _hoisted_23$1, [
-      _cache[38] || (_cache[38] = _createStaticVNode("<div class=\"epl-pool-th\" data-v-872f46e1><span class=\"c-name\" data-v-872f46e1>原文名</span><span class=\"c-zh\" data-v-872f46e1>译名</span><span class=\"c-type\" data-v-872f46e1>类型</span><span class=\"c-status\" data-v-872f46e1>状态</span><span class=\"c-occ\" data-v-872f46e1>出现</span><span class=\"c-op\" data-v-872f46e1>操作</span></div>", 1)),
+    (status.value === 'no_entity' || status.value === 'failed')
+      ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_23$1, [
+          _createElementVNode$2("span", _hoisted_24$1, _toDisplayString$2(status.value === 'failed'
+          ? '若确认这些名字在 Emby 里根本没有对应的 Person 实体，可把它们标记为「无需同步」，不再计入同步失败。'
+          : '这些名字在 Emby 里没有对应的 Person 实体（原文名与译名都搜不到），重试不会成功 —— 无需再同步。'), 1),
+          _createVNode$2(_component_v_btn, {
+            size: "x-small",
+            variant: "flat",
+            color: "info",
+            loading: poolBusy.value === 'cleanup_mark',
+            disabled: poolDataOpBlocked.value,
+            title: poolDataOpBlockedHint.value,
+            onClick: _cache[3] || (_cache[3] = $event => (cleanupNoEntity('mark')))
+          }, {
+            default: _withCtx$2(() => [...(_cache[37] || (_cache[37] = [
+              _createTextVNode$2(" 标记为无需同步 ", -1)
+            ]))]),
+            _: 1
+          }, 8, ["loading", "disabled", "title"]),
+          _createVNode$2(_component_v_btn, {
+            size: "x-small",
+            variant: "flat",
+            color: "error",
+            loading: poolBusy.value === 'cleanup_rm',
+            disabled: poolDataOpBlocked.value,
+            title: poolDataOpBlockedHint.value,
+            onClick: _cache[4] || (_cache[4] = $event => (cleanupNoEntity('remove')))
+          }, {
+            default: _withCtx$2(() => [...(_cache[38] || (_cache[38] = [
+              _createTextVNode$2(" 移除这些池行 ", -1)
+            ]))]),
+            _: 1
+          }, 8, ["loading", "disabled", "title"])
+        ]))
+      : _createCommentVNode$2("", true),
+    _createElementVNode$2("div", _hoisted_25$1, [
+      _cache[42] || (_cache[42] = _createStaticVNode("<div class=\"epl-pool-th\" data-v-f52bfc3e><span class=\"c-name\" data-v-f52bfc3e>原文名</span><span class=\"c-zh\" data-v-f52bfc3e>译名</span><span class=\"c-type\" data-v-f52bfc3e>类型</span><span class=\"c-status\" data-v-f52bfc3e>状态</span><span class=\"c-occ\" data-v-f52bfc3e>出现</span><span class=\"c-op\" data-v-f52bfc3e>操作</span></div>", 1)),
       (loading.value)
         ? (_openBlock$2(), _createBlock$2(_component_v_progress_linear, {
             key: 0,
@@ -6800,28 +6877,28 @@ return (_ctx, _cache) => {
           }))
         : _createCommentVNode$2("", true),
       (!loading.value && !rows.value.length)
-        ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_24$1, " 池里还没有人——点右上「拉取人名」把 Emby 的 Person 拉进来 "))
+        ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_26$1, " 池里还没有人——点右上「拉取人名」把 Emby 的 Person 拉进来 "))
         : _createCommentVNode$2("", true),
       (_openBlock$2(true), _createElementBlock$2(_Fragment$2, null, _renderList$2(rows.value, (r) => {
         return (_openBlock$2(), _createElementBlock$2(_Fragment$2, {
           key: personKey(r)
         }, [
-          _createElementVNode$2("div", _hoisted_25$1, [
+          _createElementVNode$2("div", _hoisted_27$1, [
             _createElementVNode$2("span", {
               class: "c-name",
               title: r.name_current || r.name_original
-            }, _toDisplayString$2(r.name_original), 9, _hoisted_26$1),
+            }, _toDisplayString$2(r.name_original), 9, _hoisted_28$1),
             _createElementVNode$2("span", {
               class: "c-zh",
               title: r.name_zh
-            }, _toDisplayString$2(zhText(r) || '—'), 9, _hoisted_27$1),
-            _createElementVNode$2("span", _hoisted_28$1, _toDisplayString$2(typeText(r)), 1),
-            _createElementVNode$2("span", _hoisted_29$1, [
+            }, _toDisplayString$2(zhText(r) || '—'), 9, _hoisted_29$1),
+            _createElementVNode$2("span", _hoisted_30$1, _toDisplayString$2(typeText(r)), 1),
+            _createElementVNode$2("span", _hoisted_31$1, [
               _createElementVNode$2("span", {
                 class: _normalizeClass$1(["epl-badge", 'st-' + statusChip(r).color])
               }, _toDisplayString$2(statusChip(r).dot) + " " + _toDisplayString$2(statusChip(r).text), 3)
             ]),
-            _createElementVNode$2("span", _hoisted_30$1, [
+            _createElementVNode$2("span", _hoisted_32$1, [
               _createVNode$2(_component_v_btn, {
                 size: "x-small",
                 variant: "text",
@@ -6834,98 +6911,7 @@ return (_ctx, _cache) => {
                 _: 2
               }, 1032, ["onClick"])
             ]),
-            _createElementVNode$2("span", _hoisted_31$1, [
-              _createVNode$2(_component_v_btn, {
-                size: "x-small",
-                variant: "flat",
-                color: "primary",
-                density: "comfortable",
-                onClick: $event => (openEdit(r))
-              }, {
-                default: _withCtx$2(() => [...(_cache[35] || (_cache[35] = [
-                  _createTextVNode$2("改", -1)
-                ]))]),
-                _: 1
-              }, 8, ["onClick"]),
-              (canSync(r))
-                ? (_openBlock$2(), _createBlock$2(_component_v_btn, {
-                    key: 0,
-                    size: "x-small",
-                    variant: "flat",
-                    color: "success",
-                    density: "comfortable",
-                    onClick: $event => (openEdit(r))
-                  }, {
-                    default: _withCtx$2(() => [...(_cache[36] || (_cache[36] = [
-                      _createTextVNode$2("同步", -1)
-                    ]))]),
-                    _: 1
-                  }, 8, ["onClick"]))
-                : _createCommentVNode$2("", true),
-              _createVNode$2(_component_v_btn, {
-                size: "x-small",
-                variant: "tonal",
-                density: "comfortable",
-                title: "从 Emby 重新拉取该人（刷新当前名/类型；legacy 无 ID 行顺带补 Person ID）",
-                loading: refetchKey.value === personKey(r),
-                onClick: $event => (refetchOne(r))
-              }, {
-                default: _withCtx$2(() => [...(_cache[37] || (_cache[37] = [
-                  _createTextVNode$2("重拉", -1)
-                ]))]),
-                _: 1
-              }, 8, ["loading", "onClick"])
-            ])
-          ]),
-          (occOpen.value === personKey(r))
-            ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_32$1, [
-                _createElementVNode$2("div", _hoisted_33$1, _toDisplayString$2(r.name_original) + " · " + _toDisplayString$2(occCount(r)), 1),
-                (occLoading.value)
-                  ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_34$1, "查询中…"))
-                  : (!occRows.value.length)
-                    ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_35$1, "库里没有该人名的作品记录（可能其作品尚未扫描入库）"))
-                    : (_openBlock$2(), _createElementBlock$2("ul", _hoisted_36$1, [
-                        (_openBlock$2(true), _createElementBlock$2(_Fragment$2, null, _renderList$2(occUnique.value, (g, i) => {
-                          return (_openBlock$2(), _createElementBlock$2("li", { key: i }, [
-                            _createElementVNode$2("span", _hoisted_37$1, "《" + _toDisplayString$2(g.title) + "》", 1),
-                            (g.count > 1)
-                              ? (_openBlock$2(), _createElementBlock$2("span", _hoisted_38$1, "×" + _toDisplayString$2(g.count), 1))
-                              : _createCommentVNode$2("", true),
-                            (g.deleted)
-                              ? (_openBlock$2(), _createElementBlock$2("span", _hoisted_39$1, "待恢复"))
-                              : _createCommentVNode$2("", true)
-                          ]))
-                        }), 128))
-                      ]))
-              ]))
-            : _createCommentVNode$2("", true)
-        ], 64))
-      }), 128))
-    ]),
-    _createElementVNode$2("div", _hoisted_40$1, [
-      (!loading.value && !rows.value.length)
-        ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_41$1, " 池里还没有人——点上方「拉取人名」把 Emby 的 Person 拉进来 "))
-        : _createCommentVNode$2("", true),
-      (_openBlock$2(true), _createElementBlock$2(_Fragment$2, null, _renderList$2(rows.value, (r) => {
-        return (_openBlock$2(), _createElementBlock$2("div", {
-          key: 'm' + personKey(r),
-          class: "epl-person-card"
-        }, [
-          _createElementVNode$2("div", _hoisted_42$1, [
-            _createElementVNode$2("span", {
-              class: "person-card-name",
-              title: r.name_original
-            }, _toDisplayString$2(r.name_original), 9, _hoisted_43$1),
-            _createElementVNode$2("span", {
-              class: _normalizeClass$1(["epl-badge", 'st-' + statusChip(r).color])
-            }, _toDisplayString$2(statusChip(r).dot) + " " + _toDisplayString$2(statusChip(r).text), 3)
-          ]),
-          _createElementVNode$2("div", _hoisted_44$1, [
-            _createElementVNode$2("span", {
-              class: "person-card-zh",
-              title: r.name_zh
-            }, _toDisplayString$2(zhText(r) || (isChineseText(r.name_original) ? '—' : '— 未译')), 9, _hoisted_45$1),
-            _createElementVNode$2("span", _hoisted_46$1, [
+            _createElementVNode$2("span", _hoisted_33$1, [
               _createVNode$2(_component_v_btn, {
                 size: "x-small",
                 variant: "flat",
@@ -6934,7 +6920,7 @@ return (_ctx, _cache) => {
                 onClick: $event => (openEdit(r))
               }, {
                 default: _withCtx$2(() => [...(_cache[39] || (_cache[39] = [
-                  _createTextVNode$2("编辑", -1)
+                  _createTextVNode$2("改", -1)
                 ]))]),
                 _: 1
               }, 8, ["onClick"]),
@@ -6957,11 +6943,102 @@ return (_ctx, _cache) => {
                 size: "x-small",
                 variant: "tonal",
                 density: "comfortable",
-                title: "从 Emby 重新拉取该人",
+                title: "从 Emby 重新拉取该人（刷新当前名/类型；legacy 无 ID 行顺带补 Person ID）",
                 loading: refetchKey.value === personKey(r),
                 onClick: $event => (refetchOne(r))
               }, {
                 default: _withCtx$2(() => [...(_cache[41] || (_cache[41] = [
+                  _createTextVNode$2("重拉", -1)
+                ]))]),
+                _: 1
+              }, 8, ["loading", "onClick"])
+            ])
+          ]),
+          (occOpen.value === personKey(r))
+            ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_34$1, [
+                _createElementVNode$2("div", _hoisted_35$1, _toDisplayString$2(r.name_original) + " · " + _toDisplayString$2(occCount(r)), 1),
+                (occLoading.value)
+                  ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_36$1, "查询中…"))
+                  : (!occRows.value.length)
+                    ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_37$1, "库里没有该人名的作品记录（可能其作品尚未扫描入库）"))
+                    : (_openBlock$2(), _createElementBlock$2("ul", _hoisted_38$1, [
+                        (_openBlock$2(true), _createElementBlock$2(_Fragment$2, null, _renderList$2(occUnique.value, (g, i) => {
+                          return (_openBlock$2(), _createElementBlock$2("li", { key: i }, [
+                            _createElementVNode$2("span", _hoisted_39$1, "《" + _toDisplayString$2(g.title) + "》", 1),
+                            (g.count > 1)
+                              ? (_openBlock$2(), _createElementBlock$2("span", _hoisted_40$1, "×" + _toDisplayString$2(g.count), 1))
+                              : _createCommentVNode$2("", true),
+                            (g.deleted)
+                              ? (_openBlock$2(), _createElementBlock$2("span", _hoisted_41$1, "待恢复"))
+                              : _createCommentVNode$2("", true)
+                          ]))
+                        }), 128))
+                      ]))
+              ]))
+            : _createCommentVNode$2("", true)
+        ], 64))
+      }), 128))
+    ]),
+    _createElementVNode$2("div", _hoisted_42$1, [
+      (!loading.value && !rows.value.length)
+        ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_43$1, " 池里还没有人——点上方「拉取人名」把 Emby 的 Person 拉进来 "))
+        : _createCommentVNode$2("", true),
+      (_openBlock$2(true), _createElementBlock$2(_Fragment$2, null, _renderList$2(rows.value, (r) => {
+        return (_openBlock$2(), _createElementBlock$2("div", {
+          key: 'm' + personKey(r),
+          class: "epl-person-card"
+        }, [
+          _createElementVNode$2("div", _hoisted_44$1, [
+            _createElementVNode$2("span", {
+              class: "person-card-name",
+              title: r.name_original
+            }, _toDisplayString$2(r.name_original), 9, _hoisted_45$1),
+            _createElementVNode$2("span", {
+              class: _normalizeClass$1(["epl-badge", 'st-' + statusChip(r).color])
+            }, _toDisplayString$2(statusChip(r).dot) + " " + _toDisplayString$2(statusChip(r).text), 3)
+          ]),
+          _createElementVNode$2("div", _hoisted_46$1, [
+            _createElementVNode$2("span", {
+              class: "person-card-zh",
+              title: r.name_zh
+            }, _toDisplayString$2(zhText(r) || (isChineseText(r.name_original) ? '—' : '— 未译')), 9, _hoisted_47$1),
+            _createElementVNode$2("span", _hoisted_48$1, [
+              _createVNode$2(_component_v_btn, {
+                size: "x-small",
+                variant: "flat",
+                color: "primary",
+                density: "comfortable",
+                onClick: $event => (openEdit(r))
+              }, {
+                default: _withCtx$2(() => [...(_cache[43] || (_cache[43] = [
+                  _createTextVNode$2("编辑", -1)
+                ]))]),
+                _: 1
+              }, 8, ["onClick"]),
+              (canSync(r))
+                ? (_openBlock$2(), _createBlock$2(_component_v_btn, {
+                    key: 0,
+                    size: "x-small",
+                    variant: "flat",
+                    color: "success",
+                    density: "comfortable",
+                    onClick: $event => (openEdit(r))
+                  }, {
+                    default: _withCtx$2(() => [...(_cache[44] || (_cache[44] = [
+                      _createTextVNode$2("同步", -1)
+                    ]))]),
+                    _: 1
+                  }, 8, ["onClick"]))
+                : _createCommentVNode$2("", true),
+              _createVNode$2(_component_v_btn, {
+                size: "x-small",
+                variant: "tonal",
+                density: "comfortable",
+                title: "从 Emby 重新拉取该人",
+                loading: refetchKey.value === personKey(r),
+                onClick: $event => (refetchOne(r))
+              }, {
+                default: _withCtx$2(() => [...(_cache[45] || (_cache[45] = [
                   _createTextVNode$2("重拉", -1)
                 ]))]),
                 _: 1
@@ -6980,16 +7057,16 @@ return (_ctx, _cache) => {
             ])
           ]),
           (detailOpen.value === rowKey(r))
-            ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_47$1, [
-                _createElementVNode$2("div", _hoisted_48$1, [
-                  _cache[42] || (_cache[42] = _createElementVNode$2("span", { class: "person-card-k" }, "类型", -1)),
-                  _createElementVNode$2("span", _hoisted_49$1, _toDisplayString$2(typeText(r)), 1)
-                ]),
+            ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_49$1, [
                 _createElementVNode$2("div", _hoisted_50$1, [
-                  _cache[43] || (_cache[43] = _createElementVNode$2("span", { class: "person-card-k" }, "Emby 当前", -1)),
-                  _createElementVNode$2("span", _hoisted_51$1, _toDisplayString$2(r.name_current || '—'), 1)
+                  _cache[46] || (_cache[46] = _createElementVNode$2("span", { class: "person-card-k" }, "类型", -1)),
+                  _createElementVNode$2("span", _hoisted_51$1, _toDisplayString$2(typeText(r)), 1)
                 ]),
                 _createElementVNode$2("div", _hoisted_52$1, [
+                  _cache[47] || (_cache[47] = _createElementVNode$2("span", { class: "person-card-k" }, "Emby 当前", -1)),
+                  _createElementVNode$2("span", _hoisted_53$1, _toDisplayString$2(r.name_current || '—'), 1)
+                ]),
+                _createElementVNode$2("div", _hoisted_54$1, [
                   _createVNode$2(_component_v_btn, {
                     size: "x-small",
                     variant: "tonal",
@@ -7002,21 +7079,21 @@ return (_ctx, _cache) => {
                   }, 1032, ["onClick"])
                 ]),
                 (occOpen.value === rowKey(r))
-                  ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_53$1, [
-                      _createElementVNode$2("div", _hoisted_54$1, _toDisplayString$2(r.name_original) + " · " + _toDisplayString$2(occCount(r)), 1),
+                  ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_55$1, [
+                      _createElementVNode$2("div", _hoisted_56$1, _toDisplayString$2(r.name_original) + " · " + _toDisplayString$2(occCount(r)), 1),
                       (occLoading.value)
-                        ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_55$1, "查询中…"))
+                        ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_57$1, "查询中…"))
                         : (!occRows.value.length)
-                          ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_56$1, "库里没有该人名的作品记录（可能其作品尚未扫描入库）"))
-                          : (_openBlock$2(), _createElementBlock$2("ul", _hoisted_57$1, [
+                          ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_58$1, "库里没有该人名的作品记录（可能其作品尚未扫描入库）"))
+                          : (_openBlock$2(), _createElementBlock$2("ul", _hoisted_59$1, [
                               (_openBlock$2(true), _createElementBlock$2(_Fragment$2, null, _renderList$2(occUnique.value, (g, i) => {
                                 return (_openBlock$2(), _createElementBlock$2("li", { key: i }, [
-                                  _createElementVNode$2("span", _hoisted_58$1, "《" + _toDisplayString$2(g.title) + "》", 1),
+                                  _createElementVNode$2("span", _hoisted_60$1, "《" + _toDisplayString$2(g.title) + "》", 1),
                                   (g.count > 1)
-                                    ? (_openBlock$2(), _createElementBlock$2("span", _hoisted_59$1, "×" + _toDisplayString$2(g.count), 1))
+                                    ? (_openBlock$2(), _createElementBlock$2("span", _hoisted_61$1, "×" + _toDisplayString$2(g.count), 1))
                                     : _createCommentVNode$2("", true),
                                   (g.deleted)
-                                    ? (_openBlock$2(), _createElementBlock$2("span", _hoisted_60$1, "待恢复"))
+                                    ? (_openBlock$2(), _createElementBlock$2("span", _hoisted_62$1, "待恢复"))
                                     : _createCommentVNode$2("", true)
                                 ]))
                               }), 128))
@@ -7029,12 +7106,12 @@ return (_ctx, _cache) => {
       }), 128))
     ]),
     (total.value > size.value)
-      ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_61$1, [
+      ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_63$1, [
           _createVNode$2(_component_v_pagination, {
             modelValue: page.value,
             "onUpdate:modelValue": [
-              _cache[3] || (_cache[3] = $event => ((page).value = $event)),
-              _cache[4] || (_cache[4] = $event => (loadList()))
+              _cache[5] || (_cache[5] = $event => ((page).value = $event)),
+              _cache[6] || (_cache[6] = $event => (loadList()))
             ],
             length: Math.ceil(total.value / size.value),
             "total-visible": "7",
@@ -7044,28 +7121,28 @@ return (_ctx, _cache) => {
       : _createCommentVNode$2("", true),
     _createVNode$2(_component_v_dialog, {
       modelValue: editDlg.value,
-      "onUpdate:modelValue": _cache[9] || (_cache[9] = $event => ((editDlg).value = $event)),
+      "onUpdate:modelValue": _cache[11] || (_cache[11] = $event => ((editDlg).value = $event)),
       "max-width": "460"
     }, {
       default: _withCtx$2(() => [
-        _createElementVNode$2("div", _hoisted_62$1, [
-          _cache[50] || (_cache[50] = _createElementVNode$2("div", { class: "epl-dlg-title" }, "编辑人名", -1)),
-          _createElementVNode$2("div", _hoisted_63$1, [
-            _createElementVNode$2("div", _hoisted_64$1, [
-              _cache[44] || (_cache[44] = _createElementVNode$2("span", { class: "epl-field-k" }, "原文", -1)),
-              _createElementVNode$2("span", _hoisted_65$1, _toDisplayString$2(editRow.value?.name_original), 1)
-            ]),
+        _createElementVNode$2("div", _hoisted_64$1, [
+          _cache[54] || (_cache[54] = _createElementVNode$2("div", { class: "epl-dlg-title" }, "编辑人名", -1)),
+          _createElementVNode$2("div", _hoisted_65$1, [
             _createElementVNode$2("div", _hoisted_66$1, [
-              _cache[45] || (_cache[45] = _createElementVNode$2("span", { class: "epl-field-k" }, "Emby 当前", -1)),
-              _createElementVNode$2("span", _hoisted_67$1, _toDisplayString$2(editRow.value?.name_current || '（未记录）'), 1)
+              _cache[48] || (_cache[48] = _createElementVNode$2("span", { class: "epl-field-k" }, "原文", -1)),
+              _createElementVNode$2("span", _hoisted_67$1, _toDisplayString$2(editRow.value?.name_original), 1)
             ]),
             _createElementVNode$2("div", _hoisted_68$1, [
-              _cache[46] || (_cache[46] = _createElementVNode$2("span", { class: "epl-field-k" }, "类型", -1)),
-              _createElementVNode$2("span", _hoisted_69$1, _toDisplayString$2(typeText(editRow.value)), 1)
+              _cache[49] || (_cache[49] = _createElementVNode$2("span", { class: "epl-field-k" }, "Emby 当前", -1)),
+              _createElementVNode$2("span", _hoisted_69$1, _toDisplayString$2(editRow.value?.name_current || '（未记录）'), 1)
+            ]),
+            _createElementVNode$2("div", _hoisted_70$1, [
+              _cache[50] || (_cache[50] = _createElementVNode$2("span", { class: "epl-field-k" }, "类型", -1)),
+              _createElementVNode$2("span", _hoisted_71$1, _toDisplayString$2(typeText(editRow.value)), 1)
             ]),
             _createVNode$2(_component_v_text_field, {
               modelValue: editZh.value,
-              "onUpdate:modelValue": _cache[5] || (_cache[5] = $event => ((editZh).value = $event)),
+              "onUpdate:modelValue": _cache[7] || (_cache[7] = $event => ((editZh).value = $event)),
               label: "译名",
               density: "compact",
               variant: "outlined",
@@ -7075,20 +7152,20 @@ return (_ctx, _cache) => {
             }, null, 8, ["modelValue"]),
             _createVNode$2(_component_v_checkbox, {
               modelValue: editSyncEmby.value,
-              "onUpdate:modelValue": _cache[6] || (_cache[6] = $event => ((editSyncEmby).value = $event)),
+              "onUpdate:modelValue": _cache[8] || (_cache[8] = $event => ((editSyncEmby).value = $event)),
               density: "compact",
               "hide-details": "",
               color: "primary",
               label: "同步到 Emby（改 Emby 演员名，全局生效；默认不改）"
             }, null, 8, ["modelValue"]),
-            _cache[47] || (_cache[47] = _createElementVNode$2("div", { class: "epl-dlg-tip" }, "保存只改人名池（manual 最高优先级，AI 不覆盖）。勾选上方选项后保存会同时改 Emby Person 实体名（全局生效）。", -1))
+            _cache[51] || (_cache[51] = _createElementVNode$2("div", { class: "epl-dlg-tip" }, "保存只改人名池（manual 最高优先级，AI 不覆盖）。勾选上方选项后保存会同时改 Emby Person 实体名（全局生效）。", -1))
           ]),
-          _createElementVNode$2("div", _hoisted_70$1, [
+          _createElementVNode$2("div", _hoisted_72$1, [
             _createVNode$2(_component_v_btn, {
               variant: "text",
-              onClick: _cache[7] || (_cache[7] = $event => (editDlg.value = false))
+              onClick: _cache[9] || (_cache[9] = $event => (editDlg.value = false))
             }, {
-              default: _withCtx$2(() => [...(_cache[48] || (_cache[48] = [
+              default: _withCtx$2(() => [...(_cache[52] || (_cache[52] = [
                 _createTextVNode$2("取消", -1)
               ]))]),
               _: 1
@@ -7097,9 +7174,9 @@ return (_ctx, _cache) => {
               variant: "flat",
               color: "primary",
               loading: busy.value,
-              onClick: _cache[8] || (_cache[8] = $event => (editSyncEmby.value ? syncOne() : saveEdit()))
+              onClick: _cache[10] || (_cache[10] = $event => (editSyncEmby.value ? syncOne() : saveEdit()))
             }, {
-              default: _withCtx$2(() => [...(_cache[49] || (_cache[49] = [
+              default: _withCtx$2(() => [...(_cache[53] || (_cache[53] = [
                 _createTextVNode$2("保存", -1)
               ]))]),
               _: 1
@@ -7111,17 +7188,17 @@ return (_ctx, _cache) => {
     }, 8, ["modelValue"]),
     _createVNode$2(_component_v_dialog, {
       modelValue: fetchDlg.value,
-      "onUpdate:modelValue": _cache[12] || (_cache[12] = $event => ((fetchDlg).value = $event)),
+      "onUpdate:modelValue": _cache[14] || (_cache[14] = $event => ((fetchDlg).value = $event)),
       "max-width": "460"
     }, {
       default: _withCtx$2(() => [
-        _createElementVNode$2("div", _hoisted_71$1, [
-          _cache[56] || (_cache[56] = _createElementVNode$2("div", { class: "epl-dlg-title" }, "拉取人名", -1)),
-          _createElementVNode$2("div", _hoisted_72$1, [
-            _cache[51] || (_cache[51] = _createElementVNode$2("div", { class: "epl-dlg-tip" }, "拉取类型跟随设置页「翻译范围」的人名类型开关（不再单独设置）。人物类型优先从 Emby People 关系获取；无法确定类型的全库 Person 不参与按类型筛选，建议使用「已选媒体库」范围。", -1)),
+        _createElementVNode$2("div", _hoisted_73$1, [
+          _cache[60] || (_cache[60] = _createElementVNode$2("div", { class: "epl-dlg-title" }, "拉取人名", -1)),
+          _createElementVNode$2("div", _hoisted_74$1, [
+            _cache[55] || (_cache[55] = _createElementVNode$2("div", { class: "epl-dlg-tip" }, "拉取类型跟随设置页「翻译范围」的人名类型开关（不再单独设置）。人物类型优先从 Emby People 关系获取；无法确定类型的全库 Person 不参与按类型筛选，建议使用「已选媒体库」范围。", -1)),
             _createVNode$2(_component_v_radio_group, {
               modelValue: fetchScope.value,
-              "onUpdate:modelValue": _cache[10] || (_cache[10] = $event => ((fetchScope).value = $event)),
+              "onUpdate:modelValue": _cache[12] || (_cache[12] = $event => ((fetchScope).value = $event)),
               density: "compact",
               "hide-details": "",
               class: "epl-dlg-radio"
@@ -7138,14 +7215,14 @@ return (_ctx, _cache) => {
               ]),
               _: 1
             }, 8, ["modelValue"]),
-            _cache[52] || (_cache[52] = _createElementVNode$2("div", { class: "epl-dlg-tip" }, "此处选择仅本次拉取生效，不改设置页配置；仪表盘的「拉取人名」按钮则始终跟随设置页「拉取来源」。", -1))
+            _cache[56] || (_cache[56] = _createElementVNode$2("div", { class: "epl-dlg-tip" }, "此处选择仅本次拉取生效，不改设置页配置；仪表盘的「拉取人名」按钮则始终跟随设置页「拉取来源」。", -1))
           ]),
-          _createElementVNode$2("div", _hoisted_73$1, [
+          _createElementVNode$2("div", _hoisted_75$1, [
             _createVNode$2(_component_v_btn, {
               variant: "text",
-              onClick: _cache[11] || (_cache[11] = $event => (fetchDlg.value = false))
+              onClick: _cache[13] || (_cache[13] = $event => (fetchDlg.value = false))
             }, {
-              default: _withCtx$2(() => [...(_cache[53] || (_cache[53] = [
+              default: _withCtx$2(() => [...(_cache[57] || (_cache[57] = [
                 _createTextVNode$2("取消", -1)
               ]))]),
               _: 1
@@ -7156,7 +7233,7 @@ return (_ctx, _cache) => {
               loading: busy.value,
               onClick: doRescreen
             }, {
-              default: _withCtx$2(() => [...(_cache[54] || (_cache[54] = [
+              default: _withCtx$2(() => [...(_cache[58] || (_cache[58] = [
                 _createTextVNode$2("按当前设置重筛池", -1)
               ]))]),
               _: 1
@@ -7167,7 +7244,7 @@ return (_ctx, _cache) => {
               loading: busy.value,
               onClick: doFetch
             }, {
-              default: _withCtx$2(() => [...(_cache[55] || (_cache[55] = [
+              default: _withCtx$2(() => [...(_cache[59] || (_cache[59] = [
                 _createTextVNode$2("开始拉取", -1)
               ]))]),
               _: 1
@@ -7179,37 +7256,37 @@ return (_ctx, _cache) => {
     }, 8, ["modelValue"]),
     _createVNode$2(_component_v_dialog, {
       modelValue: transDlg.value,
-      "onUpdate:modelValue": _cache[15] || (_cache[15] = $event => ((transDlg).value = $event)),
+      "onUpdate:modelValue": _cache[17] || (_cache[17] = $event => ((transDlg).value = $event)),
       "max-width": "420"
     }, {
       default: _withCtx$2(() => [
-        _createElementVNode$2("div", _hoisted_74$1, [
-          _cache[62] || (_cache[62] = _createElementVNode$2("div", { class: "epl-dlg-title" }, "批量翻译", -1)),
-          _createElementVNode$2("div", _hoisted_75$1, [
-            _createElementVNode$2("div", _hoisted_76$1, [
-              _cache[57] || (_cache[57] = _createElementVNode$2("span", { class: "epl-field-k" }, "待翻译", -1)),
-              _createElementVNode$2("span", _hoisted_77$1, _toDisplayString$2(counts.value.pending) + " 个", 1)
-            ]),
+        _createElementVNode$2("div", _hoisted_76$1, [
+          _cache[66] || (_cache[66] = _createElementVNode$2("div", { class: "epl-dlg-title" }, "批量翻译", -1)),
+          _createElementVNode$2("div", _hoisted_77$1, [
             _createElementVNode$2("div", _hoisted_78$1, [
-              _cache[58] || (_cache[58] = _createElementVNode$2("span", { class: "epl-field-k" }, "无需操作", -1)),
-              _createElementVNode$2("span", _hoisted_79$1, _toDisplayString$2(counts.value.no_change) + " 个", 1)
+              _cache[61] || (_cache[61] = _createElementVNode$2("span", { class: "epl-field-k" }, "待翻译", -1)),
+              _createElementVNode$2("span", _hoisted_79$1, _toDisplayString$2(counts.value.pending) + " 个", 1)
+            ]),
+            _createElementVNode$2("div", _hoisted_80$1, [
+              _cache[62] || (_cache[62] = _createElementVNode$2("span", { class: "epl-field-k" }, "无需操作", -1)),
+              _createElementVNode$2("span", _hoisted_81$1, _toDisplayString$2(counts.value.no_change) + " 个", 1)
             ]),
             _createVNode$2(_component_v_checkbox, {
               modelValue: transSync.value,
-              "onUpdate:modelValue": _cache[13] || (_cache[13] = $event => ((transSync).value = $event)),
+              "onUpdate:modelValue": _cache[15] || (_cache[15] = $event => ((transSync).value = $event)),
               density: "compact",
               "hide-details": "",
               color: "primary",
               label: "翻译完成后自动同步 Emby（默认关闭）"
             }, null, 8, ["modelValue"]),
-            _cache[59] || (_cache[59] = _createElementVNode$2("div", { class: "epl-dlg-tip" }, "翻译由后台常驻 worker 自动完成（限流不丢）；不勾则只写池，之后到「人名池 → 批量同步」手动同步。", -1))
+            _cache[63] || (_cache[63] = _createElementVNode$2("div", { class: "epl-dlg-tip" }, "翻译由后台常驻 worker 自动完成（限流不丢）；不勾则只写池，之后到「人名池 → 批量同步」手动同步。", -1))
           ]),
-          _createElementVNode$2("div", _hoisted_80$1, [
+          _createElementVNode$2("div", _hoisted_82$1, [
             _createVNode$2(_component_v_btn, {
               variant: "text",
-              onClick: _cache[14] || (_cache[14] = $event => (transDlg.value = false))
+              onClick: _cache[16] || (_cache[16] = $event => (transDlg.value = false))
             }, {
-              default: _withCtx$2(() => [...(_cache[60] || (_cache[60] = [
+              default: _withCtx$2(() => [...(_cache[64] || (_cache[64] = [
                 _createTextVNode$2("取消", -1)
               ]))]),
               _: 1
@@ -7220,7 +7297,7 @@ return (_ctx, _cache) => {
               loading: busy.value,
               onClick: doTranslate
             }, {
-              default: _withCtx$2(() => [...(_cache[61] || (_cache[61] = [
+              default: _withCtx$2(() => [...(_cache[65] || (_cache[65] = [
                 _createTextVNode$2("开始", -1)
               ]))]),
               _: 1
@@ -7232,25 +7309,31 @@ return (_ctx, _cache) => {
     }, 8, ["modelValue"]),
     _createVNode$2(_component_v_dialog, {
       modelValue: syncDlg.value,
-      "onUpdate:modelValue": _cache[17] || (_cache[17] = $event => ((syncDlg).value = $event)),
+      "onUpdate:modelValue": _cache[19] || (_cache[19] = $event => ((syncDlg).value = $event)),
       "max-width": "420"
     }, {
       default: _withCtx$2(() => [
-        _createElementVNode$2("div", _hoisted_81$1, [
-          _cache[67] || (_cache[67] = _createElementVNode$2("div", { class: "epl-dlg-title" }, "批量同步到 Emby", -1)),
-          _createElementVNode$2("div", _hoisted_82$1, [
-            _createElementVNode$2("div", _hoisted_83$1, [
-              _cache[63] || (_cache[63] = _createElementVNode$2("span", { class: "epl-field-k" }, "待同步", -1)),
-              _createElementVNode$2("span", _hoisted_84$1, _toDisplayString$2(counts.value.translated) + " 个", 1)
+        _createElementVNode$2("div", _hoisted_83$1, [
+          _cache[72] || (_cache[72] = _createElementVNode$2("div", { class: "epl-dlg-title" }, "批量同步到 Emby", -1)),
+          _createElementVNode$2("div", _hoisted_84$1, [
+            _createElementVNode$2("div", _hoisted_85$1, [
+              _cache[67] || (_cache[67] = _createElementVNode$2("span", { class: "epl-field-k" }, "待同步", -1)),
+              _createElementVNode$2("span", _hoisted_86$1, _toDisplayString$2(counts.value.translated) + " 个", 1)
             ]),
-            _cache[64] || (_cache[64] = _createElementVNode$2("div", { class: "epl-dlg-warn" }, "⚠️ Emby 里改名会全局生效（该 Person 在所有作品中的显示名都会变）。", -1))
+            (counts.value.no_entity)
+              ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_87$1, [
+                  _cache[68] || (_cache[68] = _createElementVNode$2("span", { class: "epl-field-k" }, "Emby 无此人物", -1)),
+                  _createElementVNode$2("span", _hoisted_88$1, _toDisplayString$2(counts.value.no_entity) + " 个（无需同步，不计失败）", 1)
+                ]))
+              : _createCommentVNode$2("", true),
+            _cache[69] || (_cache[69] = _createElementVNode$2("div", { class: "epl-dlg-warn" }, "⚠️ Emby 里改名会全局生效（该 Person 在所有作品中的显示名都会变）。", -1))
           ]),
-          _createElementVNode$2("div", _hoisted_85$1, [
+          _createElementVNode$2("div", _hoisted_89$1, [
             _createVNode$2(_component_v_btn, {
               variant: "text",
-              onClick: _cache[16] || (_cache[16] = $event => (syncDlg.value = false))
+              onClick: _cache[18] || (_cache[18] = $event => (syncDlg.value = false))
             }, {
-              default: _withCtx$2(() => [...(_cache[65] || (_cache[65] = [
+              default: _withCtx$2(() => [...(_cache[70] || (_cache[70] = [
                 _createTextVNode$2("取消", -1)
               ]))]),
               _: 1
@@ -7261,7 +7344,7 @@ return (_ctx, _cache) => {
               loading: busy.value,
               onClick: doSync
             }, {
-              default: _withCtx$2(() => [...(_cache[66] || (_cache[66] = [
+              default: _withCtx$2(() => [...(_cache[71] || (_cache[71] = [
                 _createTextVNode$2("开始", -1)
               ]))]),
               _: 1
@@ -7278,18 +7361,18 @@ return (_ctx, _cache) => {
     }, null, 8, ["state", "on-ok", "on-cancel"]),
     _createVNode$2(_sfc_main$4, {
       modelValue: _unref(guard).dlg.value,
-      "onUpdate:modelValue": _cache[18] || (_cache[18] = $event => ((_unref(guard).dlg.value) = $event)),
+      "onUpdate:modelValue": _cache[20] || (_cache[20] = $event => ((_unref(guard).dlg.value) = $event)),
       reason: _unref(guard).reason.value,
       state: _unref(guard).stateLabel.value,
       action: _unref(guard).pendingLabel.value,
-      onViewTask: _cache[19] || (_cache[19] = $event => (emit('view-task')))
+      onViewTask: _cache[21] || (_cache[21] = $event => (emit('view-task')))
     }, null, 8, ["modelValue", "reason", "state", "action"])
   ]))
 }
 }
 
 };
-const PeoplePool = /*#__PURE__*/_export_sfc(_sfc_main$2, [['__scopeId',"data-v-872f46e1"]]);
+const PeoplePool = /*#__PURE__*/_export_sfc(_sfc_main$2, [['__scopeId',"data-v-f52bfc3e"]]);
 
 const {createTextVNode:_createTextVNode$1,resolveComponent:_resolveComponent$1,withCtx:_withCtx$1,createVNode:_createVNode$1,createElementVNode:_createElementVNode$1,openBlock:_openBlock$1,createElementBlock:_createElementBlock$1,createCommentVNode:_createCommentVNode$1,renderList:_renderList$1,Fragment:_Fragment$1,toDisplayString:_toDisplayString$1,createBlock:_createBlock$1,normalizeClass:_normalizeClass,mergeProps:_mergeProps} = await importShared('vue');
 

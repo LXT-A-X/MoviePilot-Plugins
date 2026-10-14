@@ -43,6 +43,7 @@ const STATUS_FILTERS = [
   { value: 'translated', title: '待同步' },
   { value: 'synced', title: '已同步' },
   { value: 'failed', title: '同步失败' },
+  { value: 'no_entity', title: '无此人物' },
 ]
 
 const rows = ref([])
@@ -64,7 +65,7 @@ function onDocPointerDown(e) {
   if (el && !el.contains(e.target)) filterOpen.value = false
 }
 
-const counts = ref({ total: 0, pending: 0, no_change: 0, translated: 0, synced: 0, failed: 0 })
+const counts = ref({ total: 0, pending: 0, no_change: 0, translated: 0, synced: 0, failed: 0, no_entity: 0 })
 const fetchState = ref({ running: false, total: 0, done: 0, current: '', added: 0, updated: 0, unchanged: 0, filtered: 0, failed: 0 })
 const txState = ref({})
 const poolTaskRunning = ref(false)
@@ -152,6 +153,8 @@ function statusChip(r) {
   if (r.status === '无需操作') return { text: '无需操作', color: 'success', dot: '🟩' }
   if (r.status === '待同步') return { text: '待同步', color: 'warning', dot: '🟡' }
   if (r.status === '同步失败') return { text: '同步失败', color: 'error', dot: '⚠️' }
+  // v4.7.11（issue #12）：Emby 无此 Person 实体 = 永久性不适用，不是同步链路故障
+  if (r.status === '无此人物') return { text: '无此人物', color: 'info', dot: '⚪' }
   return { text: '已同步', color: 'success', dot: '🟢' }
 }
 
@@ -191,12 +194,15 @@ function recomputeRowStatus(r) {
   if (!target) sync = 'unknown'
   else if (cur && cur === target) sync = 'synced'
   else if (r?.sync_status === 'failed') sync = 'failed'
+  // v4.7.11（issue #12）：Emby 无此人物 = 独立终态（不是失败，也无需再同步）
+  else if (r?.sync_status === 'no_entity') sync = 'no_entity'
   // v4.6.93：原文已是中文 + Emby 当前名未知（扫描缓存行/无身份）→ 无同步可言（不报待同步）
   else if (!cur && translation === 'no_change') sync = 'unknown'
   else sync = 'pending'
   let ui
   if (translation === 'pending' || translation === 'failed') ui = '待翻译'
   else if (sync === 'failed') ui = '同步失败'
+  else if (sync === 'no_entity') ui = '无此人物'
   else if (sync === 'pending') ui = '待同步'
   else if (translation === 'no_change') ui = '无需操作'
   else ui = '已同步'
@@ -394,6 +400,32 @@ async function clearPool() {
     notify(r?.message || '人名池已清空', 'success')
     refreshAll(true)
   } catch (e) { notify((e && e.message) || '清除失败', 'error') } finally { poolBusy.value = '' }
+}
+
+// v4.7.11（issue #12）：Emby 无此人物批量清理 —— 按当前筛选条件标记终态 / 移除池行
+async function cleanupNoEntity(action) {
+  const _st = status.value === 'failed' ? 'failed' : 'no_entity'
+  const _removing = action === 'remove'
+  if (!guard.check(_removing ? '移除池行' : '标记为无需同步')) return
+  const _n = _st === 'failed' ? counts.value.failed : counts.value.no_entity
+  const _scope = _st === 'failed' ? '「同步失败」' : '「无此人物」'
+  if (!await askConfirm({
+    title: _removing ? '移除这些池行' : '标记为无需同步',
+    text: `确认${_removing ? '移除' : '标记'}当前筛选下的 ${_n} 条${_scope}记录？`,
+    detail: _removing
+      ? '只删除人名池里的这些行；条目译文、nfo 与库页翻译记录都不受影响（这些名字已不在 Emby，重新采集会再入池）。'
+      : '标记为终态「无此人物」：不计入同步失败、也不再进入待同步 —— Emby 里没有这个 Person 实体，重试不会成功。',
+    okText: _removing ? '确认移除' : '确认标记',
+    color: _removing ? 'error' : 'warning',
+  })) return
+  poolBusy.value = _removing ? 'cleanup_rm' : 'cleanup_mark'
+  try {
+    const r = await api.post(props.api, '/pool/cleanup', {
+      action, status: _st, keyword: keyword.value, type: type.value, server_id: '',
+    })
+    notify(r?.message || '操作完成', 'success')
+    refreshAll(true)
+  } catch (e) { notify((e && e.message) || '操作失败', 'error') } finally { poolBusy.value = '' }
 }
 
 // ── 出现清单 ──
@@ -640,7 +672,7 @@ onBeforeUnmount(() => {
   <div class="epl-pool">
     <!-- 顶部：统计 + 操作（v4.4.7：去掉「人名池」标题与图标，整体左移） -->
     <div class="epl-pool-head">
-      <span class="epl-pool-sub">共 {{ counts.total }} 人 · 待翻 {{ counts.pending }} · 待同步 {{ counts.translated }} · 已同步 {{ counts.synced }}（其中原文已是中文 {{ counts.no_change }}）</span>
+      <span class="epl-pool-sub">共 {{ counts.total }} 人 · 待翻 {{ counts.pending }} · 待同步 {{ counts.translated }} · 无此人物 {{ counts.no_entity }} · 已同步 {{ counts.synced }}（其中原文已是中文 {{ counts.no_change }}）</span>
       <div class="epl-pool-acts">
         <v-btn size="small" variant="flat" color="info" prepend-icon="mdi-cloud-download-outline" class="epl-act-fetch"
                :disabled="poolFetchDisabled" :title="poolFetchTitle"
@@ -719,6 +751,23 @@ onBeforeUnmount(() => {
         </div>
         <v-btn size="x-small" variant="text" class="epl-pool-reset" @click="resetFilter">重置</v-btn>
       </div>
+    </div>
+
+    <!-- v4.7.11（issue #12）：Emby 无此人物 —— 批量清理入口（按当前筛选条件执行） -->
+    <div v-if="status === 'no_entity' || status === 'failed'" class="epl-pool-cleanup">
+      <span class="epl-pool-cleanup-tip">
+        {{ status === 'failed'
+          ? '若确认这些名字在 Emby 里根本没有对应的 Person 实体，可把它们标记为「无需同步」，不再计入同步失败。'
+          : '这些名字在 Emby 里没有对应的 Person 实体（原文名与译名都搜不到），重试不会成功 —— 无需再同步。' }}
+      </span>
+      <v-btn size="x-small" variant="flat" color="info" :loading="poolBusy === 'cleanup_mark'"
+             :disabled="poolDataOpBlocked" :title="poolDataOpBlockedHint" @click="cleanupNoEntity('mark')">
+        标记为无需同步
+      </v-btn>
+      <v-btn size="x-small" variant="flat" color="error" :loading="poolBusy === 'cleanup_rm'"
+             :disabled="poolDataOpBlocked" :title="poolDataOpBlockedHint" @click="cleanupNoEntity('remove')">
+        移除这些池行
+      </v-btn>
     </div>
 
     <!-- 列表（PC / 平板：表格） -->
@@ -894,6 +943,7 @@ onBeforeUnmount(() => {
         <div class="epl-dlg-title">批量同步到 Emby</div>
         <div class="epl-dlg-body">
           <div class="epl-field"><span class="epl-field-k">待同步</span><span class="epl-field-v">{{ counts.translated }} 个</span></div>
+          <div v-if="counts.no_entity" class="epl-field"><span class="epl-field-k">Emby 无此人物</span><span class="epl-field-v">{{ counts.no_entity }} 个（无需同步，不计失败）</span></div>
           <div class="epl-dlg-warn">⚠️ Emby 里改名会全局生效（该 Person 在所有作品中的显示名都会变）。</div>
         </div>
         <div class="epl-dlg-acts">
@@ -913,6 +963,9 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .epl-pool { display: flex; flex-direction: column; gap: 12px; }
+/* v4.7.11（issue #12）：无此人物批量清理条 */
+.epl-pool-cleanup { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 10px; border: 1px dashed rgba(128,128,128,.35); border-radius: 8px; }
+.epl-pool-cleanup-tip { font-size: 12px; opacity: .7; flex: 1; min-width: 200px; }
 
 .epl-pool-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
 .epl-pool-sub { font-size: 12px; opacity: .72; font-weight: 400; }

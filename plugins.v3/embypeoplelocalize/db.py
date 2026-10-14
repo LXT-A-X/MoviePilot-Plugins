@@ -1033,6 +1033,24 @@ def _excl_ep_sql(exclude_episodes: bool) -> str:
     return _ep + _ALIVE_SQL
 
 
+def _untranslated_sql(col: str) -> str:
+    """「这一行还有没有要翻的」统一谓词（v4.7.11 · issue #11 根因治理）。
+
+    语义：`<col>` 有原文、译文为空/等于原文，**且该行的 noop 持久标记未置位**。
+    v4.7.2 给 issue #8 加的 name_noop / role_noop 只接了徽章侧一半口径，其余原语
+    仍把「译文 == 原文」一律算未翻 —— 条目只剩 noop 行时徽章说「翻完了」、
+    写回就绪说「还差 N 条」，两边永久矛盾，写回被无限推迟且无任何日志痕迹。
+    同一条语义此前散在多处（待翻条目统计 / 就绪判定 / 就绪汇总 / 候选扫描…），
+    改一处漏一处就是 #6/#7/#8/#10/#11 的同一个成因 —— 现统一到本函数，各处只准调它。
+
+    :param col: 'name_before' 或 'role_before'
+    """
+    _after = "role_after" if col == "role_before" else "name_after"
+    _noop = "role_noop" if col == "role_before" else "name_noop"
+    return (f"({col}<>'' AND ({_after}='' OR {_after} IS NULL OR {_after}={col}) "
+            f"AND COALESCE({_noop},0)=0)")
+
+
 def _group_person_rows(rows: list) -> list:
     """把 person 行按 (server_id, item_id) 归组为库列表条目。
     library_items（全表）与 library_items_page（分页）共用同一实现，保证字段语义一致。
@@ -2964,6 +2982,10 @@ class PeopleDb:
         _pend_sql = ""
         # v4.7.0（issue #6）：持久「已确认无需操作（noop）」标记 → 不再计入待翻。
         # 只在 only_pending 时排除（force/「重新翻译」用 only_pending=False，仍可重试）。
+        # v4.7.11（issue #11）：本处**刻意不合并**成 _untranslated_sql —— 人数上限分支的
+        # 内层查询只能排 noop、不能排「已翻完」（否则 ROW_NUMBER 重排会让超上限的人轮流
+        # 补位，重现 v4.6.62 的「永远翻不完」；「已翻完」由外层 _outer_pend 负责）。
+        # 其余「未翻译」原语已统一走 _untranslated_sql，本处是全库唯一保留拆分的例外。
         _noop_sql = ""
         if only_pending:
             _pend_sql = f" AND ({_after}='' OR {_after} IS NULL OR {_after}={_col})"
@@ -3056,8 +3078,8 @@ class PeopleDb:
         _params: List[Any] = []
         _dt = [str(t) for t in (disabled_types or []) if str(t or "").strip()]
         if person_on:
-            _c = ("SELECT item_id, server_id FROM person WHERE plugin_id=? "
-                  "AND name_before<>'' AND (name_after='' OR name_after IS NULL OR name_after=name_before)")
+            _c = ("SELECT item_id, server_id FROM person WHERE plugin_id=? AND "
+                  + _untranslated_sql("name_before"))
             if _dt:
                 _marks = ",".join("?" * len(_dt))
                 _c += f" AND (person_type IS NULL OR person_type='' OR person_type NOT IN ({_marks}))"
@@ -3066,8 +3088,8 @@ class PeopleDb:
             _params.append((plugin_id, *_dt))
         if role_on:
             # v4.6.48：角色名与第一排共用同一套类型开关（disabled_types 同样作用于角色）
-            _c = ("SELECT item_id, server_id FROM person WHERE plugin_id=? "
-                  "AND role_before<>'' AND (role_after='' OR role_after IS NULL OR role_after=role_before)")
+            _c = ("SELECT item_id, server_id FROM person WHERE plugin_id=? AND "
+                  + _untranslated_sql("role_before"))
             if _dt:
                 _marks = ",".join("?" * len(_dt))
                 _c += f" AND (person_type IS NULL OR person_type='' OR person_type NOT IN ({_marks}))"
@@ -3267,11 +3289,11 @@ class PeopleDb:
         try:
             n_rows = _q(
                 "SELECT person_type, COUNT(*) AS c FROM person WHERE plugin_id=? AND item_id=? AND server_id=? "
-                "AND name_before<>'' AND (name_after='' OR name_after IS NULL OR name_after=name_before) "
+                "AND " + _untranslated_sql("name_before") + " "
                 "GROUP BY person_type", (plugin_id, item_id, server_id))
             r = _q1(
                 "SELECT COUNT(*) AS c FROM person WHERE plugin_id=? AND item_id=? AND server_id=? "
-                "AND role_before<>'' AND (role_after='' OR role_after IS NULL OR role_after=role_before)",
+                "AND " + _untranslated_sql("role_before"),
                 (plugin_id, item_id, server_id))
             return {
                 "names": {str(x.get("person_type") or "Actor"): int(x.get("c") or 0) for x in n_rows},
@@ -3290,15 +3312,13 @@ class PeopleDb:
         seen = set()
 
         def _collect(terms, col: str) -> None:
-            _after = col.replace("_before", "_after")
             _ts = [str(t) for t in (terms or []) if str(t or "").strip()]
             for _i in range(0, len(_ts), 80):
                 chunk = _ts[_i:_i + 80]
                 marks = ",".join("?" * len(chunk))
                 rows = _q(
                     f"SELECT DISTINCT item_id, server_id FROM person WHERE plugin_id=? "
-                    f"AND {col} IN ({marks}) AND {col}<>'' "
-                    f"AND ({_after}='' OR {_after} IS NULL OR {_after}={col})",
+                    f"AND {col} IN ({marks}) AND " + _untranslated_sql(col),
                     (plugin_id, *chunk))
                 for r in rows:
                     _k = (str(r.get("item_id") or ""), str(r.get("server_id") or ""))
@@ -3321,7 +3341,8 @@ class PeopleDb:
         配置过滤 / 失败排除 / AI 开关的判断在插件层（translation_pending_for_item）。
         exclude_episodes（v4.6.68）—— 「处理单集」=关时 Episode 层级行不产生待翻词条
         （否则集记录永远「未翻完」，写回就绪永不通过）。"""
-        rows = _q("SELECT person_type, name_before, name_after, role_before, role_after FROM person "
+        rows = _q("SELECT person_type, name_before, name_after, role_before, role_after, "
+                  "COALESCE(name_noop,0) AS nn, COALESCE(role_noop,0) AS rn FROM person "
                   "WHERE plugin_id=? AND item_id=? AND server_id=?"
                   + _excl_ep_sql(exclude_episodes), (plugin_id, item_id, server_id))
         out: List[dict] = []
@@ -3331,9 +3352,11 @@ class PeopleDb:
             na = str(r.get("name_after") or "").strip()
             rb = str(r.get("role_before") or "").strip()
             ra = str(r.get("role_after") or "").strip()
-            if nb and (not na or na == nb):
+            # v4.7.11（issue #11）：noop 行（模型已确认原样保留 = 无需翻译）不算待翻 ——
+            # 此前只看 before/after，条目剩下的行若全是 noop，ready 永远为假、写回被无限推迟。
+            if nb and int(r.get("nn") or 0) == 0 and (not na or na == nb):
                 out.append({"kind": "name", "term": nb, "person_type": pt})
-            if rb and (not ra or ra == rb):
+            if rb and int(r.get("rn") or 0) == 0 and (not ra or ra == rb):
                 out.append({"kind": "role", "term": rb, "person_type": pt})
         return out
 
@@ -3349,9 +3372,8 @@ class PeopleDb:
                 "SELECT item_id, server_id, MAX(item_type) AS item_type, "
                 + _SQL_ITEM_TITLE + " AS title "
                 "FROM person WHERE plugin_id=? AND ("
-                "  (name_before<>'' AND (name_after='' OR name_after IS NULL OR name_after=name_before)) OR "
-                "  (role_before<>'' AND (role_after='' OR role_after IS NULL OR role_after=role_before))"
-                ")" + _excl_ep_sql(exclude_episodes) + " GROUP BY item_id, server_id LIMIT ?",
+                + _untranslated_sql("name_before") + " OR " + _untranslated_sql("role_before")
+                + ")" + _excl_ep_sql(exclude_episodes) + " GROUP BY item_id, server_id LIMIT ?",
                 (plugin_id, int(limit)))
             return [{
                 "item_id": str(r.get("item_id") or ""),
@@ -3787,11 +3809,16 @@ _SQL_SYNCED = f"({_SQL_TARGET}<>'' AND name_current<>'' AND name_current={_SQL_T
 #   ② Emby 当前名未知（空：扫描缓存行/无 Emby 身份）→ 只有「有真译文」才待同步（等写回 Emby）；
 #      原文已是中文（目标名 = 原文）时无所可同步 → 不再报待同步（显示「无需操作」）。
 # 此前「当前名未知」一律判待同步 → 「阿澄 佳奈」这类已中文扫描缓存行常驻🟡待同步（用户实测困惑）。
-_SQL_SYNC_PENDING = (f"({_SQL_TARGET}<>'' AND COALESCE(sync_status,'')<>'failed' AND "
+_SQL_SYNC_PENDING = (f"({_SQL_TARGET}<>'' AND COALESCE(sync_status,'') NOT IN ('failed','no_entity') AND "
                      f"(({_SQL_CUR_UNKNOWN} AND {_SQL_ZH_VALID}) "
                      f"OR (NOT {_SQL_CUR_UNKNOWN} AND name_current<>{_SQL_TARGET})))")
 _SQL_SYNC_FAILED = (f"({_SQL_TARGET}<>'' AND (name_current IS NULL OR name_current='' "
                     f"OR name_current<>{_SQL_TARGET}) AND sync_status='failed')")
+# v4.7.11（issue #12）：「Emby 里根本没有这个 Person（原文名与目标名都搜不到）」= 永久性不适用，
+# 单列终态 no_entity —— 不计「同步失败」（重试多少次都不会成功，只会让红色角标常驻），
+# 也不进「待同步」。failed 只留给「实体存在但改不动」（Emby 报错、同名多候选、网络/权限）。
+_SQL_SYNC_NO_ENTITY = (f"({_SQL_TARGET}<>'' AND (name_current IS NULL OR name_current='' "
+                       f"OR name_current<>{_SQL_TARGET}) AND sync_status='no_entity')")
 
 
 def pool_target_name(rec: dict) -> str:
@@ -3814,8 +3841,8 @@ def derive_pool_status(rec: dict) -> dict:
     """由事实（name_original / name_zh / name_current）推导池状态，
     两个维度完全独立，不再长期相信旧 status：
     - translation ∈ {pending, no_change, translated, failed}
-    - sync        ∈ {pending, synced, failed, unknown}
-    - ui          组合显示串（待翻译/同步失败/待同步/无需操作/已同步）
+    - sync        ∈ {pending, synced, failed, no_entity, unknown}
+    - ui          组合显示串（待翻译/同步失败/无此人物/待同步/无需操作/已同步）
     目标名见 pool_target_name；「原文已是中文」= no_change，若 Emby 当前名≠目标名则同步态仍为 pending（文档 §十二）。
     v4.6.93：Emby 当前名未知（空）时，「原文已是中文」不再判 pending —— 扫描缓存行无可同步之物，
     只报「无需操作」（此前常驻🟡待同步）；「有真译文」的缓存行仍为 pending（等待写回 Emby）。
@@ -3836,6 +3863,9 @@ def derive_pool_status(rec: dict) -> dict:
         sync = "synced"
     elif str((rec or {}).get("sync_status") or "") == "failed":
         sync = "failed"
+    elif str((rec or {}).get("sync_status") or "") == "no_entity":
+        # v4.7.11（issue #12）：Emby 无此 Person 实体 → 独立终态（不是失败，也无需再同步）
+        sync = "no_entity"
     elif not cur and translation == "no_change":
         # v4.6.93：原文已是中文 + Emby 当前名未知（扫描缓存行/无 Emby 身份）→ 无同步可言（不报待同步）
         sync = "unknown"
@@ -3845,6 +3875,9 @@ def derive_pool_status(rec: dict) -> dict:
         ui = "待翻译"
     elif sync == "failed":
         ui = "同步失败"
+    elif sync == "no_entity":
+        # v4.7.11（issue #12）：显示「无此人物」而非「同步失败」—— 这类行重试无意义
+        ui = "无此人物"
     elif sync == "pending":
         ui = "待同步"
     elif translation == "no_change":
@@ -4510,7 +4543,8 @@ class NameMapDb:
                   db: Optional[Any] = None) -> dict:
         """池列表（筛选 + 分页）。
         status 过滤与 derive_pool_status 同一套规则 ——
-        pending 待翻译 / no_change 无需操作 / translated 待同步 / synced 已同步 / failed 同步失败。"""
+        pending 待翻译 / no_change 无需操作 / translated 待同步 / synced 已同步 /
+        failed 同步失败 / no_entity Emby 无此人物（v4.7.11 · issue #12，单列终态）。"""
         try:
             where = "WHERE plugin_id=? AND name_type='person'"
             params: list = [plugin_id]
@@ -4535,14 +4569,17 @@ class NameMapDb:
                 where += f" AND {_SQL_SYNCED}"
             elif st == "failed":
                 where += f" AND {_SQL_SYNC_FAILED}"
+            elif st == "no_entity":
+                where += f" AND {_SQL_SYNC_NO_ENTITY}"
             total = _q1(f"SELECT COUNT(*) AS c FROM name_map {where}", tuple(params))
             n = int((total or {}).get("c") or 0)
             offset = (max(1, int(page)) - 1) * max(1, int(size))
             rows = _q(f"SELECT * FROM name_map {where} ORDER BY "
                       f"CASE WHEN {_SQL_TRANS_PENDING} THEN 0 "
                       f"WHEN {_SQL_SYNC_FAILED} THEN 1 "
-                      f"WHEN {_SQL_SYNC_PENDING} THEN 2 "
-                      f"ELSE 3 END, "
+                      f"WHEN {_SQL_SYNC_NO_ENTITY} THEN 2 "
+                      f"WHEN {_SQL_SYNC_PENDING} THEN 3 "
+                      f"ELSE 4 END, "
                       "id DESC LIMIT ? OFFSET ?", tuple(params) + (max(1, int(size)), offset))
             items = []
             for r in rows:
@@ -4576,7 +4613,8 @@ class NameMapDb:
         """池统计（仪表盘/人名池页卡片）。
         与 derive_pool_status / list_pool 共用同一套 _SQL_* 规则，
         翻译维度与同步维度分离：
-        pending=待翻译 / no_change=无需操作 / translated=待同步 / synced=已同步 / failed=同步失败。"""
+        pending=待翻译 / no_change=无需操作 / translated=待同步 / synced=已同步 /
+        failed=同步失败 / no_entity=Emby 无此人物（issue #12 · 单列，不计失败也不计待同步）。"""
         try:
             where = "WHERE plugin_id=? AND name_type='person'"
             params: list = [plugin_id]
@@ -4589,7 +4627,8 @@ class NameMapDb:
                 f"SUM(CASE WHEN {_SQL_NO_CHANGE} THEN 1 ELSE 0 END) AS no_change, "
                 f"SUM(CASE WHEN {_SQL_SYNC_PENDING} THEN 1 ELSE 0 END) AS translated, "
                 f"SUM(CASE WHEN {_SQL_SYNCED} THEN 1 ELSE 0 END) AS synced, "
-                f"SUM(CASE WHEN {_SQL_SYNC_FAILED} THEN 1 ELSE 0 END) AS failed "
+                f"SUM(CASE WHEN {_SQL_SYNC_FAILED} THEN 1 ELSE 0 END) AS failed, "
+                f"SUM(CASE WHEN {_SQL_SYNC_NO_ENTITY} THEN 1 ELSE 0 END) AS no_entity "
                 f"FROM name_map {where}", tuple(params))
             r = r or {}
             return {
@@ -4599,9 +4638,11 @@ class NameMapDb:
                 "translated": int(r.get("translated") or 0),
                 "synced": int(r.get("synced") or 0),
                 "failed": int(r.get("failed") or 0),
+                "no_entity": int(r.get("no_entity") or 0),
             }
         except Exception:
-            return {"total": 0, "pending": 0, "no_change": 0, "translated": 0, "synced": 0, "failed": 0}
+            return {"total": 0, "pending": 0, "no_change": 0, "translated": 0,
+                    "synced": 0, "failed": 0, "no_entity": 0}
 
     def list_translated_pending_sync(self, *, plugin_id: str, server_id: str = "", limit: int = 0,
                                      db: Optional[Any] = None) -> list:
@@ -4691,6 +4732,39 @@ class NameMapDb:
             return True
         except Exception:
             return False
+
+    def cleanup_no_entity(self, *, plugin_id: str, action: str = "mark",
+                          status: str = "no_entity", keyword: str = "", ptype: str = "",
+                          server_id: str = "", db: Optional[Any] = None) -> dict:
+        """人名池批量清理（v4.7.11 · issue #12）—— 按「当前筛选条件」处理池行。
+
+        action='mark'   → 标为 sync_status='no_entity'（Emby 无此人物 · 无需同步，不计失败）
+        action='remove' → 直接删除这些池行（只删人名池行；person 表译文与 nfo/条目不受影响）
+        status 默认 'no_entity'，也接受 'failed'（把历史遗留的「查无此人」失败行转成终态）。
+        返回 {'affected': n}。
+        """
+        try:
+            _flt = _SQL_SYNC_FAILED if str(status or "") == "failed" else _SQL_SYNC_NO_ENTITY
+            where = f"WHERE plugin_id=? AND name_type='person' AND {_flt}"
+            params: list = [plugin_id]
+            kw = str(keyword or "").strip()
+            if kw:
+                where += " AND (name_original LIKE ? OR name_zh LIKE ? OR name_current LIKE ?)"
+                params += [f"%{kw}%", f"%{kw}%", f"%{kw}%"]
+            if server_id:
+                where += " AND server_id=?"
+                params.append(server_id)
+            if str(ptype or "").strip():
+                where += " AND (person_type=? OR person_types LIKE ?)"
+                params += [str(ptype), f'%"{ptype}"%']
+            if str(action or "mark").strip().lower() == "remove":
+                return {"affected": int(_x(f"DELETE FROM name_map {where}", tuple(params)) or 0)}
+            n = _x(f"UPDATE name_map SET sync_status='no_entity', updated_at=? {where}",
+                   (_now(), *params))
+            return {"affected": int(n or 0)}
+        except Exception as e:
+            logger.warning(f"[NameMap] cleanup_no_entity 失败: {e}")
+            return {"affected": 0, "error": str(e)}
 
     def clear_auto(self, *, plugin_id: str, db: Optional[Any] = None) -> int:
         """清空人名池里的自动翻译条目（source=llm/zhconv），
