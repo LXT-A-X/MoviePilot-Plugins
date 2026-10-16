@@ -3352,7 +3352,7 @@ class PeopleDb:
             na = str(r.get("name_after") or "").strip()
             rb = str(r.get("role_before") or "").strip()
             ra = str(r.get("role_after") or "").strip()
-            # v4.7.11（issue #11）：noop 行（模型已确认原样保留 = 无需翻译）不算待翻 ——
+            # v4.7.11（issue #11）：noop 行（模型已确认原样保留 = 无需操作）不算待翻 ——
             # 此前只看 before/after，条目剩下的行若全是 noop，ready 永远为假、写回被无限推迟。
             if nb and int(r.get("nn") or 0) == 0 and (not na or na == nb):
                 out.append({"kind": "name", "term": nb, "person_type": pt})

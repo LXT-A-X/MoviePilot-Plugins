@@ -7,6 +7,7 @@ import json
 import os
 import random
 import re
+import sqlite3
 import threading
 import time
 import traceback
@@ -155,7 +156,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
     plugin_name = "Emby 演职人员中文化"
     plugin_desc = "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回；拉取人名时可用 TMDB 刮削补中文名/简介/头像"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/embypeoplelocalize.png"
-    plugin_version = "4.7.11"
+    plugin_version = "4.7.12"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "embypeoplelocalize_"
@@ -610,6 +611,115 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             logger.debug(f"状态已保存到: {state_file}")
         except Exception as e:
             logger.error(f"保存状态失败: {e}\n{traceback.format_exc()}")
+
+    # v4.7.12（GitHub issue #13）：主程序历史插件实例残留的自我收敛。
+    # MoviePilot 3.0.x 时期本插件的实例 ID 用的是中文「Emby角色中文化」；3.1.x 起主程序
+    # 要求实例 ID 必须 ASCII 字母开头（`^[A-Za-z][A-Za-z0-9_]*$`），而 3.0.34 的迁移脚本
+    # 把旧 `PluginInstances` 键**原样**搬进了主库 `plugininstance` 表 —— 那条行每次被读取
+    # 实例清单都校验失败，主程序日志就被同一条 WARNING 反复刷屏（实测 240 条/统计窗口）。
+    # 主程序侧没有清理入口（`purge` 第一步就 `validate_plugin_id`，中文 ID 直接拒绝），
+    # 故由插件启动时自行收敛一次：只认本插件历史 ID 白名单 + 「纯残留」硬条件。
+    _LEGACY_INSTANCE_IDS = ("Emby角色中文化",)
+
+    @staticmethod
+    def _is_legal_plugin_instance_id(instance_id: str) -> bool:
+        """主程序口径的实例 ID 合法性：ASCII 字母开头，仅字母/数字/下划线。"""
+        return bool(re.match(r"^[A-Za-z][A-Za-z0-9_]*$", str(instance_id or "")))
+
+    def _purge_legacy_instances_in_db(self, db_path: str) -> dict:
+        """在**主库文件**里清理本插件的纯残留实例行（v4.7.12 · issue #13）。
+
+        安全边界（宁可不删，绝不误删）—— 以下条件**同时满足**才删：
+          1. `instance_id` 属于本插件历史 ID 白名单（`_LEGACY_INSTANCE_IDS`）；
+          2. `instance_id == source_plugin_id`（同源自举的残留形态，不是别的插件的行）；
+          3. `is_enabled` 为假（0 / false）—— 任何已启用行一律不碰；
+          4. 配置列（`config_data` / `config`）为空 —— 带配置的行一律不碰；
+          5. `instance_id` 本身非法（非 `^[A-Za-z][A-Za-z0-9_]*$`）。
+        删前把该行的 id + instance_id 打进日志留档（可手工复原），失败只记 debug、不抛。
+
+        :return {"ok","status","removed","ids","reason"}；status ∈
+                done（已清理）/ none（无残留）/ no_table（该库无此表）/
+                no_columns（列名不匹配，放弃）/ error（读写出错）
+        """
+        _out = {"ok": False, "status": "error", "removed": 0, "ids": [], "reason": ""}
+        _con = None
+        try:
+            _con = sqlite3.connect(str(db_path), timeout=5.0)
+            _cur = _con.cursor()
+            _hit = _cur.execute("SELECT name FROM sqlite_master "
+                                "WHERE type='table' AND LOWER(name)='plugininstance'").fetchone()
+            if not _hit:
+                return {"ok": True, "status": "no_table", "removed": 0, "ids": [], "reason": ""}
+            _cols = {str(_r[1] or "").lower()
+                     for _r in _cur.execute("PRAGMA table_info(plugininstance)").fetchall()}
+            if not {"instance_id", "source_plugin_id", "is_enabled"} <= _cols:
+                return {"ok": True, "status": "no_columns", "removed": 0, "ids": [],
+                        "reason": "缺少 instance_id / source_plugin_id / is_enabled 列"}
+            _cfg_col = ("config_data" if "config_data" in _cols
+                        else ("config" if "config" in _cols else ""))
+            _empty = "1=1" if not _cfg_col else (
+                f"(COALESCE(TRIM(CAST({_cfg_col} AS TEXT)),'')='' "
+                f"OR LOWER(TRIM(CAST({_cfg_col} AS TEXT)))='null')")
+            _rows = _cur.execute(
+                "SELECT id, instance_id, source_plugin_id FROM plugininstance "
+                "WHERE instance_id = source_plugin_id "
+                "AND LOWER(COALESCE(CAST(is_enabled AS TEXT),'')) IN ('0','false') "
+                f"AND {_empty}").fetchall()
+            _ids, _names = [], []
+            for _r in _rows:
+                _iid = str(_r[1] or "")
+                if (_iid in self._LEGACY_INSTANCE_IDS
+                        and not self._is_legal_plugin_instance_id(_iid)):
+                    _ids.append(int(_r[0]))
+                    if _iid not in _names:
+                        _names.append(_iid)
+            if not _ids:
+                return {"ok": True, "status": "none", "removed": 0, "ids": [], "reason": ""}
+            logger.info(f"[PluginInstance] 发现本插件历史残留实例行 {len(_ids)} 条"
+                        f"（instance_id={'/'.join(_names)}；行 id={'/'.join(str(x) for x in _ids)}）"
+                        f"—— 3.0.x 的中文实例 ID 被迁移脚本搬进主库所致，属纯残留（未启用、无配置）")
+            _cur.executemany("DELETE FROM plugininstance WHERE id=?", [(int(_i),) for _i in _ids])
+            _con.commit()
+            logger.info(f"[PluginInstance] 已清理主程序历史插件实例残留 {len(_ids)} 行"
+                        f"（{'/'.join(_names)}）—— 主程序不再刷「跳过无效插件实例记录」WARNING")
+            return {"ok": True, "status": "done", "removed": len(_ids), "ids": _names, "reason": ""}
+        except Exception as e:
+            logger.debug(f"[PluginInstance] 清理历史实例残留失败（非致命）{db_path}: {e}")
+            _out["reason"] = str(e)
+            return _out
+        finally:
+            try:
+                if _con is not None:
+                    _con.close()
+            except Exception:
+                pass
+
+    def _cleanup_legacy_plugin_instances(self) -> dict:
+        """启动时收敛本插件的历史插件实例残留（v4.7.12 · GitHub issue #13）。
+
+        主库文件名各版本不一致，故按 `user.db` → `app.db` → `moviepilot.db` 依次探测，
+        命中含 `plugininstance` 表的库即在此处理（表不存在的库继续探下一个）。
+        任何异常都不阻塞插件启动；删不掉下次启动会再试（天然幂等，无需额外标记）。
+        """
+        try:
+            _cfg = str(getattr(settings, "CONFIG_PATH", "") or "")
+            if not _cfg:
+                return {"ok": False, "status": "no_config_path", "removed": 0, "ids": [],
+                        "reason": "宿主 CONFIG_PATH 未知"}
+            _last = {"ok": True, "status": "no_db", "removed": 0, "ids": [], "reason": "未找到主库文件"}
+            for _name in ("user.db", "app.db", "moviepilot.db"):
+                _p = os.path.join(_cfg, _name)
+                if not os.path.isfile(_p):
+                    continue
+                _r = self._purge_legacy_instances_in_db(_p) or {}
+                _s = str(_r.get("status") or "")
+                _last = _r
+                if _s in ("done", "none", "no_columns", "error"):
+                    return _r
+            return _last
+        except Exception as e:
+            logger.debug(f"[PluginInstance] 历史实例清理跳过（非致命）: {e}")
+            return {"ok": False, "status": "error", "removed": 0, "ids": [], "reason": str(e)}
 
     def _load_state(self):
         """兼容读 —— 旧版 state.json 中的 name_cache/role_cache/processed/
@@ -9304,6 +9414,18 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
             self._name_map_db = NameMapDb()
 
             self._load_state()
+            # v4.7.12（GitHub issue #13）：启动时收敛本插件的**主程序历史插件实例残留** ——
+            # 3.0.x 的中文实例 ID 被迁移脚本搬进主库 plugininstance 表，主程序每次读实例清单
+            # 都刷一条 WARNING。条件收得很死（只认本插件历史 ID + 未启用 + 无配置的纯残留），
+            # 失败不阻塞启动、下次启动再试。
+            try:
+                _lc = self._cleanup_legacy_plugin_instances() or {}
+                if int(_lc.get("removed") or 0) > 0:
+                    self._push_log("INFO", f"已清理主程序历史插件实例残留 "
+                                           f"{int(_lc.get('removed') or 0)} 行"
+                                           f"（{'/'.join(_lc.get('ids') or [])}）")
+            except Exception:
+                pass
             try:
                 _rn = self._rebuild_missing_events_from_db()
                 if _rn:

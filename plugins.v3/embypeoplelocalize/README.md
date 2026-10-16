@@ -1,6 +1,6 @@
 # Emby 演职人员中文化（EmbyPeopleLocalize）· 详细使用手册
 
-> 适用版本：**MoviePilot V3 · 插件 v4.7.11**
+> 适用版本：**MoviePilot V3 · 插件 v4.7.12**
 > 本文档逐条说明插件的**每个功能、每个按钮、每个开关**是干什么的。所有文案均取自插件实际界面（原样保留 emoji 与符号）。
 
 ---
@@ -929,7 +929,42 @@
 
 插件关闭时，除「设置」外的页面会被遮罩（**插件已停用 / 插件已被关闭，其他页面暂不可用**），点 `前往设置启用` 打开开关并 **保存** 即可。
 
-### 12.15 还是解决不了
+### 12.15 主程序日志一直刷「跳过无效插件实例记录」
+
+日志里反复出现（每读一次插件实例清单就再来一条）：
+
+```
+【WARNING】plugins.py - 跳过无效插件实例记录：instance_id='Emby角色中文化', source_plugin_id='Emby角色中文化', error=2 validation errors for PluginInstance
+instance_id / source_plugin_id
+  Value error, 插件 ID 必须以字母开头且只能包含 ASCII 字母、数字或下划线
+```
+
+**是什么**：MoviePilot 3.0.x 时期本插件的实例 ID 用的是中文「Emby角色中文化」，而 3.1.x 起主程序要求实例 ID 只能是 ASCII 字母开头（仅字母/数字/下划线）。升级时旧记录被**原样**搬进了主库 `plugininstance` 表 —— 那一行只是历史残留（未启用、无配置），不生效，但每次读取实例清单都会被主程序告警一次。**它不影响插件运行，也不影响翻译记录与人名池**；主程序侧也没有清理入口（清理接口第一步就校验 ID，中文 ID 会被直接拒绝）。
+
+**插件已自动处理**：每次插件启动（含重装、重启、升级）都会检查一次，**只删同时满足**「ID 是本插件历史中文名 + `instance_id == source_plugin_id` + 未启用 + 无配置」的纯残留行，删除前把行号与 ID 打进插件日志，删完再记一条「已清理…」。所以正常情况你只要升级到 **v4.7.12** 并重启一次插件，这个刷屏就会停止。日志中可核对：
+
+```
+[PluginInstance] 发现本插件历史残留实例行 1 条（instance_id=Emby角色中文化；行 id=109）—— …
+[PluginInstance] 已清理主程序历史插件实例残留 1 行（Emby角色中文化）—— …
+```
+
+**若升级重启后仍然刷屏**（说明自动清理没跑成，例如主库被占用、目录权限不足）：按下面的 SQL 手工删掉那一行即可（在主库文件 `config/user.db`，容器里即 `/config/user.db`；用 SQLite 工具如 DB Browser for SQLite 打开，操作前**先备份该文件**）：
+
+```sql
+-- ① 先确认目标行（应为 1 行，且 is_enabled=0、config_data 为空）
+SELECT id, instance_id, source_plugin_id, is_enabled, config_data
+  FROM plugininstance
+ WHERE source_plugin_id = 'Emby角色中文化';
+
+-- ② 与插件同口径删除（严格四条件，不会误伤其它插件）
+DELETE FROM plugininstance
+ WHERE source_plugin_id = 'Emby角色中文化'
+   AND instance_id = source_plugin_id
+   AND is_enabled = 0
+   AND (config_data IS NULL OR TRIM(config_data) = '');
+```
+
+### 12.16 还是解决不了
 
 按这个顺序收集信息再问：
 
@@ -1041,4 +1076,4 @@
 
 ---
 
-*本文档对应插件版本 v4.7.11（MoviePilot V3）。*
+*本文档对应插件版本 v4.7.12（MoviePilot V3）。*
