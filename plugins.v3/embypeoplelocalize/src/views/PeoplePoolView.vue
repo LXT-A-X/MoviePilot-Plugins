@@ -457,6 +457,10 @@ function rowKey(r) { return personKey(r) }
 function canSync(r) {
   const t = poolTargetName(r)
   if (!t || t === (r.name_current || '')) return false
+  // v4.7.13（GitHub issue #15）：no_entity（Emby 无此人物）是终态，与批量同步（_SQL_SYNC_PENDING）
+  // 同口径 —— 这行点了也不可能成功，不再渲染「同步」按钮；补救路径是「重拉」：
+  // 拉到 Person 实体后后端会自动清掉该终态，届时按钮自然回来。
+  if (String(r?.sync_status || '') === 'no_entity' || r?.status === '无此人物') return false
   // v4.6.93：原文已是中文 + Emby 当前名未知（扫描缓存行）→ 无同步可言
   // （要补 Emby 身份请点「重拉」或跑「拉取人名」，拉到当前名后若确有差异会再显示「同步」）
   if (!r?.name_current && isChineseText(r?.name_original)) return false
@@ -1025,6 +1029,11 @@ onBeforeUnmount(() => {
 .epl-badge.st-error { background: rgba(244,67,54,.16); border-color: rgba(244,67,54,.42); }
 .epl-badge.st-warning { background: rgba(255,152,0,.16); border-color: rgba(255,152,0,.42); }
 .epl-badge.st-success { background: rgba(76,175,80,.16); border-color: rgba(76,175,80,.42); }
+/* v4.7.13（GitHub issue #14）：statusChip() 给「无此人物」的 color='info' 此前**没有对应类**，
+   手写类名 'st-'+color 落空 → 标签退化成裸文本（无底色、边框 transparent）。
+   这里按上面三条同一套视觉规格补齐 .st-info，使 statusChip() 可能返回的
+   error / warning / success / info 四种颜色在 CSS 里都有定义（不再有「映射到未定义类」的缺口）。 */
+.epl-badge.st-info { background: rgba(33,150,243,.16); border-color: rgba(33,150,243,.42); }
 
 .epl-pool-occ { padding: 6px 12px 12px 22px; background: rgba(255,255,255,.02); border-bottom: 1px solid rgba(255,255,255,.05); }
 .epl-pool-occ-head { font-size: 12.5px; opacity: .75; margin: 4px 0 6px; }

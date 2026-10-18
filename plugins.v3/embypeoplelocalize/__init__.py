@@ -156,7 +156,7 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
     plugin_name = "Emby 演职人员中文化"
     plugin_desc = "利用大模型把 Emby 英文/罗马音/日文人名翻译为简体中文并写回；拉取人名时可用 TMDB 刮削补中文名/简介/头像"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/embypeoplelocalize.png"
-    plugin_version = "4.7.12"
+    plugin_version = "4.7.13"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "embypeoplelocalize_"
@@ -2501,6 +2501,22 @@ class EmbyPeopleLocalize(TaskStateMixin, PathUtilsMixin, _PluginBase):
                     dbm.update_pool_status(plugin_id=_pid_name, server_id=_ex_sid,
                                            emby_person_id="", name_original=_orig_keep,
                                            name_current=_cur)
+                # v4.7.13（GitHub issue #15）：「Emby 无此人物」(no_entity) 是**对 Emby 事实的结论**，
+                # 而本次重拉已经拿到了 Person 实体 —— 旧结论被事实推翻，必须作废，否则这行
+                # **只进不出**：批量同步（`_SQL_SYNC_PENDING`）把它排除、前端也据此不给按钮，
+                # 除非手工改库，否则永远停在「无此人物」。清掉后按刚刷新的 `name_current` 与
+                # 目标名的差异重新判定（待同步 / 已同步），并清掉当时的 `sync_error` 原因。
+                # 只清 no_entity；failed 是「实体存在但改不动」的真失败，保留其计数与原因。
+                if str((_ex or {}).get("sync_status") or "").strip() == "no_entity":
+                    try:
+                        dbm.update_pool_status(plugin_id=_pid_name, server_id=_ex_sid,
+                                               emby_person_id=_ex_pid,
+                                               name_original=_orig_keep,
+                                               sync_status="", sync_error="")
+                        self._push_log("INFO", f"人名池重新拉取：{_orig_keep} 在 Emby 已存在 Person"
+                                               f"（Id {_pid}）—— 已清除「无此人物」终态，重新计入待同步判定")
+                    except Exception as _ce:
+                        logger.debug(f"[Pool] 清除 no_entity 终态失败（非致命）: {_ce}")
             else:
                 dbm.upsert_pool_person(plugin_id=_pid_name, server_id=_skey, emby_person_id=_pid,
                                        name_original=_orig_keep, name_current=_cur,

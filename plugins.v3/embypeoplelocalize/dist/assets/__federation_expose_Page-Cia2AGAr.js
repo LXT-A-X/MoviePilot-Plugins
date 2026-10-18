@@ -6313,6 +6313,10 @@ function rowKey(r) { return personKey(r) }
 function canSync(r) {
   const t = poolTargetName(r);
   if (!t || t === (r.name_current || '')) return false
+  // v4.7.13（GitHub issue #15）：no_entity（Emby 无此人物）是终态，与批量同步（_SQL_SYNC_PENDING）
+  // 同口径 —— 这行点了也不可能成功，不再渲染「同步」按钮；补救路径是「重拉」：
+  // 拉到 Person 实体后后端会自动清掉该终态，届时按钮自然回来。
+  if (String(r?.sync_status || '') === 'no_entity' || r?.status === '无此人物') return false
   // v4.6.93：原文已是中文 + Emby 当前名未知（扫描缓存行）→ 无同步可言
   // （要补 Emby 身份请点「重拉」或跑「拉取人名」，拉到当前名后若确有差异会再显示「同步」）
   if (!r?.name_current && isChineseText(r?.name_original)) return false
@@ -6867,7 +6871,7 @@ return (_ctx, _cache) => {
         ]))
       : _createCommentVNode$2("", true),
     _createElementVNode$2("div", _hoisted_25$1, [
-      _cache[42] || (_cache[42] = _createStaticVNode("<div class=\"epl-pool-th\" data-v-f52bfc3e><span class=\"c-name\" data-v-f52bfc3e>原文名</span><span class=\"c-zh\" data-v-f52bfc3e>译名</span><span class=\"c-type\" data-v-f52bfc3e>类型</span><span class=\"c-status\" data-v-f52bfc3e>状态</span><span class=\"c-occ\" data-v-f52bfc3e>出现</span><span class=\"c-op\" data-v-f52bfc3e>操作</span></div>", 1)),
+      _cache[42] || (_cache[42] = _createStaticVNode("<div class=\"epl-pool-th\" data-v-31009227><span class=\"c-name\" data-v-31009227>原文名</span><span class=\"c-zh\" data-v-31009227>译名</span><span class=\"c-type\" data-v-31009227>类型</span><span class=\"c-status\" data-v-31009227>状态</span><span class=\"c-occ\" data-v-31009227>出现</span><span class=\"c-op\" data-v-31009227>操作</span></div>", 1)),
       (loading.value)
         ? (_openBlock$2(), _createBlock$2(_component_v_progress_linear, {
             key: 0,
@@ -7372,7 +7376,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const PeoplePool = /*#__PURE__*/_export_sfc(_sfc_main$2, [['__scopeId',"data-v-f52bfc3e"]]);
+const PeoplePool = /*#__PURE__*/_export_sfc(_sfc_main$2, [['__scopeId',"data-v-31009227"]]);
 
 const {createTextVNode:_createTextVNode$1,resolveComponent:_resolveComponent$1,withCtx:_withCtx$1,createVNode:_createVNode$1,createElementVNode:_createElementVNode$1,openBlock:_openBlock$1,createElementBlock:_createElementBlock$1,createCommentVNode:_createCommentVNode$1,renderList:_renderList$1,Fragment:_Fragment$1,toDisplayString:_toDisplayString$1,createBlock:_createBlock$1,normalizeClass:_normalizeClass,mergeProps:_mergeProps} = await importShared('vue');
 
