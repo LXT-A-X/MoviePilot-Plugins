@@ -366,7 +366,7 @@ onUnmounted(() => {
       density="compact"
       variant="outlined"
       hide-details
-      clearable
+      :clearable="!!search"
       class="mb-3 zt-search"
       prepend-inner-icon="mdi-magnify"
     ></v-text-field>

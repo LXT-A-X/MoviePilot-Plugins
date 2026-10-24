@@ -564,11 +564,12 @@ function stopPolling() {
       <!-- 右栏：结果 -->
       <v-col cols="12" md="7">
         <v-card class="zt-card-bg zt-list-card">
-          <v-card-title class="zt-card-title">
+          <v-card-title class="zt-card-title zt-card-title-row">
             <v-icon start size="18">mdi-history</v-icon>
-            结果（{{ records.length }}/{{ recordTotal }}）
+            <span class="zt-title-text">结果（{{ records.length }}/{{ recordTotal }}）</span>
             <v-spacer></v-spacer>
             <v-btn
+              class="zt-title-action"
               size="small"
               variant="tonal"
               color="success"
@@ -599,7 +600,7 @@ function stopPolling() {
               density="compact"
               variant="outlined"
               hide-details
-              clearable
+              :clearable="!!recordSearch"
               placeholder="搜索字幕名…"
               prepend-inner-icon="mdi-magnify"
               class="zt-filter-search"
@@ -713,6 +714,28 @@ function stopPolling() {
 .zt-card-title {
   font-size: 15px;
   font-weight: 600;
+}
+/* 结果卡片标题行：Vuetify 的 v-card-title 默认 display:block，放 v-spacer + 按钮会掉到第二行。
+   PC 上改成单行 flex，按钮与「结果」同排靠右；手机（<md）时按钮换到下一排、占满整行。 */
+.zt-card-title-row {
+  display: flex;
+  align-items: center;
+}
+.zt-card-title-row .zt-title-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@media (max-width: 959.95px) {
+  .zt-card-title-row {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+  .zt-card-title-row .zt-title-action {
+    width: 100%;
+    margin-inline-start: 0 !important;
+  }
 }
 .zt-empty {
   font-size: 13px;

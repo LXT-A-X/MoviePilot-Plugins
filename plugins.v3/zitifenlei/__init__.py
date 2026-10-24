@@ -147,6 +147,13 @@ _DEFAULT_CONFIG = {
     "hdr_brightness_level": "80",
 }
 
+# _archive_font_file 返回码：>0=归档成功（返回字体 ID），None=处理失败。
+# 负数区分「跳过」的各种原因，供通知统计「库中已存在跳过 / 删除重复源文件」等分项。
+_ARCH_PENDING = -1        # 目录自动收集关闭：已进「待确认」，未归档
+_ARCH_DUP = -2            # 字体库已存在（或源文件已收录）：跳过
+_ARCH_DUP_DELETED = -3    # 同上跳过，且已删除监控目录残留的重复源文件
+_ARCH_DUP_DEL_FAILED = -4  # 同上跳过，但删除重复源文件失败
+
 
 def _path_within(path: Path, base: Path) -> bool:
     """路径组件级判断 path 是否位于 base 目录内。
@@ -259,7 +266,7 @@ class Zitifenlei(_PluginBase):
     plugin_name = "字体分类管家"
     plugin_desc = "字体归档整理与 ASS 字幕字体检查插件：扫描/上传字体到字体库，检查字幕缺失字体。"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/zitifenlei.png"
-    plugin_version = "3.0.2"
+    plugin_version = "3.0.3"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "zitifenlei_"
@@ -312,6 +319,11 @@ class Zitifenlei(_PluginBase):
         # 避免「放 5 个字体发 5 条通知」的刷屏。窗口内有新事件则滑动重置，到期统一发送。
         self._notify_agg: Dict[str, Any] = {
             "fonts": [],  # 已自动归档的文件名
+            "fonts_skipped": [],  # 字体库已存在而跳过归档的文件名
+            "fonts_dup_deleted": 0,  # 移动模式删除的重复源文件数
+            "fonts_delete_failed": 0,  # 删除重复源文件失败数
+            "font_failed": 0,  # 归档处理失败数
+            "archive_mode": "",  # 本批字体事件首次到达时的归档模式快照（copy/move）
             "fonts_pending": [],  # 目录自动收集关闭时进入「待确认」的字体名（未归档）
             "subs_missing": [],  # {"name", "count", "fonts": 前几个缺失字体名}
             "subs_subset": [],  # 已子集化字幕文件名
@@ -520,6 +532,11 @@ class Zitifenlei(_PluginBase):
                 pass
             self._notify_agg["timer"] = None
             self._notify_agg["fonts"] = []
+            self._notify_agg["fonts_skipped"] = []
+            self._notify_agg["fonts_dup_deleted"] = 0
+            self._notify_agg["fonts_delete_failed"] = 0
+            self._notify_agg["font_failed"] = 0
+            self._notify_agg["archive_mode"] = ""
             self._notify_agg["fonts_pending"] = []
             self._notify_agg["subs_missing"] = []
             self._notify_agg["subs_subset"] = []
@@ -653,20 +670,33 @@ class Zitifenlei(_PluginBase):
         # 轮询兜底不再整体重扫监控目录（避免每 60s rglob 整目录 + 「归档 N 个」计数虚高）
         if self.get_resource_or_config("auto_collect") is False:
             return
+        stats: Optional[Dict[str, Any]] = None
         with self._lock:
             try:
                 input_dir = self.get_resource_or_config("input_dir") or ""
                 if not input_dir or not Path(input_dir).is_dir():
                     return
-                added = self._archive_from_dir(Path(input_dir), source="auto")
+                stats = self._archive_from_dir(Path(input_dir), source="auto")
+                added = len(stats["added"])
                 if added:
                     self._db.add_log(f"自动监控：归档 {added} 个字体", "info")
                     # 轮询兜底归档后同样自动重建 assfonts 索引
                     self._schedule_index_rebuild()
-                    if self.get_resource_or_config("notify_enabled"):
-                        self._notify("字体分类管家：自动归档完成", f"✅ 自动归档完成\n已归档 {added} 个字体")
+                elif stats["skipped"] or stats["failed"]:
+                    self._db.add_log(
+                        f"自动监控：跳过已存在 {len(stats['skipped'])} 个，失败 {stats['failed']} 个",
+                        "info" if not stats["failed"] else "warning",
+                    )
             except Exception as err:
                 self._db.add_log(f"自动监控失败: {err}", "error")
+                stats = None
+        # 通知放到锁外发送（post_message 为外部 IO，不占用监控线程持锁时间）。
+        # 轮询兜底不做「只有跳过」的通知：复制模式下源文件常驻监控目录，
+        # 每次轮询都会全量跳过，通知会周期性刷屏；真正代表有动静的是新增/失败/删除重复源文件。
+        if stats and (
+            stats["added"] or stats["failed"] or stats["dup_deleted"] or stats["delete_failed"]
+        ):
+            self._archive_notify(stats, source_label="监控", title_prefix="自动归档")
 
     def __auto_ass_check(self) -> None:
         """自动检查：扫描字幕目录中的 ASS 文件"""
@@ -928,17 +958,39 @@ class Zitifenlei(_PluginBase):
             try:
                 if is_font_file(p.name):
                     # 归档函数内部自带成功/失败日志，此处不再重复记录；
-                    # 返回值：>0=已归档，-1=进入待确认（目录自动收集关闭），None=跳过
-                    font_id = self._archive_font_file(p, source="auto")
+                    # 返回值：>0=已归档，_ARCH_PENDING=进入待确认（目录自动收集关闭），
+                    # _ARCH_DUP*=库中已存在跳过，None=处理失败
+                    ret = self._archive_font_file(p, source="auto")
                     with self._lock:
-                        if font_id and font_id > 0:
+                        if ret is not None and ret > 0:
                             # 归档结果进通知聚合缓冲：同一批连续放入的文件合并成一条归类通知
                             self._notify_agg["fonts"].append(p.name)
                             # 归档成功自动重建 assfonts 索引（延迟聚合，防批量归档反复重建）
                             self._schedule_index_rebuild()
-                        elif font_id == -1:
+                        elif ret == _ARCH_PENDING:
                             # 只进待确认（未归档）：走独立「待确认」通知，不再误报「已自动归档」
                             self._notify_agg["fonts_pending"].append(p.name)
+                        elif ret in (_ARCH_DUP, _ARCH_DUP_DELETED, _ARCH_DUP_DEL_FAILED):
+                            # 库中已有该字体：同样进通知（用户放了文件却「没归档」需要有交代）
+                            self._notify_agg["fonts_skipped"].append(p.name)
+                            if ret == _ARCH_DUP_DELETED:
+                                self._notify_agg["fonts_dup_deleted"] = int(
+                                    self._notify_agg.get("fonts_dup_deleted") or 0
+                                ) + 1
+                            elif ret == _ARCH_DUP_DEL_FAILED:
+                                self._notify_agg["fonts_delete_failed"] = int(
+                                    self._notify_agg.get("fonts_delete_failed") or 0
+                                ) + 1
+                        else:
+                            # None：未配置库目录 / 复制 / 写库异常等失败
+                            self._notify_agg["font_failed"] = int(
+                                self._notify_agg.get("font_failed") or 0
+                            ) + 1
+                        # 本批字体事件首次到达时快照归档模式，通知标题/正文标明复制还是移动
+                        if not self._notify_agg.get("archive_mode"):
+                            self._notify_agg["archive_mode"] = (
+                                self.get_resource_or_config("archive_mode") or "copy"
+                            )
                     self._queue_agg_notify()
                 elif is_ass_file(p.name):
                     subset_dir_cfg = self.get_resource_or_config("subset_dir") or ""
@@ -1037,6 +1089,10 @@ class Zitifenlei(_PluginBase):
 
         「目录自动收集」关闭时：监控到的字体改进「待确认」，等待一键整理。
         未配置「字体库目录」时不静默：写明确警示日志。
+
+        返回值：>0=归档成功（字体 ID）；_ARCH_PENDING=进待确认；
+        _ARCH_DUP / _ARCH_DUP_DELETED / _ARCH_DUP_DEL_FAILED=库中已存在跳过；
+        None=处理失败。调用方据此区分「跳过」与「失败」分别统计。
         """
         # 收集开关：关闭 → 只收下待确认，不自动归档
         if self.get_resource_or_config("auto_collect") is False:
@@ -1056,11 +1112,11 @@ class Zitifenlei(_PluginBase):
         # 已在字体库目录内/已收录过的文件直接跳过，避免重复归档
         try:
             if _path_within(file_path, Path(lib_dir)):
-                return None
+                return _ARCH_DUP
             if self._db.count_fonts_by_path(str(file_path)):
                 # 记录源文件已处理（仪表盘「待整理」排除该文件）
                 self._db.mark_font_processed(str(file_path))
-                return None
+                return _ARCH_DUP
         except Exception:
             pass
         scan_mode = self.get_resource_or_config("scan_mode") or "internal"
@@ -1098,21 +1154,24 @@ class Zitifenlei(_PluginBase):
                 # 字体库已存在同名同后缀字体（含旧平铺布局与格式子文件夹）：
                 # 跳过本次归档（不再生成 -2/-3 副本，保证轮询/兜底全量扫描存量文件时幂等）
                 self._db.add_log(f"跳过 {file_path.name}：字体库已存在 {existing.name}", "info")
+                skip_ret = _ARCH_DUP
                 # 「移动原文件」模式 + 开关开启：删除监控目录残留的重复源文件，
                 # 避免 move 模式下判重跳过导致源文件一直堆在监控目录；复制模式不受影响
                 if archive_mode == "move" and self.get_resource_or_config("move_delete_duplicate"):
                     try:
                         if file_path.is_file():
                             file_path.unlink()
+                            skip_ret = _ARCH_DUP_DELETED
                             self._db.add_log(
                                 f"已删除监控目录残留的重复源文件 {file_path.name}（字体库已有 {existing.name}）",
                                 "info",
                             )
                     except Exception as err:
+                        skip_ret = _ARCH_DUP_DEL_FAILED
                         self._db.add_log(f"删除重复源文件失败 {file_path.name}: {err}", "warning")
                 # 源文件虽然同源已入库（仅更名），同样算已处理，「待整理」不再计入
                 self._db.mark_font_processed(str(file_path))
-                return None
+                return skip_ret
             try:
                 fmt_dir.mkdir(parents=True, exist_ok=True)
             except Exception:
@@ -1168,11 +1227,27 @@ class Zitifenlei(_PluginBase):
             self._db.add_log(f"写库失败 {dest.name}: {err}", "error")
             return None
 
-    def _archive_from_dir(self, directory: Path, source: str = "auto") -> int:
-        """批量自动归档目录内字体（定时兜底）：直接写入字体库，不经过待确认"""
-        added = 0
+    def _archive_from_dir(self, directory: Path, source: str = "auto") -> Dict[str, Any]:
+        """批量自动归档目录内字体（定时兜底）：直接写入字体库，不经过待确认。
+
+        返回统计字典（供通知按「新增 / 跳过 / 失败 / 删除重复源文件」分项展示）：
+          added: [归档成功的源文件名]
+          skipped: [字体库已存在而跳过的源文件名]
+          failed: 处理失败数量
+          dup_deleted: 移动模式下实际删除的重复源文件数
+          delete_failed: 删除重复源文件失败数
+          pending: 进入「待确认」的数量（目录自动收集关闭）
+        """
+        stats: Dict[str, Any] = {
+            "added": [],
+            "skipped": [],
+            "failed": 0,
+            "dup_deleted": 0,
+            "delete_failed": 0,
+            "pending": 0,
+        }
         if not directory.is_dir():
-            return added
+            return stats
         for f in sorted(directory.rglob("*")):
             # 优雅停止：停插件时当前条处理完就不再继续（_stopping 被 stop_service 置位）
             try:
@@ -1184,10 +1259,23 @@ class Zitifenlei(_PluginBase):
                 continue
             if not f.is_file() or not is_font_file(f.name):
                 continue
-            # 只统计真正归档成功的（返回值 >0）；-1=进待确认、None=跳过，均不计入「归档 N 个」
-            if (self._archive_font_file(f, source=source) or 0) > 0:
-                added += 1
-        return added
+            ret = self._archive_font_file(f, source=source)
+            if ret is not None and ret > 0:
+                stats["added"].append(f.name)
+            elif ret == _ARCH_PENDING:
+                stats["pending"] += 1
+            elif ret == _ARCH_DUP:
+                stats["skipped"].append(f.name)
+            elif ret == _ARCH_DUP_DELETED:
+                stats["skipped"].append(f.name)
+                stats["dup_deleted"] += 1
+            elif ret == _ARCH_DUP_DEL_FAILED:
+                stats["skipped"].append(f.name)
+                stats["delete_failed"] += 1
+            else:
+                # None=未配置库目录/复制/写库异常等失败
+                stats["failed"] += 1
+        return stats
 
     # ─── 内部工具 ────────────────────────────────────────
     @staticmethod
@@ -1230,39 +1318,112 @@ class Zitifenlei(_PluginBase):
             t.start()
             self._notify_agg["timer"] = t
 
+    @staticmethod
+    def _short_names(names: List[str], limit: int) -> str:
+        """通知里的字体名截断：最多展示 limit 个，超出补「…」"""
+        shown = list(names)[: max(0, int(limit))]
+        text = "、".join(str(n) for n in shown)
+        return text + ("…" if len(names) > len(shown) else "")
+
+    def _archive_notify(
+        self,
+        stats: Dict[str, Any],
+        mode: Optional[str] = None,
+        source_label: str = "监控",
+        title_prefix: str = "自动归档",
+        extra: str = "",
+    ) -> None:
+        """字体归档类通知统一模板（实时监控 / 全量检查 / 全量扫描共用）。
+
+        标题与正文首行都标明复制/移动模式；新增名最多 10 个、跳过名最多 3 个；
+        末尾「已删除监控目录中的重复源文件」仅在移动模式 + 删除开关开 + 实际删除时出现。
+        """
+        added = list(stats.get("added") or [])
+        skipped = list(stats.get("skipped") or [])
+        failed = int(stats.get("failed") or 0)
+        dup_deleted = int(stats.get("dup_deleted") or 0)
+        delete_failed = int(stats.get("delete_failed") or 0)
+        total = len(added) + len(skipped) + failed
+        if not total:
+            return
+        if not self.get_resource_or_config("notify_enabled"):
+            return
+        mode = mode or (self.get_resource_or_config("archive_mode") or "copy")
+        is_move = mode == "move"
+        mode_name = "移动模式" if is_move else "复制模式"
+        mode_desc = "移动模式：源文件已移入字体库" if is_move else "复制模式：源文件保留在监控目录"
+        lines = [f"📥 本次{source_label}到 {total} 个字体（{mode_desc}）", ""]
+        if added:
+            lines.append(f"✅ 新增归档 {len(added)} 个：{self._short_names(added, 10)}")
+        if skipped:
+            lines.append(f"⏭ 库中已存在跳过 {len(skipped)} 个：{self._short_names(skipped, 3)}")
+        if failed:
+            lines.append(f"⚠ 处理失败 {failed} 个（详见插件日志）")
+        if delete_failed:
+            lines.append(f"⚠ 删除重复源文件失败 {delete_failed} 个（详见插件日志）")
+        if extra:
+            lines.append(extra)
+        if dup_deleted and is_move:
+            lines += ["", f"🗑 已删除监控目录中的重复源文件 {dup_deleted} 个"]
+        self._notify(f"字体分类管家：{title_prefix}（{mode_name}）", "\n".join(lines))
+
     def _flush_agg_notify(self) -> None:
         """聚合窗口到期：把缓冲内的归档/字幕检查结果归类成一条通知发送。
 
-        分类：✅ 已自动归档 N 个字体 / ❌ 缺失字体的字幕（带缺的字体明细） /
-        ✅ 已子集化字幕 / ✅ 字体齐全字幕。数量大时折叠显示（前几个 + 等 N 个），
-        避免消息过长。
+        字体归档走统一模板 _archive_notify（区分复制/移动、新增/跳过/失败分项）；
+        字幕按缺失/子集化/齐全分类。数量大时折叠显示（前几个 + …），避免消息过长。
         """
         with self._lock:
             buf = self._notify_agg
             fonts = list(buf.get("fonts") or [])
+            fonts_skipped = list(buf.get("fonts_skipped") or [])
+            fonts_dup_deleted = int(buf.get("fonts_dup_deleted") or 0)
+            fonts_delete_failed = int(buf.get("fonts_delete_failed") or 0)
+            font_failed = int(buf.get("font_failed") or 0)
+            archive_mode = str(buf.get("archive_mode") or "")
             fonts_pending = list(buf.get("fonts_pending") or [])
             subs_missing = list(buf.get("subs_missing") or [])
             subs_subset = list(buf.get("subs_subset") or [])
             subs_ok = list(buf.get("subs_ok") or [])
             buf["fonts"] = []
+            buf["fonts_skipped"] = []
+            buf["fonts_dup_deleted"] = 0
+            buf["fonts_delete_failed"] = 0
+            buf["font_failed"] = 0
+            buf["archive_mode"] = ""
             buf["fonts_pending"] = []
             buf["subs_missing"] = []
             buf["subs_subset"] = []
             buf["subs_ok"] = []
             buf["timer"] = None
-        if not (fonts or fonts_pending or subs_missing or subs_subset or subs_ok):
+        if not (
+            fonts
+            or fonts_skipped
+            or font_failed
+            or fonts_dup_deleted
+            or fonts_delete_failed
+            or fonts_pending
+            or subs_missing
+            or subs_subset
+            or subs_ok
+        ):
             return
         if not self.get_resource_or_config("notify_enabled"):
             return
         # 字体与字幕分开通知：字体一条、字幕一条，不混在同一消息里
-        if fonts:
-            # 字体归档通知（仅字体）
-            shown = fonts[:10]
-            more = len(fonts) - len(shown)
-            self._notify(
-                "字体分类管家：自动归档",
-                f"✅ 已自动归档 {len(fonts)} 个字体：{'、'.join(shown)}"
-                + (f" 等 {more} 个" if more > 0 else ""),
+        if fonts or fonts_skipped or font_failed or fonts_dup_deleted or fonts_delete_failed:
+            # 字体归档通知（仅字体）：新增/跳过/失败分项，只有跳过时也发（用户需要知道去向）
+            self._archive_notify(
+                {
+                    "added": fonts,
+                    "skipped": fonts_skipped,
+                    "failed": font_failed,
+                    "dup_deleted": fonts_dup_deleted,
+                    "delete_failed": fonts_delete_failed,
+                },
+                mode=archive_mode or None,
+                source_label="监控",
+                title_prefix="自动归档",
             )
         # 目录自动收集关闭：监控到的字体只进「待确认」未归档，独立成条提示
         if fonts_pending:
@@ -3075,11 +3236,7 @@ class Zitifenlei(_PluginBase):
                 self._db.add_log(f"assfonts 索引自动重建失败: {idx_msg}", "warning")
         if failed:
             self._db.add_log(f"整理失败 {len(failed)} 个", "error")
-        if self.get_resource_or_config("notify_enabled"):
-            self._notify(
-                "字体分类管家：整理完成",
-                f"✅ 整理完成\n已归档 {processed} 个字体" + ("" if idx_ok else f"\n⚠ assfonts 索引重建失败: {idx_msg}"),
-            )
+        # 一键整理为同页面手动操作，结果直接反映在前端提示，不再额外发送通知
         return self._ok(
             {"processed": processed, "failed": failed, "index_ok": idx_ok},
             f"已归档 {processed} 个字体" + ("" if not idx_ok else "，assfonts 索引已自动重建"),
@@ -3142,22 +3299,26 @@ class Zitifenlei(_PluginBase):
                         self._db.add_log(f"检查归档诊断: 读取 {input_dir} 失败: {err}", "error")
                 except Exception:
                     pass
-                added = self._archive_from_dir(Path(input_dir), source="scan")
+                stats = self._archive_from_dir(Path(input_dir), source="scan")
+                added = len(stats["added"])
                 idx_ok, idx_msg = self._rebuild_subset_index_silent()
-                self._db.add_log(f"检查归档：归档 {added} 个字体", "info")
+                self._db.add_log(
+                    f"检查归档：归档 {added} 个字体，跳过已存在 {len(stats['skipped'])} 个",
+                    "info",
+                )
                 if idx_ok:
                     self._db.add_log("assfonts 字体索引已自动重建（全量检查归档后）", "info")
                 elif added:
                     # 归档成功但索引重建失败：提示但不阻塞归档结果
                     self._db.add_log(f"assfonts 索引自动重建失败: {idx_msg}", "warning")
                 self._db.set_last_scan_time()  # 记录「上次全量检查」时间（仪表盘展示）
-                if self.get_resource_or_config("notify_enabled"):
-                    self._notify(
-                        "字体分类管家：全量检查完成",
-                        f"✅ 全量检查完成\n已归档 {added} 个字体"
-                        + ("，assfonts 索引已自动重建" if idx_ok else "")
-                        + ("，索引重建失败" if (added and not idx_ok) else ""),
-                    )
+                # 全量检查通知：与自动归档统一模板（新增/跳过/失败分项 + 明确模式）
+                self._archive_notify(
+                    stats,
+                    source_label="扫描",
+                    title_prefix="全量检查完成",
+                    extra=("⚠ assfonts 索引重建失败（详见插件日志）" if (added and not idx_ok) else ""),
+                )
                 return self._ok(
                     {"added": added, "index_ok": idx_ok},
                     f"已归档 {added} 个字体" + ("，assfonts 索引已自动重建" if idx_ok else ""),
@@ -3252,10 +3413,14 @@ class Zitifenlei(_PluginBase):
         if not self._scan_lock.acquire(blocking=False):
             return self._err("全量扫描正在运行中，请等待本次完成后再试")
         try:
-            added = self._archive_from_dir(Path(input_dir), source="scan")
-            self._db.add_log(f"全量扫描：处理 {added} 个字体", "info")
-            if self.get_resource_or_config("notify_enabled"):
-                self._notify("字体分类管家：全量扫描完成", f"✅ 全量扫描完成\n已处理 {added} 个字体（已入库同名跳过）")
+            stats = self._archive_from_dir(Path(input_dir), source="scan")
+            added = len(stats["added"])
+            self._db.add_log(
+                f"全量扫描：归档 {added} 个字体，跳过已存在 {len(stats['skipped'])} 个，失败 {stats['failed']} 个",
+                "info",
+            )
+            # 全量扫描通知：与自动归档统一模板（新增/跳过/失败分项 + 明确模式）
+            self._archive_notify(stats, source_label="扫描", title_prefix="全量扫描完成")
             return self._ok({"added": added}, f"全量扫描完成，已处理 {added} 个字体")
         except Exception as err:
             self._db.add_log(f"全量扫描失败: {err}", "error")

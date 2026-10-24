@@ -142,6 +142,21 @@ const previewStyle = computed(() => {
 // 厂商列表（来自 vendors 接口 + 当前列表聚合）
 const vendorOptions = ref([])
 
+// ===== 收藏筛选 =====
+// 厂商下拉顶部固定一个「⭐ 收藏」伪厂商入口（前端过滤，不依赖后端接口）；
+// 搜索框输入「收藏」也切到收藏过滤，两种入口共用同一套判断
+const FAVORITE_FILTER = '__favorite__'
+const favoriteCount = computed(() => allFonts.value.filter(f => !!f.favorite).length)
+function isFavoriteKeyword(kw) {
+  const s = String(kw || '').trim().toLowerCase()
+  return s === '收藏' || s === '收藏夹' || s === 'favorite'
+}
+const favoriteMode = computed(() => vendorFilter.value === FAVORITE_FILTER || isFavoriteKeyword(search.value))
+const vendorSelectItems = computed(() => [
+  { title: `⭐ 收藏（${favoriteCount.value}）`, value: FAVORITE_FILTER },
+  ...vendorOptions.value.map(v => ({ title: v.vendor, value: v.vendor })),
+])
+
 // ===== 目录计算：file_path 相对 lib_dir 的所在目录 =====
 function relDirOf(filePath) {
   if (!filePath) return ''
@@ -185,16 +200,22 @@ const flatNodes = computed(() => {
   }
 
   let list = allFonts.value
-  // 厂商过滤
-  if (vendorFilter.value) {
+  // 厂商过滤：「⭐ 收藏」伪厂商 → 只留收藏项；否则按厂商精确匹配
+  if (vendorFilter.value === FAVORITE_FILTER) {
+    list = list.filter(f => !!f.favorite)
+  } else if (vendorFilter.value) {
     list = list.filter(f => f.vendor === vendorFilter.value)
   }
-  // 关键字过滤：匹配时也保留目录
+  // 关键字过滤：搜索「收藏」直接切收藏过滤；其余按五字段模糊匹配
   const kw = (search.value || '').trim().toLowerCase()
   if (kw) {
-    list = list.filter(f =>
-      [f.name, f.family, f.vendor, f.designer, f.file_name].some(v => v && String(v).toLowerCase().includes(kw))
-    )
+    if (isFavoriteKeyword(kw)) {
+      list = list.filter(f => !!f.favorite)
+    } else {
+      list = list.filter(f =>
+        [f.name, f.family, f.vendor, f.designer, f.file_name].some(v => v && String(v).toLowerCase().includes(kw))
+      )
+    }
   }
   for (const f of list) {
     const relDir = relDirOf(f.file_path)
@@ -728,26 +749,26 @@ onUnmounted(() => {
                 density="compact"
                 variant="outlined"
                 hide-details
-                clearable
+                :clearable="!!search"
                 prepend-inner-icon="mdi-magnify"
               ></v-text-field>
               <v-select
                 v-model="vendorFilter"
-                :items="vendorOptions"
-                item-title="vendor"
-                item-value="vendor"
+                :items="vendorSelectItems"
+                item-title="title"
+                item-value="value"
                 label="厂商筛选"
                 density="compact"
                 variant="outlined"
                 hide-details
-                clearable
+                :clearable="!!vendorFilter"
                 class="mt-2"
               ></v-select>
             </div>
             <v-divider></v-divider>
             <v-progress-linear v-if="loadingList" indeterminate color="primary"></v-progress-linear>
             <div v-if="!loadingList && loaded && !flatNodes.length" class="zt-empty pa-6" @click="selectedId = null">
-              暂无字体，点击「上传字体」或「全量检查」添加
+              {{ favoriteMode ? '还没有收藏的字体：点击字体右侧星标即可收藏' : '暂无字体，点击「上传字体」或「全量检查」添加' }}
             </div>
             <div v-else class="zt-list-body" @click="onListClick">
               <v-list density="compact" class="pa-0" nav>
