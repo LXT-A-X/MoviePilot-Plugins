@@ -35,23 +35,19 @@ const uploading = ref(false)
 // 处理中：按钮转圈禁用，防重复点击
 const scanning = ref(false)
 
-// ===== 结果抽屉（按剧名/目录分组，前端一次性取全量后渐进渲染）=====
-const resultsOpen = ref(false)
+// ===== 右栏结果：按剧名/目录分组，折叠抽屉 + 前端渐进渲染 =====
 const records = ref([])
 const loadingRecords = ref(false)
 const downloadingId = ref(null)
 const recordTotal = ref(0)
 const retriableCount = ref(0)
-// 渐进渲染：初始渲染 60 条，下拉再加 60（与字体库同思路，数据一次取全，DOM 分批）
+// 渐进渲染：初始渲染 60 条，下拉再加 60（数据一次取全，DOM 分批）
 const RENDER_STEP = 60
 const renderBudget = ref(RENDER_STEP)
 const expandedGroups = ref(new Set())
 const groupBusy = ref('')
 const groupConfirm = ref(false)
 const groupTarget = ref(null)
-// 抽屉在 body 下，主题变量可能取不到：打开时从宿主 app 读实际配色
-const drawerBg = ref('')
-const drawerFg = ref('')
 // 筛选：状态下拉 + 文件名搜索
 const filterStatus = ref('')
 const recordSearch = ref('')
@@ -146,20 +142,8 @@ async function loadRecords(reset = false, force = false) {
   }
 }
 
-// 抽屉关闭时只刷角标（总数 + 可重试数），不拉全量，避免后台每 30 秒传整表
-async function refreshBadge() {
-  try {
-    const data = await apiModule.get(props.api, '/subset/records', { page: 1, limit: 1 })
-    recordTotal.value = (data && data.total) || 0
-    if (typeof data?.retriable === 'number') retriableCount.value = data.retriable
-  } catch (e) {
-    /* 角标刷新失败忽略 */
-  }
-}
-
 async function refreshCurrentPage() {
-  if (resultsOpen.value) await loadRecords(false, true)
-  else await refreshBadge()
+  await loadRecords(false, true)
 }
 
 // 筛选变化：防抖后重拉全量并重置展开/渲染预算
@@ -241,25 +225,13 @@ const visibleGroups = computed(() => {
 })
 const hasMoreRecords = computed(() => visibleGroups.value.some(g => g.truncated))
 
-function openResults() {
-  resultsOpen.value = true
-  // 抽屉 teleport 到 body，脱离了 .v-application 的 CSS 变量作用域，
-  // 取宿主实际配色补齐背景/文字色，避免主题变量失效导致透明
-  const app = document.querySelector('.v-application')
-  if (app) {
-    const cs = getComputedStyle(app)
-    drawerBg.value = cs.backgroundColor
-    drawerFg.value = cs.color
-  }
-  loadRecords(true, true)
-}
 function toggleGroup(g) {
   const next = new Set(expandedGroups.value)
   if (next.has(g.key)) next.delete(g.key)
   else next.add(g.key)
   expandedGroups.value = next
 }
-function onDrawerScroll(e) {
+function onRecordsScroll(e) {
   const el = e.target
   if (hasMoreRecords.value && el && el.scrollTop + el.clientHeight >= el.scrollHeight - 60) {
     renderBudget.value += RENDER_STEP
@@ -588,8 +560,7 @@ async function clearRecords() {
 onMounted(() => {
   loadStatus()
   loadPending()
-  // 抽屉默认关闭：只刷角标（总数/可重试数），避免进页面就拉全量记录
-  refreshBadge()
+  loadRecords()
   startPolling()
 })
 // keep-alive 缓存场景：切回时恢复轮询并重拉数据（Q1 修复；Q14 后切 Tab
@@ -601,10 +572,8 @@ onActivated(() => {
   startPolling()
 })
 // 切走（进入 keep-alive 缓存）时停止轮询，避免后台不可见视图持续打接口（Q1 修复）
-// 抽屉是 teleport 到 body 的浮层，缓存后不会随视图隐藏，必须手动关掉
 onDeactivated(() => {
   stopPolling()
-  resultsOpen.value = false
 })
 onUnmounted(() => stopPolling())
 
@@ -662,20 +631,6 @@ function stopPolling() {
       </v-btn>
       <v-btn
         variant="tonal"
-        :disabled="!enabled"
-        @click="openResults"
-      >
-        <v-icon start size="18">mdi-history</v-icon>
-        结果
-        <v-chip
-          class="ml-2"
-          size="x-small"
-          :color="retriableCount ? 'warning' : 'primary'"
-          variant="flat"
-        >{{ recordTotal }}</v-chip>
-      </v-btn>
-      <v-btn
-        variant="tonal"
         :disabled="!enabled || !pendingList.length"
         title="清空左栏待处理"
         @click="clearPending"
@@ -721,8 +676,8 @@ function stopPolling() {
     </v-alert>
 
     <v-row no-gutters class="zt-subset-row">
-      <!-- 左栏：待处理（结果已移入右侧抽屉） -->
-      <v-col cols="12">
+      <!-- 左栏：待处理 -->
+      <v-col cols="12" md="5">
         <v-card class="zt-card-bg zt-list-card">
           <v-card-title class="zt-card-title">
             <v-icon start size="18">mdi-tray-full</v-icon>
@@ -754,80 +709,73 @@ function stopPolling() {
           </div>
         </v-card>
       </v-col>
-    </v-row>
-
-    <!-- 结果抽屉：右侧浮层，按剧名/目录分组的可折叠抽屉 -->
-    <teleport to="body">
-      <div v-if="resultsOpen" class="zt-drawer-scrim" @click="resultsOpen = false"></div>
-      <aside
-        v-if="resultsOpen"
-        class="zt-results-drawer"
-        :style="{ background: drawerBg || undefined, color: drawerFg || undefined }"
-      >
-        <div class="zt-drawer-head">
-          <v-icon size="18">mdi-history</v-icon>
-          <span class="zt-drawer-title">结果（{{ recordTotal }}）</span>
-          <v-spacer></v-spacer>
-          <v-btn
-            size="small" variant="tonal" color="success"
-            :disabled="!enabled || downloadAllBusy || !downloadableRecords.length"
-            :loading="downloadAllBusy"
-            title="下载当前筛选下全部成功成品字幕"
-            @click="downloadAll"
-          >
-            <v-icon start size="15">mdi-download-multiple</v-icon>
-            <span class="d-none d-sm-inline">全部下载</span>
-          </v-btn>
-          <v-btn
-            size="small" variant="tonal" color="warning"
-            :disabled="!enabled || retrying || !hasRetriable()"
-            :loading="retrying"
-            title="对失败/缺字体的字幕重新子集化（补好缺失字体后使用）"
-            @click="retryFailed"
-          >
-            <v-icon start size="15">mdi-refresh</v-icon>
-            <span class="d-none d-sm-inline">重试失败</span>
-          </v-btn>
-          <v-btn
-            size="small" variant="tonal" color="error"
-            :disabled="!enabled || clearingRecords || downloadAllBusy || !!downloadingId || !records.length"
-            :loading="clearingRecords"
-            title="清空全部子集化记录（监控/上传来历的成品一并删除；MP 入库只删记录，不动媒体库原字幕）"
-            @click="clearConfirm = true"
-          >
-            <v-icon start size="15">mdi-delete-sweep</v-icon>
-            <span class="d-none d-sm-inline">全部清空</span>
-          </v-btn>
-          <v-btn icon size="small" title="关闭" @click="resultsOpen = false">
-            <v-icon size="20">mdi-close</v-icon>
-          </v-btn>
-        </div>
-        <v-divider></v-divider>
-        <div class="zt-drawer-filter">
-          <v-select
-            v-model="filterStatus"
-            :items="statusFilterOptions"
-            item-title="title"
-            item-value="value"
-            density="compact"
-            variant="outlined"
-            hide-details
-            class="zt-filter-status"
-          ></v-select>
-          <v-text-field
-            v-model="recordSearch"
-            density="compact"
-            variant="outlined"
-            hide-details
-            :clearable="!!recordSearch"
-            placeholder="搜索字幕名…"
-            prepend-inner-icon="mdi-magnify"
-            class="zt-filter-search"
-          ></v-text-field>
-        </div>
+      <!-- 右栏：结果（按剧名/目录分组折叠的抽屉） -->
+      <v-col cols="12" md="7">
+        <v-card class="zt-card-bg zt-list-card">
+          <v-card-title class="zt-card-title zt-card-title-row">
+            <v-icon start size="18">mdi-history</v-icon>
+            <span class="zt-title-text">结果（{{ recordTotal }}）</span>
+            <v-spacer></v-spacer>
+            <div class="zt-title-actions">
+              <v-btn
+                size="small" variant="tonal" color="success"
+                :disabled="!enabled || downloadAllBusy || !downloadableRecords.length"
+                :loading="downloadAllBusy"
+                title="下载当前筛选下全部成功成品字幕"
+                @click="downloadAll"
+              >
+                <v-icon start size="15">mdi-download-multiple</v-icon>
+                <span class="d-none d-sm-inline">全部下载</span>
+              </v-btn>
+              <v-btn
+                size="small" variant="tonal" color="warning"
+                :disabled="!enabled || retrying || !hasRetriable()"
+                :loading="retrying"
+                title="对失败/缺字体的字幕重新子集化（补好缺失字体后使用）"
+                @click="retryFailed"
+              >
+                <v-icon start size="15">mdi-refresh</v-icon>
+                <span class="d-none d-sm-inline">重试失败</span>
+              </v-btn>
+              <v-btn
+                size="small" variant="tonal" color="error"
+                :disabled="!enabled || clearingRecords || downloadAllBusy || !!downloadingId || !records.length"
+                :loading="clearingRecords"
+                title="清空全部子集化记录（监控/上传来历的成品一并删除；MP 入库只删记录，不动媒体库原字幕）"
+                @click="clearConfirm = true"
+              >
+                <v-icon start size="15">mdi-delete-sweep</v-icon>
+                <span class="d-none d-sm-inline">全部清空</span>
+              </v-btn>
+            </div>
+          </v-card-title>
+          <v-divider></v-divider>
+          <!-- 筛选栏：状态下拉 + 文件名搜索 -->
+          <div class="zt-filter-row">
+            <v-select
+              v-model="filterStatus"
+              :items="statusFilterOptions"
+              item-title="title"
+              item-value="value"
+              density="compact"
+              variant="outlined"
+              hide-details
+              class="zt-filter-status"
+            ></v-select>
+            <v-text-field
+              v-model="recordSearch"
+              density="compact"
+              variant="outlined"
+              hide-details
+              :clearable="!!recordSearch"
+              placeholder="搜索字幕名…"
+              prepend-inner-icon="mdi-magnify"
+              class="zt-filter-search"
+            ></v-text-field>
+          </div>
         <v-divider></v-divider>
         <v-progress-linear v-if="loadingRecords" indeterminate color="primary"></v-progress-linear>
-        <div class="zt-drawer-body" @scroll="onDrawerScroll">
+        <div class="zt-list-body zt-record-body" @scroll="onRecordsScroll">
           <div v-if="!loadingRecords && !groupedRecords.length" class="zt-empty pa-6">
             暂无{{ filterStatus || recordSearch ? '匹配' : '' }}处理结果<br />
             <span class="zt-empty-sub">处理完成后结果与输出文件在这里展示，可下载</span>
@@ -920,8 +868,9 @@ function stopPolling() {
             <v-progress-circular indeterminate size="18" color="primary"></v-progress-circular>
           </div>
         </div>
-      </aside>
-    </teleport>
+        </v-card>
+      </v-col>
+    </v-row>
 
     <!-- 删除整组确认：有成品时明确会连成品一起删 -->
     <v-dialog v-model="groupConfirm" max-width="440">
@@ -994,41 +943,26 @@ function stopPolling() {
   flex: 1 1 auto;
   overflow-y: auto;
 }
-/* ===== 结果抽屉（teleport 到 body，避免与 MP 宿主的 v-app layout 冲突） ===== */
-.zt-drawer-scrim {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.45);
-  z-index: 2100;
-}
-.zt-results-drawer {
-  position: fixed;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  width: min(640px, 100vw);
+/* 结果卡片标题行：Vuetify 的 v-card-title 默认 display:block，放 v-spacer + 按钮会掉到第二行。
+   PC 上改成单行 flex，按钮与「结果」同排靠右；窄屏时按钮换到下一排。 */
+.zt-card-title-row {
   display: flex;
-  flex-direction: column;
-  background: rgb(var(--v-theme-surface, 30, 30, 30));
-  color: rgb(var(--v-theme-on-surface, 255, 255, 255));
-  box-shadow: -8px 0 28px rgba(0, 0, 0, 0.28);
-  z-index: 2101;
-  overflow: hidden;
+  align-items: center;
 }
-.zt-drawer-head {
+.zt-card-title-row .zt-title-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.zt-title-actions {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 6px;
-  padding: 10px 12px;
 }
-.zt-drawer-title {
-  font-size: 15px;
-  font-weight: 600;
-  margin-inline-start: 2px;
-}
-/* 抽屉内筛选栏：状态下拉 + 搜索框 */
-.zt-drawer-filter {
+/* 结果区筛选栏：状态下拉 + 搜索框 */
+.zt-filter-row {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1042,12 +976,22 @@ function stopPolling() {
   flex: 1 1 auto;
   min-width: 120px;
 }
-.zt-drawer-body {
+.zt-record-body {
+  min-height: 60px;
   flex: 1 1 auto;
-  min-height: 0;
   overflow-y: auto;
-  padding: 8px 12px 28px;
+  padding: 8px;
   overscroll-behavior: contain;
+}
+@media (max-width: 959.95px) {
+  .zt-card-title-row {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+  .zt-title-actions {
+    width: 100%;
+    margin-inline-start: 0 !important;
+  }
 }
 
 /* ===== 分组抽屉：组头按状态着色，点击折叠/展开 ===== */
@@ -1100,10 +1044,9 @@ function stopPolling() {
   border-top: 1px dashed rgba(var(--zt-group-color), 0.3);
   padding: 2px 4px;
 }
-@media (max-width: 599.95px) {
-  .zt-results-drawer { width: 100vw; }
+/* 右栏只有半屏宽：窄屏时组内状态计数收起，避免组头挤成两行 */
+@media (max-width: 959.95px) {
   .zt-group-stats { display: none; }
-  .zt-drawer-head { padding: 8px; }
 }
 .zt-loading-more {
   font-size: 12px;
