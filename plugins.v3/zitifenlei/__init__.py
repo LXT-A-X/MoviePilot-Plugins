@@ -401,7 +401,7 @@ class Zitifenlei(_PluginBase):
     plugin_name = "字体分类管家"
     plugin_desc = "字体归档整理与 ASS 字幕字体检查插件：扫描/上传字体到字体库，检查字幕缺失字体。"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/zitifenlei.png"
-    plugin_version = "3.0.4"
+    plugin_version = "3.0.5"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "zitifenlei_"
@@ -509,6 +509,8 @@ class Zitifenlei(_PluginBase):
         self._index_last_build_ts = 0.0
         # 全量重建进行中：其他调用方（检查/子集化）直接跳过，宁可不动也不要按旧/空索引误判缺失
         self._index_rebuilding = False
+        # 重建进度（供 UI 显示「正在重建：已处理 N/M」）：重建结束后清零
+        self._index_progress: Dict[str, Any] = {"done": 0, "total": 0}
         # HarfBuzz 探测缓存（签名环境不变不重复 import）
         self._hb_probe: Optional[Tuple[bool, str]] = None
 
@@ -2116,6 +2118,8 @@ class Zitifenlei(_PluginBase):
                         except Exception:
                             pass
                     return stats
+                # 进度基准：UI 用「已处理 / 候选总数」展示重建进度（结束后清零）
+                self._index_progress = {"done": 0, "total": len(candidates)}
                 aborted = False
 
                 def _record_uncertain(item_name: str, why: str) -> None:
@@ -2167,6 +2171,7 @@ class Zitifenlei(_PluginBase):
                     key = str(resolved)
                     seen.add(key)
                     stats["scanned"] += 1
+                    self._index_progress["done"] = stats["scanned"]
                     try:
                         st = resolved.stat()
                     except Exception as err:
@@ -2193,11 +2198,6 @@ class Zitifenlei(_PluginBase):
                         stats["indexed"] += 1
                         if inspection.status == "invalid":
                             stats["invalid"] += 1
-                        elif stats["indexed"] == 1 or stats["indexed"] % 200 == 0:
-                            self._db.add_log(
-                                f"字体索引重建中：已处理 {stats['indexed']} 个文件（当前 {resolved.name}）",
-                                "info",
-                            )
                     except Exception as err:
                         # 解析/写索引抛异常 = 结果不确定（权限/IO/解析器异常）：
                         # 不能当作「确认损坏」丢弃旧索引贡献，也不能静默漏过
@@ -2273,6 +2273,7 @@ class Zitifenlei(_PluginBase):
                 return stats
             finally:
                 self._index_rebuilding = False
+                self._index_progress = {"done": 0, "total": 0}
 
     def _ensure_font_index(self, force: bool = False) -> bool:
         """索引可用性保障：库目录变更/索引为空时懒做一次全量扫描（带节流）。
@@ -5460,6 +5461,9 @@ class Zitifenlei(_PluginBase):
                 "hb_ok": hb_ok,
                 "hb_info": hb_info,
                 "font_index": font_index,
+                # 重建状态：UI 据此显示「正在重建（已处理 N/M）」，避免只看到「—」以为索引坏了
+                "rebuilding": bool(self._index_rebuilding),
+                "rebuild_progress": dict(self._index_progress) if self._index_rebuilding else {},
                 "lib_dir": lib_dir_cfg,
             },
             "子集化状态",

@@ -1067,6 +1067,17 @@ class FontDB:
         ) or {}
         valid_faces = self.query_one("SELECT COUNT(*) AS c, COALESCE(SUM(char_count),0) AS chars FROM font_faces WHERE status = 'ok'") or {}
         invalid = self.query_one("SELECT COUNT(*) AS c FROM font_faces WHERE status != 'ok'") or {}
+        # 最近一次索引写入时间：索引可能由「逐文件增量入库」建立（从未跑过全量重建），
+        # 此时 index_state 里没有 last_rebuild，用 font_files.indexed_at 兜底给 UI 显示
+        # （只在缺构建时间时查，避免每次轮询都全表扫 indexed_at）
+        last_rebuild = self.index_get("last_rebuild", "") or ""
+        last_indexed_at = ""
+        if not last_rebuild:
+            try:
+                last_indexed = self.query_one("SELECT MAX(indexed_at) AS t FROM font_files") or {}
+                last_indexed_at = str(last_indexed.get("t") or "")
+            except Exception:
+                last_indexed_at = ""
         return {
             "files": int(files.get("c") or 0),
             "faces": int(valid_faces.get("c") or 0),
@@ -1074,7 +1085,8 @@ class FontDB:
             "chars": int(valid_faces.get("chars") or 0),
             "invalid_faces": int(invalid.get("c") or 0),
             "index_version": self.index_version(),
-            "last_rebuild": self.index_get("last_rebuild", "") or "",
+            "last_rebuild": last_rebuild,
+            "last_indexed_at": last_indexed_at,
             "engine": self.index_get("engine", "fontTools") or "fontTools",
         }
 

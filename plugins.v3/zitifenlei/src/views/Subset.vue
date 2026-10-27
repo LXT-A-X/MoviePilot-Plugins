@@ -15,6 +15,15 @@ const statusLoaded = ref(false)
 const engineReady = computed(() => !!status.value.hb_ok)
 const indexReady = computed(() => !!status.value.font_index?.faces)
 const indexCount = computed(() => status.value.font_index?.faces || 0)
+// 索引重建中（全部重建/启动轻检/每周核对都可能触发）：UI 明确显示进度，
+// 否则只看到「（—」会以为索引坏了
+const indexRebuilding = computed(() => !!status.value.rebuilding)
+const indexProgressText = computed(() => {
+  const p = status.value.rebuild_progress || {}
+  const done = Number(p.done || 0)
+  const total = Number(p.total || 0)
+  return total > 0 ? `（已处理 ${done}/${total}）` : ''
+})
 
 // ===== 左栏：待处理 =====
 const pendingList = ref([])
@@ -48,9 +57,27 @@ const statusFilterOptions = [
 async function loadStatus() {
   try {
     status.value = await apiModule.get(props.api, '/subset/index')
+    // 重建中（可能是本页触发，也可能是启动轻检/周核对）：开启 2 秒快轮询看进度
+    if (status.value.rebuilding) startRebuildPolling()
+    else stopRebuildPolling()
   } catch (e) { /* 忽略 */ } finally {
     statusLoaded.value = true
   }
+}
+// 重建进度快轮询（2 秒）：重建结束自动停，页面切走也会停
+let rebuildPollTimer = null
+function startRebuildPolling() {
+  if (rebuildPollTimer) return
+  rebuildPollTimer = setInterval(async () => {
+    try {
+      status.value = await apiModule.get(props.api, '/subset/index')
+    } catch (e) { /* 忽略单次失败 */ }
+    if (!status.value.rebuilding) stopRebuildPolling()
+  }, 2000)
+}
+function stopRebuildPolling() {
+  if (rebuildPollTimer) clearInterval(rebuildPollTimer)
+  rebuildPollTimer = null
 }
 // 全部重建字体库：清空索引后逐文件重新解析（日常归档/入库是增量增/减，不走这里）
 const rebuildingIndex = ref(false)
@@ -59,15 +86,18 @@ async function rebuildIndex() {
   if (rebuildingIndex.value) return
   rebuildingIndex.value = true
   rebuildConfirm.value = false
+  // 重建是同步阻塞接口：先开快轮询，让顶部状态条在等待期间就能显示「正在重建 / 已处理 N/M」
+  startRebuildPolling()
   try {
     await apiModule.post(props.api, '/subset/rebuild_index')
     emit('notify', '字体库已全部重建（逐文件重新解析）', 'success')
-    await loadStatus()
     emit('action', { type: 'subset_done' })
   } catch (e) {
     emit('notify', e.message || '全部重建失败')
   } finally {
     rebuildingIndex.value = false
+    stopRebuildPolling()
+    await loadStatus()
   }
 }
 async function loadPending() {
@@ -158,8 +188,13 @@ function onRecordsScroll(e) {
   }
 }
 
-function indexTime() {
-  return status.value?.font_index?.last_rebuild || ''
+// 索引时间文案：优先显示「构建」时间；索引只由逐文件增量入库建立过时没有构建时间，
+// 退化为「最近更新」（font_files.indexed_at 最大值），避免只显示一个空破折号
+function indexTimeText() {
+  const fi = status.value?.font_index || {}
+  if (fi.last_rebuild) return `构建 ${fi.last_rebuild}`
+  if (fi.last_indexed_at) return `最近更新 ${fi.last_indexed_at}`
+  return indexReady.value ? '构建时间未记录' : '—'
 }
 
 function statusColor(r) {
@@ -439,6 +474,7 @@ function startPolling() {
 function stopPolling() {
   if (pollTimer) clearInterval(pollTimer)
   pollTimer = null
+  stopRebuildPolling()
 }
 </script>
 
@@ -506,18 +542,23 @@ function stopPolling() {
       </v-btn>
       <v-spacer></v-spacer>
       <span class="zt-status-hint text-body-2">
-        <v-icon :size="15" :color="indexReady ? 'success' : 'warning'">
-          {{ indexReady ? 'mdi-database-check' : 'mdi-database-off' }}
+        <v-icon :size="15" :color="indexRebuilding ? 'info' : (indexReady ? 'success' : 'warning')">
+          {{ indexRebuilding ? 'mdi-database-sync-outline' : (indexReady ? 'mdi-database-check' : 'mdi-database-off') }}
         </v-icon>
-        字体库索引：{{ indexReady ? `${indexCount} 个 face` : '未构建' }}（{{ indexTime() || '—' }}）
+        <template v-if="indexRebuilding">
+          字体库索引：正在重建…{{ indexProgressText }}
+        </template>
+        <template v-else>
+          字体库索引：{{ indexReady ? `${indexCount} 个 face` : '未构建' }}（{{ indexTimeText() }}）
+        </template>
       </span>
       <v-btn
         variant="text"
         size="small"
         color="primary"
         class="ml-2"
-        :disabled="!enabled"
-        :loading="rebuildingIndex"
+        :disabled="!enabled || indexRebuilding"
+        :loading="rebuildingIndex || indexRebuilding"
         title="清空索引后逐文件重新解析字体库（全部重建，非增量；耗时取决于字体数量）"
         @click="rebuildConfirm = true"
       >
