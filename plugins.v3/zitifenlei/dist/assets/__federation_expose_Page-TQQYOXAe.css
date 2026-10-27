@@ -1,101 +1,177 @@
 
-.zt-topbar[data-v-c6af760d] {
+.zt-topbar[data-v-af94981d] {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 16px;
 }
-.zt-list-card[data-v-c6af760d] {
+.zt-list-card[data-v-af94981d] {
   height: 620px;
   overflow: hidden;
   display: flex;
   flex-direction: column;
 }
-.zt-list-body[data-v-c6af760d] {
+.zt-list-body[data-v-af94981d] {
   min-height: 60px;
   flex: 1 1 auto;
   overflow-y: auto;
 }
-/* 结果区筛选栏：状态下拉 + 搜索框 */
-.zt-filter-row[data-v-c6af760d] {
+/* ===== 结果抽屉（teleport 到 body，避免与 MP 宿主的 v-app layout 冲突） ===== */
+.zt-drawer-scrim[data-v-af94981d] {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 2100;
+}
+.zt-results-drawer[data-v-af94981d] {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(640px, 100vw);
+  display: flex;
+  flex-direction: column;
+  background: rgb(var(--v-theme-surface, 30, 30, 30));
+  color: rgb(var(--v-theme-on-surface, 255, 255, 255));
+  box-shadow: -8px 0 28px rgba(0, 0, 0, 0.28);
+  z-index: 2101;
+  overflow: hidden;
+}
+.zt-drawer-head[data-v-af94981d] {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 12px;
+}
+.zt-drawer-title[data-v-af94981d] {
+  font-size: 15px;
+  font-weight: 600;
+  margin-inline-start: 2px;
+}
+/* 抽屉内筛选栏：状态下拉 + 搜索框 */
+.zt-drawer-filter[data-v-af94981d] {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 8px 12px;
 }
-.zt-filter-status[data-v-c6af760d] {
+.zt-filter-status[data-v-af94981d] {
   width: 130px;
   flex-shrink: 0;
 }
-.zt-filter-search[data-v-c6af760d] {
+.zt-filter-search[data-v-af94981d] {
   flex: 1 1 auto;
   min-width: 120px;
 }
-.zt-record-body[data-v-c6af760d] {
-  min-height: 60px;
+.zt-drawer-body[data-v-af94981d] {
   flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
+  padding: 8px 12px 28px;
+  overscroll-behavior: contain;
 }
-.zt-loading-more[data-v-c6af760d] {
-  font-size: 12px;
-  opacity: 0.7;
+
+/* ===== 分组抽屉：组头按状态着色，点击折叠/展开 ===== */
+.zt-group[data-v-af94981d] {
+  --zt-group-color: 158, 158, 158;
+  margin-bottom: 8px;
+  border: 1px solid rgba(var(--zt-group-color), 0.35);
+  border-left: 3px solid rgba(var(--zt-group-color), 0.9);
+  border-radius: 8px;
+  background: rgba(var(--zt-group-color), 0.06);
+  overflow: hidden;
 }
-.zt-card-title[data-v-c6af760d] {
-  font-size: 15px;
-  font-weight: 600;
+.zt-group-success[data-v-af94981d] { --zt-group-color: 76, 175, 80;
 }
-/* 结果卡片标题行：Vuetify 的 v-card-title 默认 display:block，放 v-spacer + 按钮会掉到第二行。
-   PC 上改成单行 flex，按钮与「结果」同排靠右；手机（<md）时按钮换到下一排、占满整行。 */
-.zt-card-title-row[data-v-c6af760d] {
+.zt-group-warning[data-v-af94981d] { --zt-group-color: 255, 152, 0;
+}
+.zt-group-error[data-v-af94981d]   { --zt-group-color: 244, 67, 54;
+}
+.zt-group-grey[data-v-af94981d]    { --zt-group-color: 158, 158, 158;
+}
+.zt-group-head[data-v-af94981d] {
   display: flex;
   align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  cursor: pointer;
+  user-select: none;
 }
-.zt-card-title-row .zt-title-text[data-v-c6af760d] {
+.zt-group-head[data-v-af94981d]:hover {
+  background: rgba(var(--zt-group-color), 0.1);
+}
+.zt-group-name[data-v-af94981d] {
+  flex: 1 1 auto;
   min-width: 0;
+  font-size: 13.5px;
+  font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-@media (max-width: 959.95px) {
-.zt-card-title-row[data-v-c6af760d] {
-    flex-wrap: wrap;
-    row-gap: 6px;
+.zt-group-count[data-v-af94981d] {
+  flex: 0 0 auto;
+  font-size: 12px;
+  opacity: 0.65;
 }
-.zt-card-title-row .zt-title-action[data-v-c6af760d] {
-    width: 100%;
-    margin-inline-start: 0 !important;
+.zt-group-stats[data-v-af94981d],
+.zt-group-actions[data-v-af94981d] {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+.zt-group-body[data-v-af94981d] {
+  border-top: 1px dashed rgba(var(--zt-group-color), 0.3);
+  padding: 2px 4px;
+}
+@media (max-width: 599.95px) {
+.zt-results-drawer[data-v-af94981d] { width: 100vw;
+}
+.zt-group-stats[data-v-af94981d] { display: none;
+}
+.zt-drawer-head[data-v-af94981d] { padding: 8px;
 }
 }
-.zt-empty[data-v-c6af760d] {
+.zt-loading-more[data-v-af94981d] {
+  font-size: 12px;
+  opacity: 0.7;
+}
+.zt-card-title[data-v-af94981d] {
+  font-size: 15px;
+  font-weight: 600;
+}
+.zt-empty[data-v-af94981d] {
   font-size: 13px;
   opacity: 0.6;
   text-align: center;
   line-height: 1.8;
 }
-.zt-empty-sub[data-v-c6af760d] {
+.zt-empty-sub[data-v-af94981d] {
   font-size: 12px;
   opacity: 0.55;
 }
-.zt-font-name[data-v-c6af760d] {
+.zt-font-name[data-v-af94981d] {
   font-size: 14px;
   font-weight: 500;
 }
 /* 缺字体/失败状态标签可点击（跳缺失字体页）：手型 + 虚线提示 */
-.zt-status-link[data-v-c6af760d] {
+.zt-status-link[data-v-af94981d] {
   cursor: pointer;
   text-decoration: underline dashed;
   text-underline-offset: 2px;
 }
-.zt-status-link[data-v-c6af760d]:hover {
+.zt-status-link[data-v-af94981d]:hover {
   filter: brightness(1.15);
 }
-.zt-font-meta[data-v-c6af760d] {
+.zt-font-meta[data-v-af94981d] {
   font-size: 12px;
   opacity: 0.7;
   word-break: break-all;
 }
-.zt-status-hint[data-v-c6af760d] {
+.zt-status-hint[data-v-af94981d] {
   opacity: 0.75;
   white-space: nowrap;
 }

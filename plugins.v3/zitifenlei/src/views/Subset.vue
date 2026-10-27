@@ -35,15 +35,23 @@ const uploading = ref(false)
 // 处理中：按钮转圈禁用，防重复点击
 const scanning = ref(false)
 
-// ===== 右栏：结果 =====
+// ===== 结果抽屉（按剧名/目录分组，前端一次性取全量后渐进渲染）=====
+const resultsOpen = ref(false)
 const records = ref([])
 const loadingRecords = ref(false)
 const downloadingId = ref(null)
 const recordTotal = ref(0)
 const retriableCount = ref(0)
-const recordPage = ref(1)
-const recordLimit = 20
-const recordReachedEnd = ref(false)
+// 渐进渲染：初始渲染 60 条，下拉再加 60（与字体库同思路，数据一次取全，DOM 分批）
+const RENDER_STEP = 60
+const renderBudget = ref(RENDER_STEP)
+const expandedGroups = ref(new Set())
+const groupBusy = ref('')
+const groupConfirm = ref(false)
+const groupTarget = ref(null)
+// 抽屉在 body 下，主题变量可能取不到：打开时从宿主 app 读实际配色
+const drawerBg = ref('')
+const drawerFg = ref('')
 // 筛选：状态下拉 + 文件名搜索
 const filterStatus = ref('')
 const recordSearch = ref('')
@@ -112,31 +120,24 @@ async function loadPending() {
     loadingPending.value = false
   }
 }
+// 结果记录：一次拉取当前筛选下的全量（几百条级别），前端分组后渐进渲染。
+// 这样组头计数、组内「全部下载 / 删除整组」都基于完整数据，不会被分页截断。
 async function loadRecords(reset = false, force = false) {
-  // 30 秒轮询（refreshCurrentPage）会占住这把锁：用户操作后的强制刷新不能被它吞掉，
-  // 否则子集化/删除完成时列表停在旧数据，看起来像没生效（必须等下一轮轮询才补上）
   if (loadingRecords.value && !force) return
-  if (reset) {
-    recordPage.value = 1
-    recordReachedEnd.value = false
-    records.value = []
-  } else if (recordReachedEnd.value) {
-    return
-  }
   loadingRecords.value = true
   try {
     const data = await apiModule.get(props.api, '/subset/records', {
       status: filterStatus.value,
       search: recordSearch.value,
-      page: recordPage.value,
-      limit: recordLimit,
+      page: 1,
+      limit: 0,
     })
-    const list = (data && data.list) || []
+    records.value = (data && data.list) || []
     recordTotal.value = (data && data.total) || 0
     if (typeof data?.retriable === 'number') retriableCount.value = data.retriable
-    records.value = reset ? list : [...records.value, ...list]
-    if (records.value.length >= recordTotal.value || !list.length) {
-      recordReachedEnd.value = true
+    if (reset) {
+      renderBudget.value = RENDER_STEP
+      expandedGroups.value = new Set()
     }
   } catch (e) {
     emit('notify', e.message || '读取子集化记录失败')
@@ -145,50 +146,123 @@ async function loadRecords(reset = false, force = false) {
   }
 }
 
-// Q7 修复：刷新列表但保持当前页码（替换当前页对应区间的数据）。
-// 与 loadRecords(reset=true) 的区别：不重置分页回第 1 页；
-// 与 loadRecords(false) 的区别：loadRecords(false) 是"追加下一页"语义，
-// 直接用于轮询会重复追加同一页数据。
-async function refreshCurrentPage() {
-  if (loadingRecords.value) return
-  loadingRecords.value = true
+// 抽屉关闭时只刷角标（总数 + 可重试数），不拉全量，避免后台每 30 秒传整表
+async function refreshBadge() {
   try {
-    const data = await apiModule.get(props.api, '/subset/records', {
-      status: filterStatus.value,
-      search: recordSearch.value,
-      page: recordPage.value,
-      limit: recordLimit,
-    })
-    const list = (data && data.list) || []
+    const data = await apiModule.get(props.api, '/subset/records', { page: 1, limit: 1 })
     recordTotal.value = (data && data.total) || 0
     if (typeof data?.retriable === 'number') retriableCount.value = data.retriable
-    // 用最新当前页数据替换 records 中 (recordPage-1)*limit 起的区间，
-    // 保留已加载的前面各页，不追加不重置
-    const idx = (recordPage.value - 1) * recordLimit
-    records.value = [...records.value.slice(0, idx), ...list]
-    if (records.value.length >= recordTotal.value || !list.length) {
-      recordReachedEnd.value = true
-    }
   } catch (e) {
-    emit('notify', e.message || '刷新子集化记录失败')
-  } finally {
-    loadingRecords.value = false
+    /* 角标刷新失败忽略 */
   }
 }
 
-// 筛选变化：防抖后回到第 1 页重拉
+async function refreshCurrentPage() {
+  if (resultsOpen.value) await loadRecords(false, true)
+  else await refreshBadge()
+}
+
+// 筛选变化：防抖后重拉全量并重置展开/渲染预算
 let filterTimer = null
 watch([filterStatus, recordSearch], () => {
   if (filterTimer) clearTimeout(filterTimer)
   filterTimer = setTimeout(() => loadRecords(true), 250)
 })
 
-// 滚动到底加载下一页
-function onRecordsScroll(e) {
+// ── 分组：inbound 取媒体库剧名目录（Season 1 上跳一级），watch 取所在子目录，manual 归「手动上传」
+const SEASON_RE = /^(season\s*\d+|s\d{1,2}|第.{1,4}季)$/i
+function seasonLike(name) {
+  return SEASON_RE.test(String(name || '').trim())
+}
+function recordGroup(r) {
+  const src = String(r.source || '')
+  if (src === 'manual') return { key: 'manual', label: '手动上传' }
+  const p = String(r.file_path || '').replace(/\\/g, '/')
+  const dirs = p ? p.split('/').filter(Boolean).slice(0, -1) : []
+  if (!dirs.length) {
+    return { key: `${src || 'unknown'}:`, label: src === 'watch' ? '监控目录' : '未知来源' }
+  }
+  let idx = dirs.length - 1
+  if (seasonLike(dirs[idx]) && idx > 0) idx -= 1
+  const label = dirs[idx] || '未知目录'
+  return {
+    key: `${src || 'unknown'}:${dirs.slice(0, idx + 1).join('/')}`,
+    label: src === 'watch' ? `监控：${label}` : label,
+  }
+}
+function groupStats(list) {
+  const s = { success: 0, missing: 0, retryable: 0, error: 0, skipped: 0 }
+  for (const r of list) {
+    if (r.status === 'success') s.success += 1
+    else if (r.status === 'error') s.error += 1
+    else if (r.status === 'skipped') s.skipped += 1
+    else if (r.status === 'missing') {
+      s.missing += 1
+      if (r.retryable) s.retryable += 1
+    }
+  }
+  return s
+}
+const groupedRecords = computed(() => {
+  const map = new Map()
+  for (const r of records.value) {
+    const g = recordGroup(r)
+    let item = map.get(g.key)
+    if (!item) {
+      item = { key: g.key, label: g.label, records: [], maxId: 0 }
+      map.set(g.key, item)
+    }
+    item.records.push(r)
+    if (Number(r.id) > item.maxId) item.maxId = Number(r.id)
+  }
+  const groups = [...map.values()].sort((a, b) => b.maxId - a.maxId)
+  for (const g of groups) {
+    g.stats = groupStats(g.records)
+    // 组头颜色：有失败优先红，其次缺字橙，全成功绿，其余灰
+    g.color = g.stats.error ? 'error' : (g.stats.missing ? 'warning' : (g.stats.success ? 'success' : 'grey'))
+    g.downloadable = g.records.filter(r => r.status === 'success' && r.out_file)
+  }
+  return groups
+})
+// 渐进渲染：组头全显示；展开的组内记录消耗渲染预算，下拉到底再加一批
+const visibleGroups = computed(() => {
+  let remain = renderBudget.value
+  return groupedRecords.value.map(g => {
+    const expanded = expandedGroups.value.has(g.key)
+    let visibleRecords = []
+    let truncated = false
+    if (expanded) {
+      visibleRecords = g.records.slice(0, Math.max(0, remain))
+      remain -= visibleRecords.length
+      truncated = visibleRecords.length < g.records.length
+    }
+    return { ...g, expanded, visibleRecords, truncated }
+  })
+})
+const hasMoreRecords = computed(() => visibleGroups.value.some(g => g.truncated))
+
+function openResults() {
+  resultsOpen.value = true
+  // 抽屉 teleport 到 body，脱离了 .v-application 的 CSS 变量作用域，
+  // 取宿主实际配色补齐背景/文字色，避免主题变量失效导致透明
+  const app = document.querySelector('.v-application')
+  if (app) {
+    const cs = getComputedStyle(app)
+    drawerBg.value = cs.backgroundColor
+    drawerFg.value = cs.color
+  }
+  loadRecords(true, true)
+}
+function toggleGroup(g) {
+  const next = new Set(expandedGroups.value)
+  if (next.has(g.key)) next.delete(g.key)
+  else next.add(g.key)
+  expandedGroups.value = next
+}
+function onDrawerScroll(e) {
   const el = e.target
-  if (el && el.scrollTop + el.clientHeight >= el.scrollHeight - 40) {
-    recordPage.value += 1
-    loadRecords()
+  if (hasMoreRecords.value && el && el.scrollTop + el.clientHeight >= el.scrollHeight - 60) {
+    renderBudget.value += RENDER_STEP
   }
 }
 
@@ -366,63 +440,121 @@ async function _doDownload(r) {
   return 'ok'
 }
 
-// 可批量下载的记录：已加载的成功且带输出文件
+// 可批量下载的记录：当前筛选下全部成功且带输出文件（已一次性取全）
 const downloadableRecords = computed(() =>
   records.value.filter(r => r.status === 'success' && r.out_file)
 )
 
-// 全部下载：按当前筛选（状态下拉+名称搜索）拉取全部成功成品；
-// Q19 修复：限并发 3 的小并发池（文档建议 2~3 并发更快），替代串行逐个 await；
-// Q10 修复：按每个记录的返回状态准确统计成功/失败，不再把"被守卫跳过"计入成功。
-// 未选筛选则下载全部分页的成功成品（limit=0 后端返回当前筛选下全部记录，不限页）
+// 小并发池：最多 3 个并发下载，按每条记录的返回状态准确统计
+async function downloadPool(targets) {
+  const stats = { ok: 0, fail: 0, missing: 0 }
+  let head = 0
+  const worker = async () => {
+    while (head < targets.length) {
+      const r = targets[head++]
+      try {
+        const st = await _doDownload(r)
+        if (st === 'ok') stats.ok += 1
+        else if (st === 'missing') stats.missing += 1
+        else stats.fail += 1
+      } catch (e) {
+        stats.fail += 1
+      }
+    }
+  }
+  await Promise.all([worker(), worker(), worker()])
+  return stats
+}
+function notifyDownloadStats(stats, label = '') {
+  const failed = stats.fail + stats.missing
+  const prefix = label ? `${label}：` : ''
+  if (failed) {
+    emit(
+      'notify',
+      `${prefix}已下载 ${stats.ok} 个，${stats.fail} 个失败${stats.missing ? `，${stats.missing} 个文件缺失` : ''}`,
+      stats.ok ? 'success' : 'warning'
+    )
+  } else {
+    emit('notify', `${prefix}已下载 ${stats.ok} 个结果文件`, 'success')
+  }
+}
+
 const downloadAllBusy = ref(false)
 async function downloadAll() {
   if (downloadAllBusy.value) return
-  // 有单个下载正在进行时直接拒绝，避免与并发池混跑
   if (downloadingId.value) {
     emit('notify', '有下载正在进行，请稍候', 'warning')
     return
   }
+  const targets = downloadableRecords.value
+  if (!targets.length) {
+    emit('notify', '当前筛选下没有可下载的成功成品', 'warning')
+    return
+  }
   downloadAllBusy.value = true
   try {
-    const data = await apiModule.get(props.api, '/subset/records', {
-      status: filterStatus.value,
-      search: recordSearch.value,
-      page: 1,
-      limit: 0, // 0 = 当前筛选下全部记录（含未加载的后续页）
-    })
-    const targets = ((data && data.list) || []).filter(r => r.status === 'success' && r.out_file)
-    if (!targets.length) {
-      emit('notify', '当前筛选下没有可下载的成功成品', 'warning')
-      return
-    }
-    // 小并发池：最多 3 个并发下载
-    const stats = { ok: 0, fail: 0, missing: 0 }
-    let head = 0
-    const worker = async () => {
-      while (head < targets.length) {
-        const r = targets[head++]
-        try {
-          const st = await _doDownload(r)
-          if (st === 'ok') stats.ok += 1
-          else if (st === 'missing') stats.missing += 1
-          else stats.fail += 1
-        } catch (e) {
-          stats.fail += 1
-        }
-      }
-    }
-    await Promise.all([worker(), worker(), worker()])
-    const failed = stats.fail + stats.missing
-    if (failed) {
-      emit('notify', `已下载 ${stats.ok} 个，${stats.fail} 个失败${stats.missing ? `，${stats.missing} 个文件缺失` : ''}`, stats.ok ? 'success' : 'warning')
-    } else {
-      emit('notify', `已下载 ${stats.ok} 个结果文件`, 'success')
-    }
-  } catch (e) {
-    emit('notify', e.message || '获取结果失败')
+    notifyDownloadStats(await downloadPool(targets))
   } finally {
     downloadAllBusy.value = false
+  }
+}
+
+// 本组全部下载：只下这个抽屉里的成功成品（不依赖是否已展开到该组）
+async function downloadGroup(g) {
+  if (groupBusy.value || downloadAllBusy.value) return
+  if (downloadingId.value) {
+    emit('notify', '有下载正在进行，请稍候', 'warning')
+    return
+  }
+  const targets = g.downloadable || []
+  if (!targets.length) {
+    emit('notify', '本组没有可下载的成功成品', 'warning')
+    return
+  }
+  groupBusy.value = g.key
+  try {
+    notifyDownloadStats(await downloadPool(targets), `本组（${g.label}）`)
+  } finally {
+    groupBusy.value = ''
+  }
+}
+
+// 删除整组：有成品时二次确认（监控/上传会连成品一起删，入库只删记录）
+function askDeleteGroup(g) {
+  groupTarget.value = g
+  groupConfirm.value = true
+}
+const groupDeleting = ref(false)
+async function confirmDeleteGroup() {
+  const g = groupTarget.value
+  if (!g || groupDeleting.value) return
+  groupDeleting.value = true
+  const ids = g.records.map(r => Number(r.id)).filter(Boolean)
+  const errors = []
+  let head = 0
+  const worker = async () => {
+    while (head < ids.length) {
+      const id = ids[head++]
+      try {
+        await apiModule.post(props.api, `/subset/delete/${id}`)
+      } catch (e) {
+        errors.push(id)
+      }
+    }
+  }
+  try {
+    await Promise.all([worker(), worker(), worker()])
+    groupConfirm.value = false
+    groupTarget.value = null
+    const ok = ids.length - errors.length
+    emit(
+      'notify',
+      errors.length ? `已删除 ${ok} 条，${errors.length} 条失败` : `已删除本组 ${ok} 条记录`,
+      errors.length ? 'warning' : 'success'
+    )
+    await loadRecords(true, true)
+  } finally {
+    groupDeleting.value = false
   }
 }
 
@@ -430,7 +562,6 @@ async function deleteRecord(id) {
   try {
     await apiModule.post(props.api, `/subset/delete/${id}`)
     emit('notify', '已删除记录', 'success')
-    // 删除后软刷新回第 1 页（计数、分页、retriable 一并同步）
     await loadRecords(true, true)
   } catch (e) {
     emit('notify', e.message || '删除失败')
@@ -457,7 +588,8 @@ async function clearRecords() {
 onMounted(() => {
   loadStatus()
   loadPending()
-  loadRecords()
+  // 抽屉默认关闭：只刷角标（总数/可重试数），避免进页面就拉全量记录
+  refreshBadge()
   startPolling()
 })
 // keep-alive 缓存场景：切回时恢复轮询并重拉数据（Q1 修复；Q14 后切 Tab
@@ -469,8 +601,10 @@ onActivated(() => {
   startPolling()
 })
 // 切走（进入 keep-alive 缓存）时停止轮询，避免后台不可见视图持续打接口（Q1 修复）
+// 抽屉是 teleport 到 body 的浮层，缓存后不会随视图隐藏，必须手动关掉
 onDeactivated(() => {
   stopPolling()
+  resultsOpen.value = false
 })
 onUnmounted(() => stopPolling())
 
@@ -527,15 +661,18 @@ function stopPolling() {
         全量子集化
       </v-btn>
       <v-btn
-        color="warning"
         variant="tonal"
-        :disabled="!enabled || retrying || !hasRetriable()"
-        :loading="retrying"
-        title="对结果区中失败/缺字体的字幕重新子集化（补好缺失字体后使用）"
-        @click="retryFailed"
+        :disabled="!enabled"
+        @click="openResults"
       >
-        <v-icon start size="18">mdi-refresh</v-icon>
-        重试失败
+        <v-icon start size="18">mdi-history</v-icon>
+        结果
+        <v-chip
+          class="ml-2"
+          size="x-small"
+          :color="retriableCount ? 'warning' : 'primary'"
+          variant="flat"
+        >{{ recordTotal }}</v-chip>
       </v-btn>
       <v-btn
         variant="tonal"
@@ -545,15 +682,6 @@ function stopPolling() {
       >
         <v-icon start size="18">mdi-delete-sweep-outline</v-icon>
         清空待处理
-      </v-btn>
-      <v-btn
-        variant="tonal"
-        :disabled="!enabled || !records.length"
-        title="清空全部子集化记录"
-        @click="clearRecords"
-      >
-        <v-icon start size="18">mdi-trash-can-outline</v-icon>
-        清空记录
       </v-btn>
       <v-spacer></v-spacer>
       <span class="zt-status-hint text-body-2">
@@ -593,8 +721,8 @@ function stopPolling() {
     </v-alert>
 
     <v-row no-gutters class="zt-subset-row">
-      <!-- 左栏：待处理 -->
-      <v-col cols="12" md="5">
+      <!-- 左栏：待处理（结果已移入右侧抽屉） -->
+      <v-col cols="12">
         <v-card class="zt-card-bg zt-list-card">
           <v-card-title class="zt-card-title">
             <v-icon start size="18">mdi-tray-full</v-icon>
@@ -626,124 +754,191 @@ function stopPolling() {
           </div>
         </v-card>
       </v-col>
+    </v-row>
 
-      <!-- 右栏：结果 -->
-      <v-col cols="12" md="7">
-        <v-card class="zt-card-bg zt-list-card">
-          <v-card-title class="zt-card-title zt-card-title-row">
-            <v-icon start size="18">mdi-history</v-icon>
-            <span class="zt-title-text">结果（{{ records.length }}/{{ recordTotal }}）</span>
-            <v-spacer></v-spacer>
-            <v-btn
-              class="zt-title-action"
-              size="small"
-              variant="tonal"
-              color="success"
-              :disabled="!enabled || downloadAllBusy || !downloadableRecords.length"
-              :loading="downloadAllBusy"
-              title="下载当前列表全部成功成品字幕"
-              @click="downloadAll"
-            >
-              <v-icon start size="15">mdi-download-multiple</v-icon>
-              全部下载
-            </v-btn>
-            <v-btn
-              class="zt-title-action"
-              size="small"
-              variant="tonal"
-              color="error"
-              :disabled="!enabled || clearingRecords || downloadAllBusy || !!downloadingId || !records.length"
-              :loading="clearingRecords"
-              title="清空全部子集化记录（监控/上传来历的成品一并删除；MP 入库只删记录，不动媒体库原字幕）"
-              @click="clearConfirm = true"
-            >
-              <v-icon start size="15">mdi-delete-sweep</v-icon>
-              全部清空
-            </v-btn>
-          </v-card-title>
-          <v-divider></v-divider>
-          <!-- 筛选栏：状态下拉 + 文件名搜索 -->
-          <div class="zt-filter-row">
-            <v-select
-              v-model="filterStatus"
-              :items="statusFilterOptions"
-              item-title="title"
-              item-value="value"
-              density="compact"
-              variant="outlined"
-              hide-details
-              class="zt-filter-status"
-            ></v-select>
-            <v-text-field
-              v-model="recordSearch"
-              density="compact"
-              variant="outlined"
-              hide-details
-              :clearable="!!recordSearch"
-              placeholder="搜索字幕名…"
-              prepend-inner-icon="mdi-magnify"
-              class="zt-filter-search"
-            ></v-text-field>
-          </div>
-          <v-divider></v-divider>
-          <v-progress-linear v-if="loadingRecords" indeterminate color="primary"></v-progress-linear>
-          <div v-if="!loadingRecords && !records.length" class="zt-empty pa-6">
+    <!-- 结果抽屉：右侧浮层，按剧名/目录分组的可折叠抽屉 -->
+    <teleport to="body">
+      <div v-if="resultsOpen" class="zt-drawer-scrim" @click="resultsOpen = false"></div>
+      <aside
+        v-if="resultsOpen"
+        class="zt-results-drawer"
+        :style="{ background: drawerBg || undefined, color: drawerFg || undefined }"
+      >
+        <div class="zt-drawer-head">
+          <v-icon size="18">mdi-history</v-icon>
+          <span class="zt-drawer-title">结果（{{ recordTotal }}）</span>
+          <v-spacer></v-spacer>
+          <v-btn
+            size="small" variant="tonal" color="success"
+            :disabled="!enabled || downloadAllBusy || !downloadableRecords.length"
+            :loading="downloadAllBusy"
+            title="下载当前筛选下全部成功成品字幕"
+            @click="downloadAll"
+          >
+            <v-icon start size="15">mdi-download-multiple</v-icon>
+            <span class="d-none d-sm-inline">全部下载</span>
+          </v-btn>
+          <v-btn
+            size="small" variant="tonal" color="warning"
+            :disabled="!enabled || retrying || !hasRetriable()"
+            :loading="retrying"
+            title="对失败/缺字体的字幕重新子集化（补好缺失字体后使用）"
+            @click="retryFailed"
+          >
+            <v-icon start size="15">mdi-refresh</v-icon>
+            <span class="d-none d-sm-inline">重试失败</span>
+          </v-btn>
+          <v-btn
+            size="small" variant="tonal" color="error"
+            :disabled="!enabled || clearingRecords || downloadAllBusy || !!downloadingId || !records.length"
+            :loading="clearingRecords"
+            title="清空全部子集化记录（监控/上传来历的成品一并删除；MP 入库只删记录，不动媒体库原字幕）"
+            @click="clearConfirm = true"
+          >
+            <v-icon start size="15">mdi-delete-sweep</v-icon>
+            <span class="d-none d-sm-inline">全部清空</span>
+          </v-btn>
+          <v-btn icon size="small" title="关闭" @click="resultsOpen = false">
+            <v-icon size="20">mdi-close</v-icon>
+          </v-btn>
+        </div>
+        <v-divider></v-divider>
+        <div class="zt-drawer-filter">
+          <v-select
+            v-model="filterStatus"
+            :items="statusFilterOptions"
+            item-title="title"
+            item-value="value"
+            density="compact"
+            variant="outlined"
+            hide-details
+            class="zt-filter-status"
+          ></v-select>
+          <v-text-field
+            v-model="recordSearch"
+            density="compact"
+            variant="outlined"
+            hide-details
+            :clearable="!!recordSearch"
+            placeholder="搜索字幕名…"
+            prepend-inner-icon="mdi-magnify"
+            class="zt-filter-search"
+          ></v-text-field>
+        </div>
+        <v-divider></v-divider>
+        <v-progress-linear v-if="loadingRecords" indeterminate color="primary"></v-progress-linear>
+        <div class="zt-drawer-body" @scroll="onDrawerScroll">
+          <div v-if="!loadingRecords && !groupedRecords.length" class="zt-empty pa-6">
             暂无{{ filterStatus || recordSearch ? '匹配' : '' }}处理结果<br />
             <span class="zt-empty-sub">处理完成后结果与输出文件在这里展示，可下载</span>
           </div>
-          <div v-else class="zt-list-body zt-record-body" @scroll="onRecordsScroll">
-            <v-list density="compact" class="pa-0">
-              <v-list-item v-for="r in records" :key="r.id" lines="two">
-                <template #prepend>
-                  <v-chip
-                    :color="statusColor(r)"
-                    size="x-small"
-                    variant="tonal"
-                    :title="r.status === 'missing' && !r.retryable ? '缺的字体尚未补齐：点击去「缺失字体」页上传' : (r.status === 'error' ? '处理失败：点击去「缺失字体」页处理' : (r.status === 'missing' && r.retryable ? '缺的字体已入库：点顶部「重试失败」重新子集化' : ''))"
-                    :class="{ 'zt-status-link': (r.status === 'missing' && !r.retryable) || r.status === 'error' }"
-                    :disabled="!enabled"
-                    @click="onStatusTagClick(r)"
-                  >{{ statusText(r) }}</v-chip>
-                </template>
-                <v-list-item-title class="zt-font-name">{{ r.file_name }}</v-list-item-title>
-                <v-list-item-subtitle class="zt-font-meta">
-                  <template v-if="r.reason">{{ r.reason }}</template>
-                  <template v-else-if="r.out_file">{{ r.out_file }}</template>
-                  <template v-else>—</template>
-                  <span v-if="r.created_at" class="ml-2">{{ r.created_at }}</span>
-                </v-list-item-subtitle>
-                <!-- 右侧操作区：成功→下载；缺字体/失败→无（左侧标签即可跳转）；跳过→无 -->
-                <template #append>
-                  <v-btn
-                    v-if="r.status === 'success' && r.out_file"
-                    size="x-small"
-                    variant="tonal"
-                    color="success"
-                    class="mr-1"
-                    title="下载结果文件"
-                    :disabled="!enabled || downloadingId === r.id"
-                    :loading="downloadingId === r.id"
-                    @click="downloadRecord(r)"
-                  >
-                    <v-icon start size="14">mdi-download</v-icon>
-                    下载
-                  </v-btn>
-                  <v-btn size="small" variant="text" icon :disabled="!enabled" title="删除该记录" @click="deleteRecord(r.id)">
-                    <v-icon size="16">mdi-close</v-icon>
-                  </v-btn>
-                </template>
-              </v-list-item>
-            </v-list>
-            <div v-if="!recordReachedEnd && records.length" class="zt-loading-more pa-2 text-center">
-              <v-progress-circular indeterminate size="18" color="primary"></v-progress-circular>
+          <div
+            v-for="g in visibleGroups"
+            :key="g.key"
+            class="zt-group"
+            :class="`zt-group-${g.color}`"
+          >
+            <div class="zt-group-head" @click="toggleGroup(g)">
+              <v-icon size="18">{{ g.expanded ? 'mdi-chevron-down' : 'mdi-chevron-right' }}</v-icon>
+              <v-icon size="16" :color="g.color === 'grey' ? undefined : g.color">
+                {{ g.expanded ? 'mdi-folder-open' : 'mdi-folder' }}
+              </v-icon>
+              <span class="zt-group-name">{{ g.label }}</span>
+              <span class="zt-group-count">{{ g.records.length }}</span>
+              <span class="zt-group-stats">
+                <v-chip v-if="g.stats.success" color="success" size="x-small" variant="tonal">✓ {{ g.stats.success }}</v-chip>
+                <v-chip v-if="g.stats.missing" color="warning" size="x-small" variant="tonal">⚠ {{ g.stats.missing }}</v-chip>
+                <v-chip v-if="g.stats.error" color="error" size="x-small" variant="tonal">✕ {{ g.stats.error }}</v-chip>
+                <v-chip v-if="g.stats.skipped" color="info" size="x-small" variant="tonal">跳过 {{ g.stats.skipped }}</v-chip>
+              </span>
+              <span class="zt-group-actions">
+                <v-btn
+                  size="x-small" variant="tonal" color="success"
+                  :disabled="!enabled || groupBusy === g.key || !g.downloadable.length"
+                  :loading="groupBusy === g.key"
+                  title="只下载本组成功成品"
+                  @click.stop="downloadGroup(g)"
+                >
+                  <v-icon start size="14">mdi-download-multiple</v-icon>
+                  <span class="d-none d-sm-inline">全部下载</span>
+                </v-btn>
+                <v-btn
+                  size="small" variant="text" icon
+                  :disabled="!enabled || groupDeleting"
+                  title="删除本组全部记录（监控/上传的成品一并删除）"
+                  @click.stop="askDeleteGroup(g)"
+                >
+                  <v-icon size="16" color="error">mdi-close</v-icon>
+                </v-btn>
+              </span>
             </div>
-            <div v-else-if="recordReachedEnd && records.length" class="zt-loading-more pa-2 text-center text-body-2 zt-font-meta">
-              已加载全部
+            <div v-if="g.expanded" class="zt-group-body">
+              <v-list density="compact" class="pa-0">
+                <v-list-item v-for="r in g.visibleRecords" :key="r.id" lines="two">
+                  <template #prepend>
+                    <v-chip
+                      :color="statusColor(r)"
+                      size="x-small"
+                      variant="tonal"
+                      :title="r.status === 'missing' && !r.retryable ? '缺的字体尚未补齐：点击去「缺失字体」页上传' : (r.status === 'error' ? '处理失败：点击去「缺失字体」页处理' : (r.status === 'missing' && r.retryable ? '缺的字体已入库：点抽屉顶部「重试失败」重新子集化' : ''))"
+                      :class="{ 'zt-status-link': (r.status === 'missing' && !r.retryable) || r.status === 'error' }"
+                      :disabled="!enabled"
+                      @click="onStatusTagClick(r)"
+                    >{{ statusText(r) }}</v-chip>
+                  </template>
+                  <v-list-item-title class="zt-font-name">{{ r.file_name }}</v-list-item-title>
+                  <v-list-item-subtitle class="zt-font-meta">
+                    <template v-if="r.reason">{{ r.reason }}</template>
+                    <template v-else-if="r.out_file">{{ r.out_file }}</template>
+                    <template v-else>—</template>
+                    <span v-if="r.created_at" class="ml-2">{{ r.created_at }}</span>
+                  </v-list-item-subtitle>
+                  <template #append>
+                    <v-btn
+                      v-if="r.status === 'success' && r.out_file"
+                      size="x-small" variant="tonal" color="success" class="mr-1"
+                      title="下载结果文件"
+                      :disabled="!enabled || downloadingId === r.id"
+                      :loading="downloadingId === r.id"
+                      @click="downloadRecord(r)"
+                    >
+                      <v-icon start size="14">mdi-download</v-icon>
+                      下载
+                    </v-btn>
+                    <v-btn size="small" variant="text" icon :disabled="!enabled" title="删除该记录" @click="deleteRecord(r.id)">
+                      <v-icon size="16">mdi-close</v-icon>
+                    </v-btn>
+                  </template>
+                </v-list-item>
+              </v-list>
+              <div v-if="g.truncated" class="zt-loading-more pa-2 text-center">
+                还有 {{ g.records.length - g.visibleRecords.length }} 条，下拉加载…
+              </div>
             </div>
           </div>
-        </v-card>
-      </v-col>
-    </v-row>
+          <div v-if="hasMoreRecords" class="zt-loading-more pa-2 text-center">
+            <v-progress-circular indeterminate size="18" color="primary"></v-progress-circular>
+          </div>
+        </div>
+      </aside>
+    </teleport>
+
+    <!-- 删除整组确认：有成品时明确会连成品一起删 -->
+    <v-dialog v-model="groupConfirm" max-width="440">
+      <v-card>
+        <v-card-title class="text-h6">删除「{{ groupTarget?.label || '' }}」整组？</v-card-title>
+        <v-card-text>
+          将删除本组 {{ groupTarget?.records?.length || 0 }} 条子集化记录<template v-if="groupTarget?.records?.some(r => r.out_file)">，
+          并同步删除监控/上传来历的成品文件（含输出目录中对应文件）</template>。
+          MP 入库记录只删记录，不动媒体库原字幕；字体库与待处理列表不受影响。
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer></v-spacer>
+          <v-btn variant="text" @click="groupConfirm = false">取消</v-btn>
+          <v-btn color="error" variant="tonal" :loading="groupDeleting" @click="confirmDeleteGroup">删除整组</v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
 
     <!-- 全部清空确认：记录与可删产物一起清理，入库记录只删记录 -->
     <v-dialog v-model="clearConfirm" max-width="440">
@@ -799,8 +994,41 @@ function stopPolling() {
   flex: 1 1 auto;
   overflow-y: auto;
 }
-/* 结果区筛选栏：状态下拉 + 搜索框 */
-.zt-filter-row {
+/* ===== 结果抽屉（teleport 到 body，避免与 MP 宿主的 v-app layout 冲突） ===== */
+.zt-drawer-scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 2100;
+}
+.zt-results-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(640px, 100vw);
+  display: flex;
+  flex-direction: column;
+  background: rgb(var(--v-theme-surface, 30, 30, 30));
+  color: rgb(var(--v-theme-on-surface, 255, 255, 255));
+  box-shadow: -8px 0 28px rgba(0, 0, 0, 0.28);
+  z-index: 2101;
+  overflow: hidden;
+}
+.zt-drawer-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 12px;
+}
+.zt-drawer-title {
+  font-size: 15px;
+  font-weight: 600;
+  margin-inline-start: 2px;
+}
+/* 抽屉内筛选栏：状态下拉 + 搜索框 */
+.zt-drawer-filter {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -814,10 +1042,68 @@ function stopPolling() {
   flex: 1 1 auto;
   min-width: 120px;
 }
-.zt-record-body {
-  min-height: 60px;
+.zt-drawer-body {
   flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
+  padding: 8px 12px 28px;
+  overscroll-behavior: contain;
+}
+
+/* ===== 分组抽屉：组头按状态着色，点击折叠/展开 ===== */
+.zt-group {
+  --zt-group-color: 158, 158, 158;
+  margin-bottom: 8px;
+  border: 1px solid rgba(var(--zt-group-color), 0.35);
+  border-left: 3px solid rgba(var(--zt-group-color), 0.9);
+  border-radius: 8px;
+  background: rgba(var(--zt-group-color), 0.06);
+  overflow: hidden;
+}
+.zt-group-success { --zt-group-color: 76, 175, 80; }
+.zt-group-warning { --zt-group-color: 255, 152, 0; }
+.zt-group-error   { --zt-group-color: 244, 67, 54; }
+.zt-group-grey    { --zt-group-color: 158, 158, 158; }
+.zt-group-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  cursor: pointer;
+  user-select: none;
+}
+.zt-group-head:hover {
+  background: rgba(var(--zt-group-color), 0.1);
+}
+.zt-group-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.zt-group-count {
+  flex: 0 0 auto;
+  font-size: 12px;
+  opacity: 0.65;
+}
+.zt-group-stats,
+.zt-group-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+.zt-group-body {
+  border-top: 1px dashed rgba(var(--zt-group-color), 0.3);
+  padding: 2px 4px;
+}
+@media (max-width: 599.95px) {
+  .zt-results-drawer { width: 100vw; }
+  .zt-group-stats { display: none; }
+  .zt-drawer-head { padding: 8px; }
 }
 .zt-loading-more {
   font-size: 12px;
@@ -826,28 +1112,6 @@ function stopPolling() {
 .zt-card-title {
   font-size: 15px;
   font-weight: 600;
-}
-/* 结果卡片标题行：Vuetify 的 v-card-title 默认 display:block，放 v-spacer + 按钮会掉到第二行。
-   PC 上改成单行 flex，按钮与「结果」同排靠右；手机（<md）时按钮换到下一排、占满整行。 */
-.zt-card-title-row {
-  display: flex;
-  align-items: center;
-}
-.zt-card-title-row .zt-title-text {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-@media (max-width: 959.95px) {
-  .zt-card-title-row {
-    flex-wrap: wrap;
-    row-gap: 6px;
-  }
-  .zt-card-title-row .zt-title-action {
-    width: 100%;
-    margin-inline-start: 0 !important;
-  }
 }
 .zt-empty {
   font-size: 13px;

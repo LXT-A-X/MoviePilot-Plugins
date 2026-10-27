@@ -1,7 +1,7 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
 import { _ as _export_sfc, a as apiModule, S as Settings, C as Check, F as FontLibrary, D as Dashboard } from './Settings-HCoBTEYz.js';
 
-const {createTextVNode:_createTextVNode$2,resolveComponent:_resolveComponent$2,withCtx:_withCtx$2,createVNode:_createVNode$2,createElementVNode:_createElementVNode$2,toDisplayString:_toDisplayString$2,Fragment:_Fragment$2,openBlock:_openBlock$2,createElementBlock:_createElementBlock$2,createCommentVNode:_createCommentVNode$2,createBlock:_createBlock$2,renderList:_renderList$2,normalizeClass:_normalizeClass} = await importShared('vue');
+const {createTextVNode:_createTextVNode$2,resolveComponent:_resolveComponent$2,withCtx:_withCtx$2,createVNode:_createVNode$2,createElementVNode:_createElementVNode$2,toDisplayString:_toDisplayString$2,Fragment:_Fragment$2,openBlock:_openBlock$2,createElementBlock:_createElementBlock$2,createCommentVNode:_createCommentVNode$2,createBlock:_createBlock$2,renderList:_renderList$2,withModifiers:_withModifiers,normalizeClass:_normalizeClass,normalizeStyle:_normalizeStyle,Teleport:_Teleport} = await importShared('vue');
 
 
 const _hoisted_1$2 = { class: "zt-subset" };
@@ -15,28 +15,38 @@ const _hoisted_5$2 = {
   key: 2,
   class: "zt-list-body"
 };
-const _hoisted_6$2 = { class: "zt-title-text" };
-const _hoisted_7$2 = { class: "zt-filter-row" };
-const _hoisted_8$2 = {
-  key: 1,
+const _hoisted_6$2 = { class: "zt-drawer-head" };
+const _hoisted_7$2 = { class: "zt-drawer-title" };
+const _hoisted_8$2 = { class: "zt-drawer-filter" };
+const _hoisted_9$2 = {
+  key: 0,
   class: "zt-empty pa-6"
 };
-const _hoisted_9$2 = {
+const _hoisted_10$2 = ["onClick"];
+const _hoisted_11$1 = { class: "zt-group-name" };
+const _hoisted_12$1 = { class: "zt-group-count" };
+const _hoisted_13$1 = { class: "zt-group-stats" };
+const _hoisted_14$1 = { class: "zt-group-actions" };
+const _hoisted_15$1 = {
+  key: 0,
+  class: "zt-group-body"
+};
+const _hoisted_16$1 = {
   key: 3,
   class: "ml-2"
 };
-const _hoisted_10$2 = {
+const _hoisted_17$1 = {
   key: 0,
   class: "zt-loading-more pa-2 text-center"
 };
-const _hoisted_11$1 = {
+const _hoisted_18$1 = {
   key: 1,
-  class: "zt-loading-more pa-2 text-center text-body-2 zt-font-meta"
+  class: "zt-loading-more pa-2 text-center"
 };
 
 const {computed: computed$2,onActivated: onActivated$2,onDeactivated: onDeactivated$1,onMounted: onMounted$2,onUnmounted: onUnmounted$1,ref: ref$2,watch} = await importShared('vue');
 
-const recordLimit = 20;
+const RENDER_STEP = 60;
 
 const _sfc_main$2 = {
   __name: 'Subset',
@@ -77,14 +87,22 @@ const uploading = ref$2(false);
 // 处理中：按钮转圈禁用，防重复点击
 const scanning = ref$2(false);
 
-// ===== 右栏：结果 =====
+// ===== 结果抽屉（按剧名/目录分组，前端一次性取全量后渐进渲染）=====
+const resultsOpen = ref$2(false);
 const records = ref$2([]);
 const loadingRecords = ref$2(false);
 const downloadingId = ref$2(null);
 const recordTotal = ref$2(0);
 const retriableCount = ref$2(0);
-const recordPage = ref$2(1);
-const recordReachedEnd = ref$2(false);
+// 渐进渲染：初始渲染 60 条，下拉再加 60（与字体库同思路，数据一次取全，DOM 分批）
+const renderBudget = ref$2(RENDER_STEP);
+const expandedGroups = ref$2(new Set());
+const groupBusy = ref$2('');
+const groupConfirm = ref$2(false);
+const groupTarget = ref$2(null);
+// 抽屉在 body 下，主题变量可能取不到：打开时从宿主 app 读实际配色
+const drawerBg = ref$2('');
+const drawerFg = ref$2('');
 // 筛选：状态下拉 + 文件名搜索
 const filterStatus = ref$2('');
 const recordSearch = ref$2('');
@@ -153,31 +171,24 @@ async function loadPending() {
     loadingPending.value = false;
   }
 }
+// 结果记录：一次拉取当前筛选下的全量（几百条级别），前端分组后渐进渲染。
+// 这样组头计数、组内「全部下载 / 删除整组」都基于完整数据，不会被分页截断。
 async function loadRecords(reset = false, force = false) {
-  // 30 秒轮询（refreshCurrentPage）会占住这把锁：用户操作后的强制刷新不能被它吞掉，
-  // 否则子集化/删除完成时列表停在旧数据，看起来像没生效（必须等下一轮轮询才补上）
   if (loadingRecords.value && !force) return
-  if (reset) {
-    recordPage.value = 1;
-    recordReachedEnd.value = false;
-    records.value = [];
-  } else if (recordReachedEnd.value) {
-    return
-  }
   loadingRecords.value = true;
   try {
     const data = await apiModule.get(props.api, '/subset/records', {
       status: filterStatus.value,
       search: recordSearch.value,
-      page: recordPage.value,
-      limit: recordLimit,
+      page: 1,
+      limit: 0,
     });
-    const list = (data && data.list) || [];
+    records.value = (data && data.list) || [];
     recordTotal.value = (data && data.total) || 0;
     if (typeof data?.retriable === 'number') retriableCount.value = data.retriable;
-    records.value = reset ? list : [...records.value, ...list];
-    if (records.value.length >= recordTotal.value || !list.length) {
-      recordReachedEnd.value = true;
+    if (reset) {
+      renderBudget.value = RENDER_STEP;
+      expandedGroups.value = new Set();
     }
   } catch (e) {
     emit('notify', e.message || '读取子集化记录失败');
@@ -186,50 +197,123 @@ async function loadRecords(reset = false, force = false) {
   }
 }
 
-// Q7 修复：刷新列表但保持当前页码（替换当前页对应区间的数据）。
-// 与 loadRecords(reset=true) 的区别：不重置分页回第 1 页；
-// 与 loadRecords(false) 的区别：loadRecords(false) 是"追加下一页"语义，
-// 直接用于轮询会重复追加同一页数据。
-async function refreshCurrentPage() {
-  if (loadingRecords.value) return
-  loadingRecords.value = true;
+// 抽屉关闭时只刷角标（总数 + 可重试数），不拉全量，避免后台每 30 秒传整表
+async function refreshBadge() {
   try {
-    const data = await apiModule.get(props.api, '/subset/records', {
-      status: filterStatus.value,
-      search: recordSearch.value,
-      page: recordPage.value,
-      limit: recordLimit,
-    });
-    const list = (data && data.list) || [];
+    const data = await apiModule.get(props.api, '/subset/records', { page: 1, limit: 1 });
     recordTotal.value = (data && data.total) || 0;
     if (typeof data?.retriable === 'number') retriableCount.value = data.retriable;
-    // 用最新当前页数据替换 records 中 (recordPage-1)*limit 起的区间，
-    // 保留已加载的前面各页，不追加不重置
-    const idx = (recordPage.value - 1) * recordLimit;
-    records.value = [...records.value.slice(0, idx), ...list];
-    if (records.value.length >= recordTotal.value || !list.length) {
-      recordReachedEnd.value = true;
-    }
   } catch (e) {
-    emit('notify', e.message || '刷新子集化记录失败');
-  } finally {
-    loadingRecords.value = false;
+    /* 角标刷新失败忽略 */
   }
 }
 
-// 筛选变化：防抖后回到第 1 页重拉
+async function refreshCurrentPage() {
+  if (resultsOpen.value) await loadRecords(false, true);
+  else await refreshBadge();
+}
+
+// 筛选变化：防抖后重拉全量并重置展开/渲染预算
 let filterTimer = null;
 watch([filterStatus, recordSearch], () => {
   if (filterTimer) clearTimeout(filterTimer);
   filterTimer = setTimeout(() => loadRecords(true), 250);
 });
 
-// 滚动到底加载下一页
-function onRecordsScroll(e) {
+// ── 分组：inbound 取媒体库剧名目录（Season 1 上跳一级），watch 取所在子目录，manual 归「手动上传」
+const SEASON_RE = /^(season\s*\d+|s\d{1,2}|第.{1,4}季)$/i;
+function seasonLike(name) {
+  return SEASON_RE.test(String(name || '').trim())
+}
+function recordGroup(r) {
+  const src = String(r.source || '');
+  if (src === 'manual') return { key: 'manual', label: '手动上传' }
+  const p = String(r.file_path || '').replace(/\\/g, '/');
+  const dirs = p ? p.split('/').filter(Boolean).slice(0, -1) : [];
+  if (!dirs.length) {
+    return { key: `${src || 'unknown'}:`, label: src === 'watch' ? '监控目录' : '未知来源' }
+  }
+  let idx = dirs.length - 1;
+  if (seasonLike(dirs[idx]) && idx > 0) idx -= 1;
+  const label = dirs[idx] || '未知目录';
+  return {
+    key: `${src || 'unknown'}:${dirs.slice(0, idx + 1).join('/')}`,
+    label: src === 'watch' ? `监控：${label}` : label,
+  }
+}
+function groupStats(list) {
+  const s = { success: 0, missing: 0, retryable: 0, error: 0, skipped: 0 };
+  for (const r of list) {
+    if (r.status === 'success') s.success += 1;
+    else if (r.status === 'error') s.error += 1;
+    else if (r.status === 'skipped') s.skipped += 1;
+    else if (r.status === 'missing') {
+      s.missing += 1;
+      if (r.retryable) s.retryable += 1;
+    }
+  }
+  return s
+}
+const groupedRecords = computed$2(() => {
+  const map = new Map();
+  for (const r of records.value) {
+    const g = recordGroup(r);
+    let item = map.get(g.key);
+    if (!item) {
+      item = { key: g.key, label: g.label, records: [], maxId: 0 };
+      map.set(g.key, item);
+    }
+    item.records.push(r);
+    if (Number(r.id) > item.maxId) item.maxId = Number(r.id);
+  }
+  const groups = [...map.values()].sort((a, b) => b.maxId - a.maxId);
+  for (const g of groups) {
+    g.stats = groupStats(g.records);
+    // 组头颜色：有失败优先红，其次缺字橙，全成功绿，其余灰
+    g.color = g.stats.error ? 'error' : (g.stats.missing ? 'warning' : (g.stats.success ? 'success' : 'grey'));
+    g.downloadable = g.records.filter(r => r.status === 'success' && r.out_file);
+  }
+  return groups
+});
+// 渐进渲染：组头全显示；展开的组内记录消耗渲染预算，下拉到底再加一批
+const visibleGroups = computed$2(() => {
+  let remain = renderBudget.value;
+  return groupedRecords.value.map(g => {
+    const expanded = expandedGroups.value.has(g.key);
+    let visibleRecords = [];
+    let truncated = false;
+    if (expanded) {
+      visibleRecords = g.records.slice(0, Math.max(0, remain));
+      remain -= visibleRecords.length;
+      truncated = visibleRecords.length < g.records.length;
+    }
+    return { ...g, expanded, visibleRecords, truncated }
+  })
+});
+const hasMoreRecords = computed$2(() => visibleGroups.value.some(g => g.truncated));
+
+function openResults() {
+  resultsOpen.value = true;
+  // 抽屉 teleport 到 body，脱离了 .v-application 的 CSS 变量作用域，
+  // 取宿主实际配色补齐背景/文字色，避免主题变量失效导致透明
+  const app = document.querySelector('.v-application');
+  if (app) {
+    const cs = getComputedStyle(app);
+    drawerBg.value = cs.backgroundColor;
+    drawerFg.value = cs.color;
+  }
+  loadRecords(true, true);
+}
+function toggleGroup(g) {
+  const next = new Set(expandedGroups.value);
+  if (next.has(g.key)) next.delete(g.key);
+  else next.add(g.key);
+  expandedGroups.value = next;
+}
+function onDrawerScroll(e) {
   const el = e.target;
-  if (el && el.scrollTop + el.clientHeight >= el.scrollHeight - 40) {
-    recordPage.value += 1;
-    loadRecords();
+  if (hasMoreRecords.value && el && el.scrollTop + el.clientHeight >= el.scrollHeight - 60) {
+    renderBudget.value += RENDER_STEP;
   }
 }
 
@@ -407,63 +491,121 @@ async function _doDownload(r) {
   return 'ok'
 }
 
-// 可批量下载的记录：已加载的成功且带输出文件
+// 可批量下载的记录：当前筛选下全部成功且带输出文件（已一次性取全）
 const downloadableRecords = computed$2(() =>
   records.value.filter(r => r.status === 'success' && r.out_file)
 );
 
-// 全部下载：按当前筛选（状态下拉+名称搜索）拉取全部成功成品；
-// Q19 修复：限并发 3 的小并发池（文档建议 2~3 并发更快），替代串行逐个 await；
-// Q10 修复：按每个记录的返回状态准确统计成功/失败，不再把"被守卫跳过"计入成功。
-// 未选筛选则下载全部分页的成功成品（limit=0 后端返回当前筛选下全部记录，不限页）
+// 小并发池：最多 3 个并发下载，按每条记录的返回状态准确统计
+async function downloadPool(targets) {
+  const stats = { ok: 0, fail: 0, missing: 0 };
+  let head = 0;
+  const worker = async () => {
+    while (head < targets.length) {
+      const r = targets[head++];
+      try {
+        const st = await _doDownload(r);
+        if (st === 'ok') stats.ok += 1;
+        else if (st === 'missing') stats.missing += 1;
+        else stats.fail += 1;
+      } catch (e) {
+        stats.fail += 1;
+      }
+    }
+  };
+  await Promise.all([worker(), worker(), worker()]);
+  return stats
+}
+function notifyDownloadStats(stats, label = '') {
+  const failed = stats.fail + stats.missing;
+  const prefix = label ? `${label}：` : '';
+  if (failed) {
+    emit(
+      'notify',
+      `${prefix}已下载 ${stats.ok} 个，${stats.fail} 个失败${stats.missing ? `，${stats.missing} 个文件缺失` : ''}`,
+      stats.ok ? 'success' : 'warning'
+    );
+  } else {
+    emit('notify', `${prefix}已下载 ${stats.ok} 个结果文件`, 'success');
+  }
+}
+
 const downloadAllBusy = ref$2(false);
 async function downloadAll() {
   if (downloadAllBusy.value) return
-  // 有单个下载正在进行时直接拒绝，避免与并发池混跑
   if (downloadingId.value) {
     emit('notify', '有下载正在进行，请稍候', 'warning');
     return
   }
+  const targets = downloadableRecords.value;
+  if (!targets.length) {
+    emit('notify', '当前筛选下没有可下载的成功成品', 'warning');
+    return
+  }
   downloadAllBusy.value = true;
   try {
-    const data = await apiModule.get(props.api, '/subset/records', {
-      status: filterStatus.value,
-      search: recordSearch.value,
-      page: 1,
-      limit: 0, // 0 = 当前筛选下全部记录（含未加载的后续页）
-    });
-    const targets = ((data && data.list) || []).filter(r => r.status === 'success' && r.out_file);
-    if (!targets.length) {
-      emit('notify', '当前筛选下没有可下载的成功成品', 'warning');
-      return
-    }
-    // 小并发池：最多 3 个并发下载
-    const stats = { ok: 0, fail: 0, missing: 0 };
-    let head = 0;
-    const worker = async () => {
-      while (head < targets.length) {
-        const r = targets[head++];
-        try {
-          const st = await _doDownload(r);
-          if (st === 'ok') stats.ok += 1;
-          else if (st === 'missing') stats.missing += 1;
-          else stats.fail += 1;
-        } catch (e) {
-          stats.fail += 1;
-        }
-      }
-    };
-    await Promise.all([worker(), worker(), worker()]);
-    const failed = stats.fail + stats.missing;
-    if (failed) {
-      emit('notify', `已下载 ${stats.ok} 个，${stats.fail} 个失败${stats.missing ? `，${stats.missing} 个文件缺失` : ''}`, stats.ok ? 'success' : 'warning');
-    } else {
-      emit('notify', `已下载 ${stats.ok} 个结果文件`, 'success');
-    }
-  } catch (e) {
-    emit('notify', e.message || '获取结果失败');
+    notifyDownloadStats(await downloadPool(targets));
   } finally {
     downloadAllBusy.value = false;
+  }
+}
+
+// 本组全部下载：只下这个抽屉里的成功成品（不依赖是否已展开到该组）
+async function downloadGroup(g) {
+  if (groupBusy.value || downloadAllBusy.value) return
+  if (downloadingId.value) {
+    emit('notify', '有下载正在进行，请稍候', 'warning');
+    return
+  }
+  const targets = g.downloadable || [];
+  if (!targets.length) {
+    emit('notify', '本组没有可下载的成功成品', 'warning');
+    return
+  }
+  groupBusy.value = g.key;
+  try {
+    notifyDownloadStats(await downloadPool(targets), `本组（${g.label}）`);
+  } finally {
+    groupBusy.value = '';
+  }
+}
+
+// 删除整组：有成品时二次确认（监控/上传会连成品一起删，入库只删记录）
+function askDeleteGroup(g) {
+  groupTarget.value = g;
+  groupConfirm.value = true;
+}
+const groupDeleting = ref$2(false);
+async function confirmDeleteGroup() {
+  const g = groupTarget.value;
+  if (!g || groupDeleting.value) return
+  groupDeleting.value = true;
+  const ids = g.records.map(r => Number(r.id)).filter(Boolean);
+  const errors = [];
+  let head = 0;
+  const worker = async () => {
+    while (head < ids.length) {
+      const id = ids[head++];
+      try {
+        await apiModule.post(props.api, `/subset/delete/${id}`);
+      } catch (e) {
+        errors.push(id);
+      }
+    }
+  };
+  try {
+    await Promise.all([worker(), worker(), worker()]);
+    groupConfirm.value = false;
+    groupTarget.value = null;
+    const ok = ids.length - errors.length;
+    emit(
+      'notify',
+      errors.length ? `已删除 ${ok} 条，${errors.length} 条失败` : `已删除本组 ${ok} 条记录`,
+      errors.length ? 'warning' : 'success'
+    );
+    await loadRecords(true, true);
+  } finally {
+    groupDeleting.value = false;
   }
 }
 
@@ -471,7 +613,6 @@ async function deleteRecord(id) {
   try {
     await apiModule.post(props.api, `/subset/delete/${id}`);
     emit('notify', '已删除记录', 'success');
-    // 删除后软刷新回第 1 页（计数、分页、retriable 一并同步）
     await loadRecords(true, true);
   } catch (e) {
     emit('notify', e.message || '删除失败');
@@ -498,7 +639,8 @@ async function clearRecords() {
 onMounted$2(() => {
   loadStatus();
   loadPending();
-  loadRecords();
+  // 抽屉默认关闭：只刷角标（总数/可重试数），避免进页面就拉全量记录
+  refreshBadge();
   startPolling();
 });
 // keep-alive 缓存场景：切回时恢复轮询并重拉数据（Q1 修复；Q14 后切 Tab
@@ -510,8 +652,10 @@ onActivated$2(() => {
   startPolling();
 });
 // 切走（进入 keep-alive 缓存）时停止轮询，避免后台不可见视图持续打接口（Q1 修复）
+// 抽屉是 teleport 到 body 的浮层，缓存后不会随视图隐藏，必须手动关掉
 onDeactivated$1(() => {
   stopPolling();
+  resultsOpen.value = false;
 });
 onUnmounted$1(() => stopPolling());
 
@@ -536,6 +680,7 @@ function stopPolling() {
 return (_ctx, _cache) => {
   const _component_v_icon = _resolveComponent$2("v-icon");
   const _component_v_btn = _resolveComponent$2("v-btn");
+  const _component_v_chip = _resolveComponent$2("v-chip");
   const _component_v_spacer = _resolveComponent$2("v-spacer");
   const _component_v_alert = _resolveComponent$2("v-alert");
   const _component_v_card_title = _resolveComponent$2("v-card-title");
@@ -547,11 +692,10 @@ return (_ctx, _cache) => {
   const _component_v_list = _resolveComponent$2("v-list");
   const _component_v_card = _resolveComponent$2("v-card");
   const _component_v_col = _resolveComponent$2("v-col");
+  const _component_v_row = _resolveComponent$2("v-row");
   const _component_v_select = _resolveComponent$2("v-select");
   const _component_v_text_field = _resolveComponent$2("v-text-field");
-  const _component_v_chip = _resolveComponent$2("v-chip");
   const _component_v_progress_circular = _resolveComponent$2("v-progress-circular");
-  const _component_v_row = _resolveComponent$2("v-row");
   const _component_v_card_text = _resolveComponent$2("v-card-text");
   const _component_v_card_actions = _resolveComponent$2("v-card-actions");
   const _component_v_dialog = _resolveComponent$2("v-dialog");
@@ -571,12 +715,12 @@ return (_ctx, _cache) => {
             start: "",
             size: "18"
           }, {
-            default: _withCtx$2(() => [...(_cache[9] || (_cache[9] = [
+            default: _withCtx$2(() => [...(_cache[13] || (_cache[13] = [
               _createTextVNode$2("mdi-upload", -1)
             ]))]),
             _: 1
           }),
-          _cache[10] || (_cache[10] = _createTextVNode$2(" 上传字幕 ", -1))
+          _cache[14] || (_cache[14] = _createTextVNode$2(" 上传字幕 ", -1))
         ]),
         _: 1
       }, 8, ["disabled", "loading"]),
@@ -601,37 +745,45 @@ return (_ctx, _cache) => {
             start: "",
             size: "18"
           }, {
-            default: _withCtx$2(() => [...(_cache[11] || (_cache[11] = [
+            default: _withCtx$2(() => [...(_cache[15] || (_cache[15] = [
               _createTextVNode$2("mdi-magnify-scan", -1)
             ]))]),
             _: 1
           }),
-          _cache[12] || (_cache[12] = _createTextVNode$2(" 全量子集化 ", -1))
+          _cache[16] || (_cache[16] = _createTextVNode$2(" 全量子集化 ", -1))
         ]),
         _: 1
       }, 8, ["disabled", "loading"]),
       _createVNode$2(_component_v_btn, {
-        color: "warning",
         variant: "tonal",
-        disabled: !__props.enabled || retrying.value || !hasRetriable(),
-        loading: retrying.value,
-        title: "对结果区中失败/缺字体的字幕重新子集化（补好缺失字体后使用）",
-        onClick: retryFailed
+        disabled: !__props.enabled,
+        onClick: openResults
       }, {
         default: _withCtx$2(() => [
           _createVNode$2(_component_v_icon, {
             start: "",
             size: "18"
           }, {
-            default: _withCtx$2(() => [...(_cache[13] || (_cache[13] = [
-              _createTextVNode$2("mdi-refresh", -1)
+            default: _withCtx$2(() => [...(_cache[17] || (_cache[17] = [
+              _createTextVNode$2("mdi-history", -1)
             ]))]),
             _: 1
           }),
-          _cache[14] || (_cache[14] = _createTextVNode$2(" 重试失败 ", -1))
+          _cache[18] || (_cache[18] = _createTextVNode$2(" 结果 ", -1)),
+          _createVNode$2(_component_v_chip, {
+            class: "ml-2",
+            size: "x-small",
+            color: retriableCount.value ? 'warning' : 'primary',
+            variant: "flat"
+          }, {
+            default: _withCtx$2(() => [
+              _createTextVNode$2(_toDisplayString$2(recordTotal.value), 1)
+            ]),
+            _: 1
+          }, 8, ["color"])
         ]),
         _: 1
-      }, 8, ["disabled", "loading"]),
+      }, 8, ["disabled"]),
       _createVNode$2(_component_v_btn, {
         variant: "tonal",
         disabled: !__props.enabled || !pendingList.value.length,
@@ -643,32 +795,12 @@ return (_ctx, _cache) => {
             start: "",
             size: "18"
           }, {
-            default: _withCtx$2(() => [...(_cache[15] || (_cache[15] = [
+            default: _withCtx$2(() => [...(_cache[19] || (_cache[19] = [
               _createTextVNode$2("mdi-delete-sweep-outline", -1)
             ]))]),
             _: 1
           }),
-          _cache[16] || (_cache[16] = _createTextVNode$2(" 清空待处理 ", -1))
-        ]),
-        _: 1
-      }, 8, ["disabled"]),
-      _createVNode$2(_component_v_btn, {
-        variant: "tonal",
-        disabled: !__props.enabled || !records.value.length,
-        title: "清空全部子集化记录",
-        onClick: clearRecords
-      }, {
-        default: _withCtx$2(() => [
-          _createVNode$2(_component_v_icon, {
-            start: "",
-            size: "18"
-          }, {
-            default: _withCtx$2(() => [...(_cache[17] || (_cache[17] = [
-              _createTextVNode$2("mdi-trash-can-outline", -1)
-            ]))]),
-            _: 1
-          }),
-          _cache[18] || (_cache[18] = _createTextVNode$2(" 清空记录 ", -1))
+          _cache[20] || (_cache[20] = _createTextVNode$2(" 清空待处理 ", -1))
         ]),
         _: 1
       }, 8, ["disabled"]),
@@ -706,12 +838,12 @@ return (_ctx, _cache) => {
             start: "",
             size: "15"
           }, {
-            default: _withCtx$2(() => [...(_cache[19] || (_cache[19] = [
+            default: _withCtx$2(() => [...(_cache[21] || (_cache[21] = [
               _createTextVNode$2("mdi-database-refresh", -1)
             ]))]),
             _: 1
           }),
-          _cache[20] || (_cache[20] = _createTextVNode$2(" 全部重建 ", -1))
+          _cache[22] || (_cache[22] = _createTextVNode$2(" 全部重建 ", -1))
         ]),
         _: 1
       }, 8, ["disabled", "loading"])
@@ -724,7 +856,7 @@ return (_ctx, _cache) => {
           density: "compact",
           class: "mb-3"
         }, {
-          default: _withCtx$2(() => [...(_cache[21] || (_cache[21] = [
+          default: _withCtx$2(() => [...(_cache[23] || (_cache[23] = [
             _createTextVNode$2(" HarfBuzz 子集化引擎未就绪，子集化不可用。请到「仪表盘 → 依赖」中重新安装 uharfbuzz。 ", -1)
           ]))]),
           _: 1
@@ -735,10 +867,7 @@ return (_ctx, _cache) => {
       class: "zt-subset-row"
     }, {
       default: _withCtx$2(() => [
-        _createVNode$2(_component_v_col, {
-          cols: "12",
-          md: "5"
-        }, {
+        _createVNode$2(_component_v_col, { cols: "12" }, {
           default: _withCtx$2(() => [
             _createVNode$2(_component_v_card, { class: "zt-card-bg zt-list-card" }, {
               default: _withCtx$2(() => [
@@ -748,7 +877,7 @@ return (_ctx, _cache) => {
                       start: "",
                       size: "18"
                     }, {
-                      default: _withCtx$2(() => [...(_cache[22] || (_cache[22] = [
+                      default: _withCtx$2(() => [...(_cache[24] || (_cache[24] = [
                         _createTextVNode$2("mdi-tray-full", -1)
                       ]))]),
                       _: 1
@@ -766,7 +895,7 @@ return (_ctx, _cache) => {
                     }))
                   : _createCommentVNode$2("", true),
                 (!loadingPending.value && !pendingList.value.length)
-                  ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_4$2, [...(_cache[23] || (_cache[23] = [
+                  ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_4$2, [...(_cache[25] || (_cache[25] = [
                       _createTextVNode$2(" 暂无待处理字幕", -1),
                       _createElementVNode$2("br", null, null, -1),
                       _createElementVNode$2("span", { class: "zt-empty-sub" }, "上传字幕，或设置开启「入库后自动子集化」+「目录自动收集」关闭时自动收集", -1)
@@ -787,7 +916,7 @@ return (_ctx, _cache) => {
                                   color: "primary",
                                   size: "18"
                                 }, {
-                                  default: _withCtx$2(() => [...(_cache[24] || (_cache[24] = [
+                                  default: _withCtx$2(() => [...(_cache[26] || (_cache[26] = [
                                     _createTextVNode$2("mdi-subtitles-outline", -1)
                                   ]))]),
                                   _: 1
@@ -804,7 +933,7 @@ return (_ctx, _cache) => {
                                 }, {
                                   default: _withCtx$2(() => [
                                     _createVNode$2(_component_v_icon, { size: "16" }, {
-                                      default: _withCtx$2(() => [...(_cache[25] || (_cache[25] = [
+                                      default: _withCtx$2(() => [...(_cache[27] || (_cache[27] = [
                                         _createTextVNode$2("mdi-close", -1)
                                       ]))]),
                                       _: 1
@@ -839,240 +968,467 @@ return (_ctx, _cache) => {
             })
           ]),
           _: 1
-        }),
-        _createVNode$2(_component_v_col, {
-          cols: "12",
-          md: "7"
-        }, {
-          default: _withCtx$2(() => [
-            _createVNode$2(_component_v_card, { class: "zt-card-bg zt-list-card" }, {
-              default: _withCtx$2(() => [
-                _createVNode$2(_component_v_card_title, { class: "zt-card-title zt-card-title-row" }, {
-                  default: _withCtx$2(() => [
-                    _createVNode$2(_component_v_icon, {
-                      start: "",
-                      size: "18"
-                    }, {
-                      default: _withCtx$2(() => [...(_cache[26] || (_cache[26] = [
-                        _createTextVNode$2("mdi-history", -1)
-                      ]))]),
-                      _: 1
-                    }),
-                    _createElementVNode$2("span", _hoisted_6$2, "结果（" + _toDisplayString$2(records.value.length) + "/" + _toDisplayString$2(recordTotal.value) + "）", 1),
-                    _createVNode$2(_component_v_spacer),
-                    _createVNode$2(_component_v_btn, {
-                      class: "zt-title-action",
-                      size: "small",
-                      variant: "tonal",
-                      color: "success",
-                      disabled: !__props.enabled || downloadAllBusy.value || !downloadableRecords.value.length,
-                      loading: downloadAllBusy.value,
-                      title: "下载当前列表全部成功成品字幕",
-                      onClick: downloadAll
-                    }, {
-                      default: _withCtx$2(() => [
-                        _createVNode$2(_component_v_icon, {
-                          start: "",
-                          size: "15"
-                        }, {
-                          default: _withCtx$2(() => [...(_cache[27] || (_cache[27] = [
-                            _createTextVNode$2("mdi-download-multiple", -1)
-                          ]))]),
-                          _: 1
-                        }),
-                        _cache[28] || (_cache[28] = _createTextVNode$2(" 全部下载 ", -1))
-                      ]),
-                      _: 1
-                    }, 8, ["disabled", "loading"]),
-                    _createVNode$2(_component_v_btn, {
-                      class: "zt-title-action",
-                      size: "small",
-                      variant: "tonal",
-                      color: "error",
-                      disabled: !__props.enabled || clearingRecords.value || downloadAllBusy.value || !!downloadingId.value || !records.value.length,
-                      loading: clearingRecords.value,
-                      title: "清空全部子集化记录（监控/上传来历的成品一并删除；MP 入库只删记录，不动媒体库原字幕）",
-                      onClick: _cache[2] || (_cache[2] = $event => (clearConfirm.value = true))
-                    }, {
-                      default: _withCtx$2(() => [
-                        _createVNode$2(_component_v_icon, {
-                          start: "",
-                          size: "15"
-                        }, {
-                          default: _withCtx$2(() => [...(_cache[29] || (_cache[29] = [
-                            _createTextVNode$2("mdi-delete-sweep", -1)
-                          ]))]),
-                          _: 1
-                        }),
-                        _cache[30] || (_cache[30] = _createTextVNode$2(" 全部清空 ", -1))
-                      ]),
-                      _: 1
-                    }, 8, ["disabled", "loading"])
-                  ]),
-                  _: 1
-                }),
-                _createVNode$2(_component_v_divider),
-                _createElementVNode$2("div", _hoisted_7$2, [
-                  _createVNode$2(_component_v_select, {
-                    modelValue: filterStatus.value,
-                    "onUpdate:modelValue": _cache[3] || (_cache[3] = $event => ((filterStatus).value = $event)),
-                    items: statusFilterOptions,
-                    "item-title": "title",
-                    "item-value": "value",
-                    density: "compact",
-                    variant: "outlined",
-                    "hide-details": "",
-                    class: "zt-filter-status"
-                  }, null, 8, ["modelValue"]),
-                  _createVNode$2(_component_v_text_field, {
-                    modelValue: recordSearch.value,
-                    "onUpdate:modelValue": _cache[4] || (_cache[4] = $event => ((recordSearch).value = $event)),
-                    density: "compact",
-                    variant: "outlined",
-                    "hide-details": "",
-                    clearable: !!recordSearch.value,
-                    placeholder: "搜索字幕名…",
-                    "prepend-inner-icon": "mdi-magnify",
-                    class: "zt-filter-search"
-                  }, null, 8, ["modelValue", "clearable"])
+        })
+      ]),
+      _: 1
+    }),
+    (_openBlock$2(), _createBlock$2(_Teleport, { to: "body" }, [
+      (resultsOpen.value)
+        ? (_openBlock$2(), _createElementBlock$2("div", {
+            key: 0,
+            class: "zt-drawer-scrim",
+            onClick: _cache[2] || (_cache[2] = $event => (resultsOpen.value = false))
+          }))
+        : _createCommentVNode$2("", true),
+      (resultsOpen.value)
+        ? (_openBlock$2(), _createElementBlock$2("aside", {
+            key: 1,
+            class: "zt-results-drawer",
+            style: _normalizeStyle({ background: drawerBg.value || undefined, color: drawerFg.value || undefined })
+          }, [
+            _createElementVNode$2("div", _hoisted_6$2, [
+              _createVNode$2(_component_v_icon, { size: "18" }, {
+                default: _withCtx$2(() => [...(_cache[28] || (_cache[28] = [
+                  _createTextVNode$2("mdi-history", -1)
+                ]))]),
+                _: 1
+              }),
+              _createElementVNode$2("span", _hoisted_7$2, "结果（" + _toDisplayString$2(recordTotal.value) + "）", 1),
+              _createVNode$2(_component_v_spacer),
+              _createVNode$2(_component_v_btn, {
+                size: "small",
+                variant: "tonal",
+                color: "success",
+                disabled: !__props.enabled || downloadAllBusy.value || !downloadableRecords.value.length,
+                loading: downloadAllBusy.value,
+                title: "下载当前筛选下全部成功成品字幕",
+                onClick: downloadAll
+              }, {
+                default: _withCtx$2(() => [
+                  _createVNode$2(_component_v_icon, {
+                    start: "",
+                    size: "15"
+                  }, {
+                    default: _withCtx$2(() => [...(_cache[29] || (_cache[29] = [
+                      _createTextVNode$2("mdi-download-multiple", -1)
+                    ]))]),
+                    _: 1
+                  }),
+                  _cache[30] || (_cache[30] = _createElementVNode$2("span", { class: "d-none d-sm-inline" }, "全部下载", -1))
                 ]),
-                _createVNode$2(_component_v_divider),
-                (loadingRecords.value)
-                  ? (_openBlock$2(), _createBlock$2(_component_v_progress_linear, {
-                      key: 0,
-                      indeterminate: "",
-                      color: "primary"
-                    }))
-                  : _createCommentVNode$2("", true),
-                (!loadingRecords.value && !records.value.length)
-                  ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_8$2, [
-                      _createTextVNode$2(" 暂无" + _toDisplayString$2(filterStatus.value || recordSearch.value ? '匹配' : '') + "处理结果", 1),
-                      _cache[31] || (_cache[31] = _createElementVNode$2("br", null, null, -1)),
-                      _cache[32] || (_cache[32] = _createElementVNode$2("span", { class: "zt-empty-sub" }, "处理完成后结果与输出文件在这里展示，可下载", -1))
-                    ]))
-                  : (_openBlock$2(), _createElementBlock$2("div", {
-                      key: 2,
-                      class: "zt-list-body zt-record-body",
-                      onScroll: onRecordsScroll
-                    }, [
-                      _createVNode$2(_component_v_list, {
-                        density: "compact",
-                        class: "pa-0"
+                _: 1
+              }, 8, ["disabled", "loading"]),
+              _createVNode$2(_component_v_btn, {
+                size: "small",
+                variant: "tonal",
+                color: "warning",
+                disabled: !__props.enabled || retrying.value || !hasRetriable(),
+                loading: retrying.value,
+                title: "对失败/缺字体的字幕重新子集化（补好缺失字体后使用）",
+                onClick: retryFailed
+              }, {
+                default: _withCtx$2(() => [
+                  _createVNode$2(_component_v_icon, {
+                    start: "",
+                    size: "15"
+                  }, {
+                    default: _withCtx$2(() => [...(_cache[31] || (_cache[31] = [
+                      _createTextVNode$2("mdi-refresh", -1)
+                    ]))]),
+                    _: 1
+                  }),
+                  _cache[32] || (_cache[32] = _createElementVNode$2("span", { class: "d-none d-sm-inline" }, "重试失败", -1))
+                ]),
+                _: 1
+              }, 8, ["disabled", "loading"]),
+              _createVNode$2(_component_v_btn, {
+                size: "small",
+                variant: "tonal",
+                color: "error",
+                disabled: !__props.enabled || clearingRecords.value || downloadAllBusy.value || !!downloadingId.value || !records.value.length,
+                loading: clearingRecords.value,
+                title: "清空全部子集化记录（监控/上传来历的成品一并删除；MP 入库只删记录，不动媒体库原字幕）",
+                onClick: _cache[3] || (_cache[3] = $event => (clearConfirm.value = true))
+              }, {
+                default: _withCtx$2(() => [
+                  _createVNode$2(_component_v_icon, {
+                    start: "",
+                    size: "15"
+                  }, {
+                    default: _withCtx$2(() => [...(_cache[33] || (_cache[33] = [
+                      _createTextVNode$2("mdi-delete-sweep", -1)
+                    ]))]),
+                    _: 1
+                  }),
+                  _cache[34] || (_cache[34] = _createElementVNode$2("span", { class: "d-none d-sm-inline" }, "全部清空", -1))
+                ]),
+                _: 1
+              }, 8, ["disabled", "loading"]),
+              _createVNode$2(_component_v_btn, {
+                icon: "",
+                size: "small",
+                title: "关闭",
+                onClick: _cache[4] || (_cache[4] = $event => (resultsOpen.value = false))
+              }, {
+                default: _withCtx$2(() => [
+                  _createVNode$2(_component_v_icon, { size: "20" }, {
+                    default: _withCtx$2(() => [...(_cache[35] || (_cache[35] = [
+                      _createTextVNode$2("mdi-close", -1)
+                    ]))]),
+                    _: 1
+                  })
+                ]),
+                _: 1
+              })
+            ]),
+            _createVNode$2(_component_v_divider),
+            _createElementVNode$2("div", _hoisted_8$2, [
+              _createVNode$2(_component_v_select, {
+                modelValue: filterStatus.value,
+                "onUpdate:modelValue": _cache[5] || (_cache[5] = $event => ((filterStatus).value = $event)),
+                items: statusFilterOptions,
+                "item-title": "title",
+                "item-value": "value",
+                density: "compact",
+                variant: "outlined",
+                "hide-details": "",
+                class: "zt-filter-status"
+              }, null, 8, ["modelValue"]),
+              _createVNode$2(_component_v_text_field, {
+                modelValue: recordSearch.value,
+                "onUpdate:modelValue": _cache[6] || (_cache[6] = $event => ((recordSearch).value = $event)),
+                density: "compact",
+                variant: "outlined",
+                "hide-details": "",
+                clearable: !!recordSearch.value,
+                placeholder: "搜索字幕名…",
+                "prepend-inner-icon": "mdi-magnify",
+                class: "zt-filter-search"
+              }, null, 8, ["modelValue", "clearable"])
+            ]),
+            _createVNode$2(_component_v_divider),
+            (loadingRecords.value)
+              ? (_openBlock$2(), _createBlock$2(_component_v_progress_linear, {
+                  key: 0,
+                  indeterminate: "",
+                  color: "primary"
+                }))
+              : _createCommentVNode$2("", true),
+            _createElementVNode$2("div", {
+              class: "zt-drawer-body",
+              onScroll: onDrawerScroll
+            }, [
+              (!loadingRecords.value && !groupedRecords.value.length)
+                ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_9$2, [
+                    _createTextVNode$2(" 暂无" + _toDisplayString$2(filterStatus.value || recordSearch.value ? '匹配' : '') + "处理结果", 1),
+                    _cache[36] || (_cache[36] = _createElementVNode$2("br", null, null, -1)),
+                    _cache[37] || (_cache[37] = _createElementVNode$2("span", { class: "zt-empty-sub" }, "处理完成后结果与输出文件在这里展示，可下载", -1))
+                  ]))
+                : _createCommentVNode$2("", true),
+              (_openBlock$2(true), _createElementBlock$2(_Fragment$2, null, _renderList$2(visibleGroups.value, (g) => {
+                return (_openBlock$2(), _createElementBlock$2("div", {
+                  key: g.key,
+                  class: _normalizeClass(["zt-group", `zt-group-${g.color}`])
+                }, [
+                  _createElementVNode$2("div", {
+                    class: "zt-group-head",
+                    onClick: $event => (toggleGroup(g))
+                  }, [
+                    _createVNode$2(_component_v_icon, { size: "18" }, {
+                      default: _withCtx$2(() => [
+                        _createTextVNode$2(_toDisplayString$2(g.expanded ? 'mdi-chevron-down' : 'mdi-chevron-right'), 1)
+                      ]),
+                      _: 2
+                    }, 1024),
+                    _createVNode$2(_component_v_icon, {
+                      size: "16",
+                      color: g.color === 'grey' ? undefined : g.color
+                    }, {
+                      default: _withCtx$2(() => [
+                        _createTextVNode$2(_toDisplayString$2(g.expanded ? 'mdi-folder-open' : 'mdi-folder'), 1)
+                      ]),
+                      _: 2
+                    }, 1032, ["color"]),
+                    _createElementVNode$2("span", _hoisted_11$1, _toDisplayString$2(g.label), 1),
+                    _createElementVNode$2("span", _hoisted_12$1, _toDisplayString$2(g.records.length), 1),
+                    _createElementVNode$2("span", _hoisted_13$1, [
+                      (g.stats.success)
+                        ? (_openBlock$2(), _createBlock$2(_component_v_chip, {
+                            key: 0,
+                            color: "success",
+                            size: "x-small",
+                            variant: "tonal"
+                          }, {
+                            default: _withCtx$2(() => [
+                              _createTextVNode$2("✓ " + _toDisplayString$2(g.stats.success), 1)
+                            ]),
+                            _: 2
+                          }, 1024))
+                        : _createCommentVNode$2("", true),
+                      (g.stats.missing)
+                        ? (_openBlock$2(), _createBlock$2(_component_v_chip, {
+                            key: 1,
+                            color: "warning",
+                            size: "x-small",
+                            variant: "tonal"
+                          }, {
+                            default: _withCtx$2(() => [
+                              _createTextVNode$2("⚠ " + _toDisplayString$2(g.stats.missing), 1)
+                            ]),
+                            _: 2
+                          }, 1024))
+                        : _createCommentVNode$2("", true),
+                      (g.stats.error)
+                        ? (_openBlock$2(), _createBlock$2(_component_v_chip, {
+                            key: 2,
+                            color: "error",
+                            size: "x-small",
+                            variant: "tonal"
+                          }, {
+                            default: _withCtx$2(() => [
+                              _createTextVNode$2("✕ " + _toDisplayString$2(g.stats.error), 1)
+                            ]),
+                            _: 2
+                          }, 1024))
+                        : _createCommentVNode$2("", true),
+                      (g.stats.skipped)
+                        ? (_openBlock$2(), _createBlock$2(_component_v_chip, {
+                            key: 3,
+                            color: "info",
+                            size: "x-small",
+                            variant: "tonal"
+                          }, {
+                            default: _withCtx$2(() => [
+                              _createTextVNode$2("跳过 " + _toDisplayString$2(g.stats.skipped), 1)
+                            ]),
+                            _: 2
+                          }, 1024))
+                        : _createCommentVNode$2("", true)
+                    ]),
+                    _createElementVNode$2("span", _hoisted_14$1, [
+                      _createVNode$2(_component_v_btn, {
+                        size: "x-small",
+                        variant: "tonal",
+                        color: "success",
+                        disabled: !__props.enabled || groupBusy.value === g.key || !g.downloadable.length,
+                        loading: groupBusy.value === g.key,
+                        title: "只下载本组成功成品",
+                        onClick: _withModifiers($event => (downloadGroup(g)), ["stop"])
                       }, {
                         default: _withCtx$2(() => [
-                          (_openBlock$2(true), _createElementBlock$2(_Fragment$2, null, _renderList$2(records.value, (r) => {
-                            return (_openBlock$2(), _createBlock$2(_component_v_list_item, {
-                              key: r.id,
-                              lines: "two"
-                            }, {
-                              prepend: _withCtx$2(() => [
-                                _createVNode$2(_component_v_chip, {
-                                  color: statusColor(r),
-                                  size: "x-small",
-                                  variant: "tonal",
-                                  title: r.status === 'missing' && !r.retryable ? '缺的字体尚未补齐：点击去「缺失字体」页上传' : (r.status === 'error' ? '处理失败：点击去「缺失字体」页处理' : (r.status === 'missing' && r.retryable ? '缺的字体已入库：点顶部「重试失败」重新子集化' : '')),
-                                  class: _normalizeClass({ 'zt-status-link': (r.status === 'missing' && !r.retryable) || r.status === 'error' }),
-                                  disabled: !__props.enabled,
-                                  onClick: $event => (onStatusTagClick(r))
-                                }, {
-                                  default: _withCtx$2(() => [
-                                    _createTextVNode$2(_toDisplayString$2(statusText(r)), 1)
-                                  ]),
-                                  _: 2
-                                }, 1032, ["color", "title", "class", "disabled", "onClick"])
-                              ]),
-                              append: _withCtx$2(() => [
-                                (r.status === 'success' && r.out_file)
-                                  ? (_openBlock$2(), _createBlock$2(_component_v_btn, {
-                                      key: 0,
-                                      size: "x-small",
-                                      variant: "tonal",
-                                      color: "success",
-                                      class: "mr-1",
-                                      title: "下载结果文件",
-                                      disabled: !__props.enabled || downloadingId.value === r.id,
-                                      loading: downloadingId.value === r.id,
-                                      onClick: $event => (downloadRecord(r))
-                                    }, {
-                                      default: _withCtx$2(() => [
-                                        _createVNode$2(_component_v_icon, {
-                                          start: "",
-                                          size: "14"
-                                        }, {
-                                          default: _withCtx$2(() => [...(_cache[33] || (_cache[33] = [
-                                            _createTextVNode$2("mdi-download", -1)
-                                          ]))]),
-                                          _: 1
-                                        }),
-                                        _cache[34] || (_cache[34] = _createTextVNode$2(" 下载 ", -1))
-                                      ]),
-                                      _: 1
-                                    }, 8, ["disabled", "loading", "onClick"]))
-                                  : _createCommentVNode$2("", true),
-                                _createVNode$2(_component_v_btn, {
-                                  size: "small",
-                                  variant: "text",
-                                  icon: "",
-                                  disabled: !__props.enabled,
-                                  title: "删除该记录",
-                                  onClick: $event => (deleteRecord(r.id))
-                                }, {
-                                  default: _withCtx$2(() => [
-                                    _createVNode$2(_component_v_icon, { size: "16" }, {
-                                      default: _withCtx$2(() => [...(_cache[35] || (_cache[35] = [
-                                        _createTextVNode$2("mdi-close", -1)
-                                      ]))]),
-                                      _: 1
-                                    })
-                                  ]),
-                                  _: 1
-                                }, 8, ["disabled", "onClick"])
-                              ]),
-                              default: _withCtx$2(() => [
-                                _createVNode$2(_component_v_list_item_title, { class: "zt-font-name" }, {
-                                  default: _withCtx$2(() => [
-                                    _createTextVNode$2(_toDisplayString$2(r.file_name), 1)
-                                  ]),
-                                  _: 2
-                                }, 1024),
-                                _createVNode$2(_component_v_list_item_subtitle, { class: "zt-font-meta" }, {
-                                  default: _withCtx$2(() => [
-                                    (r.reason)
-                                      ? (_openBlock$2(), _createElementBlock$2(_Fragment$2, { key: 0 }, [
-                                          _createTextVNode$2(_toDisplayString$2(r.reason), 1)
-                                        ], 64))
-                                      : (r.out_file)
-                                        ? (_openBlock$2(), _createElementBlock$2(_Fragment$2, { key: 1 }, [
-                                            _createTextVNode$2(_toDisplayString$2(r.out_file), 1)
-                                          ], 64))
-                                        : (_openBlock$2(), _createElementBlock$2(_Fragment$2, { key: 2 }, [
-                                            _createTextVNode$2("—")
-                                          ], 64)),
-                                    (r.created_at)
-                                      ? (_openBlock$2(), _createElementBlock$2("span", _hoisted_9$2, _toDisplayString$2(r.created_at), 1))
-                                      : _createCommentVNode$2("", true)
-                                  ]),
-                                  _: 2
-                                }, 1024)
-                              ]),
-                              _: 2
-                            }, 1024))
-                          }), 128))
+                          _createVNode$2(_component_v_icon, {
+                            start: "",
+                            size: "14"
+                          }, {
+                            default: _withCtx$2(() => [...(_cache[38] || (_cache[38] = [
+                              _createTextVNode$2("mdi-download-multiple", -1)
+                            ]))]),
+                            _: 1
+                          }),
+                          _cache[39] || (_cache[39] = _createElementVNode$2("span", { class: "d-none d-sm-inline" }, "全部下载", -1))
                         ]),
                         _: 1
-                      }),
-                      (!recordReachedEnd.value && records.value.length)
-                        ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_10$2, [
-                            _createVNode$2(_component_v_progress_circular, {
-                              indeterminate: "",
-                              size: "18",
-                              color: "primary"
-                            })
-                          ]))
-                        : (recordReachedEnd.value && records.value.length)
-                          ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_11$1, " 已加载全部 "))
+                      }, 8, ["disabled", "loading", "onClick"]),
+                      _createVNode$2(_component_v_btn, {
+                        size: "small",
+                        variant: "text",
+                        icon: "",
+                        disabled: !__props.enabled || groupDeleting.value,
+                        title: "删除本组全部记录（监控/上传的成品一并删除）",
+                        onClick: _withModifiers($event => (askDeleteGroup(g)), ["stop"])
+                      }, {
+                        default: _withCtx$2(() => [
+                          _createVNode$2(_component_v_icon, {
+                            size: "16",
+                            color: "error"
+                          }, {
+                            default: _withCtx$2(() => [...(_cache[40] || (_cache[40] = [
+                              _createTextVNode$2("mdi-close", -1)
+                            ]))]),
+                            _: 1
+                          })
+                        ]),
+                        _: 1
+                      }, 8, ["disabled", "onClick"])
+                    ])
+                  ], 8, _hoisted_10$2),
+                  (g.expanded)
+                    ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_15$1, [
+                        _createVNode$2(_component_v_list, {
+                          density: "compact",
+                          class: "pa-0"
+                        }, {
+                          default: _withCtx$2(() => [
+                            (_openBlock$2(true), _createElementBlock$2(_Fragment$2, null, _renderList$2(g.visibleRecords, (r) => {
+                              return (_openBlock$2(), _createBlock$2(_component_v_list_item, {
+                                key: r.id,
+                                lines: "two"
+                              }, {
+                                prepend: _withCtx$2(() => [
+                                  _createVNode$2(_component_v_chip, {
+                                    color: statusColor(r),
+                                    size: "x-small",
+                                    variant: "tonal",
+                                    title: r.status === 'missing' && !r.retryable ? '缺的字体尚未补齐：点击去「缺失字体」页上传' : (r.status === 'error' ? '处理失败：点击去「缺失字体」页处理' : (r.status === 'missing' && r.retryable ? '缺的字体已入库：点抽屉顶部「重试失败」重新子集化' : '')),
+                                    class: _normalizeClass({ 'zt-status-link': (r.status === 'missing' && !r.retryable) || r.status === 'error' }),
+                                    disabled: !__props.enabled,
+                                    onClick: $event => (onStatusTagClick(r))
+                                  }, {
+                                    default: _withCtx$2(() => [
+                                      _createTextVNode$2(_toDisplayString$2(statusText(r)), 1)
+                                    ]),
+                                    _: 2
+                                  }, 1032, ["color", "title", "class", "disabled", "onClick"])
+                                ]),
+                                append: _withCtx$2(() => [
+                                  (r.status === 'success' && r.out_file)
+                                    ? (_openBlock$2(), _createBlock$2(_component_v_btn, {
+                                        key: 0,
+                                        size: "x-small",
+                                        variant: "tonal",
+                                        color: "success",
+                                        class: "mr-1",
+                                        title: "下载结果文件",
+                                        disabled: !__props.enabled || downloadingId.value === r.id,
+                                        loading: downloadingId.value === r.id,
+                                        onClick: $event => (downloadRecord(r))
+                                      }, {
+                                        default: _withCtx$2(() => [
+                                          _createVNode$2(_component_v_icon, {
+                                            start: "",
+                                            size: "14"
+                                          }, {
+                                            default: _withCtx$2(() => [...(_cache[41] || (_cache[41] = [
+                                              _createTextVNode$2("mdi-download", -1)
+                                            ]))]),
+                                            _: 1
+                                          }),
+                                          _cache[42] || (_cache[42] = _createTextVNode$2(" 下载 ", -1))
+                                        ]),
+                                        _: 1
+                                      }, 8, ["disabled", "loading", "onClick"]))
+                                    : _createCommentVNode$2("", true),
+                                  _createVNode$2(_component_v_btn, {
+                                    size: "small",
+                                    variant: "text",
+                                    icon: "",
+                                    disabled: !__props.enabled,
+                                    title: "删除该记录",
+                                    onClick: $event => (deleteRecord(r.id))
+                                  }, {
+                                    default: _withCtx$2(() => [
+                                      _createVNode$2(_component_v_icon, { size: "16" }, {
+                                        default: _withCtx$2(() => [...(_cache[43] || (_cache[43] = [
+                                          _createTextVNode$2("mdi-close", -1)
+                                        ]))]),
+                                        _: 1
+                                      })
+                                    ]),
+                                    _: 1
+                                  }, 8, ["disabled", "onClick"])
+                                ]),
+                                default: _withCtx$2(() => [
+                                  _createVNode$2(_component_v_list_item_title, { class: "zt-font-name" }, {
+                                    default: _withCtx$2(() => [
+                                      _createTextVNode$2(_toDisplayString$2(r.file_name), 1)
+                                    ]),
+                                    _: 2
+                                  }, 1024),
+                                  _createVNode$2(_component_v_list_item_subtitle, { class: "zt-font-meta" }, {
+                                    default: _withCtx$2(() => [
+                                      (r.reason)
+                                        ? (_openBlock$2(), _createElementBlock$2(_Fragment$2, { key: 0 }, [
+                                            _createTextVNode$2(_toDisplayString$2(r.reason), 1)
+                                          ], 64))
+                                        : (r.out_file)
+                                          ? (_openBlock$2(), _createElementBlock$2(_Fragment$2, { key: 1 }, [
+                                              _createTextVNode$2(_toDisplayString$2(r.out_file), 1)
+                                            ], 64))
+                                          : (_openBlock$2(), _createElementBlock$2(_Fragment$2, { key: 2 }, [
+                                              _createTextVNode$2("—")
+                                            ], 64)),
+                                      (r.created_at)
+                                        ? (_openBlock$2(), _createElementBlock$2("span", _hoisted_16$1, _toDisplayString$2(r.created_at), 1))
+                                        : _createCommentVNode$2("", true)
+                                    ]),
+                                    _: 2
+                                  }, 1024)
+                                ]),
+                                _: 2
+                              }, 1024))
+                            }), 128))
+                          ]),
+                          _: 2
+                        }, 1024),
+                        (g.truncated)
+                          ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_17$1, " 还有 " + _toDisplayString$2(g.records.length - g.visibleRecords.length) + " 条，下拉加载… ", 1))
                           : _createCommentVNode$2("", true)
-                    ], 32))
+                      ]))
+                    : _createCommentVNode$2("", true)
+                ], 2))
+              }), 128)),
+              (hasMoreRecords.value)
+                ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_18$1, [
+                    _createVNode$2(_component_v_progress_circular, {
+                      indeterminate: "",
+                      size: "18",
+                      color: "primary"
+                    })
+                  ]))
+                : _createCommentVNode$2("", true)
+            ], 32)
+          ], 4))
+        : _createCommentVNode$2("", true)
+    ])),
+    _createVNode$2(_component_v_dialog, {
+      modelValue: groupConfirm.value,
+      "onUpdate:modelValue": _cache[8] || (_cache[8] = $event => ((groupConfirm).value = $event)),
+      "max-width": "440"
+    }, {
+      default: _withCtx$2(() => [
+        _createVNode$2(_component_v_card, null, {
+          default: _withCtx$2(() => [
+            _createVNode$2(_component_v_card_title, { class: "text-h6" }, {
+              default: _withCtx$2(() => [
+                _createTextVNode$2("删除「" + _toDisplayString$2(groupTarget.value?.label || '') + "」整组？", 1)
+              ]),
+              _: 1
+            }),
+            _createVNode$2(_component_v_card_text, null, {
+              default: _withCtx$2(() => [
+                _createTextVNode$2(" 将删除本组 " + _toDisplayString$2(groupTarget.value?.records?.length || 0) + " 条子集化记录", 1),
+                (groupTarget.value?.records?.some(r => r.out_file))
+                  ? (_openBlock$2(), _createElementBlock$2(_Fragment$2, { key: 0 }, [
+                      _createTextVNode$2("， 并同步删除监控/上传来历的成品文件（含输出目录中对应文件）")
+                    ], 64))
+                  : _createCommentVNode$2("", true),
+                _cache[44] || (_cache[44] = _createTextVNode$2("。 MP 入库记录只删记录，不动媒体库原字幕；字体库与待处理列表不受影响。 ", -1))
+              ]),
+              _: 1
+            }),
+            _createVNode$2(_component_v_card_actions, null, {
+              default: _withCtx$2(() => [
+                _createVNode$2(_component_v_spacer),
+                _createVNode$2(_component_v_btn, {
+                  variant: "text",
+                  onClick: _cache[7] || (_cache[7] = $event => (groupConfirm.value = false))
+                }, {
+                  default: _withCtx$2(() => [...(_cache[45] || (_cache[45] = [
+                    _createTextVNode$2("取消", -1)
+                  ]))]),
+                  _: 1
+                }),
+                _createVNode$2(_component_v_btn, {
+                  color: "error",
+                  variant: "tonal",
+                  loading: groupDeleting.value,
+                  onClick: confirmDeleteGroup
+                }, {
+                  default: _withCtx$2(() => [...(_cache[46] || (_cache[46] = [
+                    _createTextVNode$2("删除整组", -1)
+                  ]))]),
+                  _: 1
+                }, 8, ["loading"])
               ]),
               _: 1
             })
@@ -1081,23 +1437,23 @@ return (_ctx, _cache) => {
         })
       ]),
       _: 1
-    }),
+    }, 8, ["modelValue"]),
     _createVNode$2(_component_v_dialog, {
       modelValue: clearConfirm.value,
-      "onUpdate:modelValue": _cache[6] || (_cache[6] = $event => ((clearConfirm).value = $event)),
+      "onUpdate:modelValue": _cache[10] || (_cache[10] = $event => ((clearConfirm).value = $event)),
       "max-width": "440"
     }, {
       default: _withCtx$2(() => [
         _createVNode$2(_component_v_card, null, {
           default: _withCtx$2(() => [
             _createVNode$2(_component_v_card_title, { class: "text-h6" }, {
-              default: _withCtx$2(() => [...(_cache[36] || (_cache[36] = [
+              default: _withCtx$2(() => [...(_cache[47] || (_cache[47] = [
                 _createTextVNode$2("清空全部子集化记录？", -1)
               ]))]),
               _: 1
             }),
             _createVNode$2(_component_v_card_text, null, {
-              default: _withCtx$2(() => [...(_cache[37] || (_cache[37] = [
+              default: _withCtx$2(() => [...(_cache[48] || (_cache[48] = [
                 _createTextVNode$2(" 将删除全部子集化结果记录，并同步删除监控/上传来历的成品文件（含输出目录中对应文件与空的剧名文件夹）。 MP 入库记录只删记录，不动媒体库原字幕；「待处理」列表不受影响。 ", -1)
               ]))]),
               _: 1
@@ -1107,9 +1463,9 @@ return (_ctx, _cache) => {
                 _createVNode$2(_component_v_spacer),
                 _createVNode$2(_component_v_btn, {
                   variant: "text",
-                  onClick: _cache[5] || (_cache[5] = $event => (clearConfirm.value = false))
+                  onClick: _cache[9] || (_cache[9] = $event => (clearConfirm.value = false))
                 }, {
-                  default: _withCtx$2(() => [...(_cache[38] || (_cache[38] = [
+                  default: _withCtx$2(() => [...(_cache[49] || (_cache[49] = [
                     _createTextVNode$2("取消", -1)
                   ]))]),
                   _: 1
@@ -1120,7 +1476,7 @@ return (_ctx, _cache) => {
                   loading: clearingRecords.value,
                   onClick: clearRecords
                 }, {
-                  default: _withCtx$2(() => [...(_cache[39] || (_cache[39] = [
+                  default: _withCtx$2(() => [...(_cache[50] || (_cache[50] = [
                     _createTextVNode$2("全部清空", -1)
                   ]))]),
                   _: 1
@@ -1136,20 +1492,20 @@ return (_ctx, _cache) => {
     }, 8, ["modelValue"]),
     _createVNode$2(_component_v_dialog, {
       modelValue: rebuildConfirm.value,
-      "onUpdate:modelValue": _cache[8] || (_cache[8] = $event => ((rebuildConfirm).value = $event)),
+      "onUpdate:modelValue": _cache[12] || (_cache[12] = $event => ((rebuildConfirm).value = $event)),
       "max-width": "440"
     }, {
       default: _withCtx$2(() => [
         _createVNode$2(_component_v_card, null, {
           default: _withCtx$2(() => [
             _createVNode$2(_component_v_card_title, { class: "text-h6" }, {
-              default: _withCtx$2(() => [...(_cache[40] || (_cache[40] = [
+              default: _withCtx$2(() => [...(_cache[51] || (_cache[51] = [
                 _createTextVNode$2("全部重建字体库？", -1)
               ]))]),
               _: 1
             }),
             _createVNode$2(_component_v_card_text, null, {
-              default: _withCtx$2(() => [...(_cache[41] || (_cache[41] = [
+              default: _withCtx$2(() => [...(_cache[52] || (_cache[52] = [
                 _createTextVNode$2(" 将清空现有字体索引，再逐文件重新解析整个字体库（生成 face/别名/字符覆盖）。 日常归档与入库仍是增量/减量，不需要用这里。耗时取决于字体数量，期间检索可能变慢。 人工映射与字幕缺失快照不受影响。 ", -1)
               ]))]),
               _: 1
@@ -1159,9 +1515,9 @@ return (_ctx, _cache) => {
                 _createVNode$2(_component_v_spacer),
                 _createVNode$2(_component_v_btn, {
                   variant: "text",
-                  onClick: _cache[7] || (_cache[7] = $event => (rebuildConfirm.value = false))
+                  onClick: _cache[11] || (_cache[11] = $event => (rebuildConfirm.value = false))
                 }, {
-                  default: _withCtx$2(() => [...(_cache[42] || (_cache[42] = [
+                  default: _withCtx$2(() => [...(_cache[53] || (_cache[53] = [
                     _createTextVNode$2("取消", -1)
                   ]))]),
                   _: 1
@@ -1172,7 +1528,7 @@ return (_ctx, _cache) => {
                   loading: rebuildingIndex.value,
                   onClick: rebuildIndex
                 }, {
-                  default: _withCtx$2(() => [...(_cache[43] || (_cache[43] = [
+                  default: _withCtx$2(() => [...(_cache[54] || (_cache[54] = [
                     _createTextVNode$2("开始重建", -1)
                   ]))]),
                   _: 1
@@ -1191,7 +1547,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const Subset = /*#__PURE__*/_export_sfc(_sfc_main$2, [['__scopeId',"data-v-c6af760d"]]);
+const Subset = /*#__PURE__*/_export_sfc(_sfc_main$2, [['__scopeId',"data-v-af94981d"]]);
 
 const {createTextVNode:_createTextVNode$1,resolveComponent:_resolveComponent$1,withCtx:_withCtx$1,createVNode:_createVNode$1,toDisplayString:_toDisplayString$1,createElementVNode:_createElementVNode$1,openBlock:_openBlock$1,createBlock:_createBlock$1,createCommentVNode:_createCommentVNode$1,renderList:_renderList$1,Fragment:_Fragment$1,createElementBlock:_createElementBlock$1} = await importShared('vue');
 
