@@ -953,7 +953,7 @@ return (_ctx, _cache) => {
                             ]))]),
                             _: 1
                           }),
-                          _cache[26] || (_cache[26] = _createElementVNode$2("span", { class: "d-none d-sm-inline" }, "全部下载", -1))
+                          _cache[26] || (_cache[26] = _createElementVNode$2("span", { class: "zt-act-label" }, "全部下载", -1))
                         ]),
                         _: 1
                       }, 8, ["disabled", "loading"]),
@@ -976,7 +976,7 @@ return (_ctx, _cache) => {
                             ]))]),
                             _: 1
                           }),
-                          _cache[28] || (_cache[28] = _createElementVNode$2("span", { class: "d-none d-sm-inline" }, "重试失败", -1))
+                          _cache[28] || (_cache[28] = _createElementVNode$2("span", { class: "zt-act-label" }, "重试失败", -1))
                         ]),
                         _: 1
                       }, 8, ["disabled", "loading"]),
@@ -999,7 +999,7 @@ return (_ctx, _cache) => {
                             ]))]),
                             _: 1
                           }),
-                          _cache[30] || (_cache[30] = _createElementVNode$2("span", { class: "d-none d-sm-inline" }, "全部清空", -1))
+                          _cache[30] || (_cache[30] = _createElementVNode$2("span", { class: "zt-act-label" }, "全部清空", -1))
                         ]),
                         _: 1
                       }, 8, ["disabled", "loading"])
@@ -1485,7 +1485,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const Subset = /*#__PURE__*/_export_sfc(_sfc_main$2, [['__scopeId',"data-v-245b6307"]]);
+const Subset = /*#__PURE__*/_export_sfc(_sfc_main$2, [['__scopeId',"data-v-5601f6bd"]]);
 
 const {createTextVNode:_createTextVNode$1,resolveComponent:_resolveComponent$1,withCtx:_withCtx$1,createVNode:_createVNode$1,toDisplayString:_toDisplayString$1,createElementVNode:_createElementVNode$1,openBlock:_openBlock$1,createBlock:_createBlock$1,createCommentVNode:_createCommentVNode$1,renderList:_renderList$1,Fragment:_Fragment$1,createElementBlock:_createElementBlock$1} = await importShared('vue');
 

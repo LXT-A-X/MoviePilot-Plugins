@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import hashlib
+import struct
 import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -236,18 +237,147 @@ def _best_name(names: Dict[int, List[tuple]], name_id: int) -> str:
     return items[0][1]
 
 
+def _cmap4_codepoints(data: bytes, off: int) -> Set[int]:
+    """宽松解析 format 4：idRangeOffset 越界的个别条目直接跳过，不整体判失败。"""
+    if off + 14 > len(data):
+        return set()
+    length = struct.unpack(">H", data[off + 2:off + 4])[0]
+    seg = struct.unpack(">H", data[off + 6:off + 8])[0] // 2
+    if seg <= 0:
+        return set()
+    pos = off + 14
+    need = seg * 2
+    if pos + need * 4 + 2 > len(data):
+        return set()
+    ends = struct.unpack(">%dH" % seg, data[pos:pos + need])
+    starts = struct.unpack(">%dH" % seg, data[pos + need + 2:pos + need * 2 + 2])
+    deltas = struct.unpack(">%dh" % seg, data[pos + need * 2 + 2:pos + need * 3 + 2])
+    range_offset_pos = pos + need * 3 + 2
+    offsets = struct.unpack(">%dH" % seg, data[range_offset_pos:range_offset_pos + need])
+    limit = min(len(data), off + length) if length else len(data)
+    result: Set[int] = set()
+    for i in range(seg):
+        start, end = starts[i], ends[i]
+        if start > end or start == 0xFFFF:
+            continue
+        if offsets[i] == 0:
+            for cp in range(start, end + 1):
+                if cp == 0xFFFF:
+                    continue
+                if ((cp + deltas[i]) & 0xFFFF) != 0:
+                    result.add(cp)
+            continue
+        base = range_offset_pos + 2 * i + offsets[i]
+        for cp in range(start, end + 1):
+            if cp == 0xFFFF:
+                continue
+            idx = base + 2 * (cp - start)
+            if idx + 2 > limit:
+                continue
+            gid = struct.unpack(">H", data[idx:idx + 2])[0]
+            if gid and ((gid + deltas[i]) & 0xFFFF) != 0:
+                result.add(cp)
+    return result
+
+
+def _cmap6_codepoints(data: bytes, off: int) -> Set[int]:
+    if off + 10 > len(data):
+        return set()
+    first, count = struct.unpack(">HH", data[off + 6:off + 10])
+    result: Set[int] = set()
+    for i in range(count):
+        pos = off + 10 + 2 * i
+        if pos + 2 > len(data):
+            break
+        if struct.unpack(">H", data[pos:pos + 2])[0]:
+            result.add(first + i)
+    return result
+
+
+def _cmap12_codepoints(data: bytes, off: int) -> Set[int]:
+    if off + 16 > len(data):
+        return set()
+    groups = struct.unpack(">I", data[off + 12:off + 16])[0]
+    result: Set[int] = set()
+    for i in range(min(groups, 0x10000)):
+        rec = off + 16 + i * 12
+        if rec + 12 > len(data):
+            break
+        start, end, glyph = struct.unpack(">III", data[rec:rec + 12])
+        if end < start or end - start > 0x110000:
+            continue
+        for cp in range(start, end + 1):
+            if glyph + (cp - start):
+                result.add(cp)
+    return result
+
+
+def _codepoints_from_raw_cmap(font: Any) -> Set[int]:
+    """兜底：fontTools 的 cmap 严格解析失败时，直接按字节解析 Unicode cmap。
+
+    个别老字体（如华康 DFPop 系列 TTC）format 4 的 idRangeOffset 会指向
+    glyphIdArray 末尾之外一个元素，fontTools 直接断言失败，导致整个字体被判
+    「无 cmap」。这类文件实际只有一两个条目越界，跳过坏条目即可正常取码点。
+    """
+    try:
+        # 必须读原始字节：cmap 一旦被 fontTools 部分加载，getTableData 会尝试重新编译并再次抛错
+        data = font.reader["cmap"] if getattr(font, "reader", None) is not None else b""
+    except Exception:
+        data = b""
+    if not data:
+        try:
+            data = font.getTableData("cmap")
+        except Exception:
+            return set()
+    if not data or len(data) < 4:
+        return set()
+    try:
+        count = struct.unpack(">H", data[2:4])[0]
+    except Exception:
+        return set()
+    result: Set[int] = set()
+    for i in range(min(count, 64)):
+        rec = 4 + i * 8
+        if rec + 8 > len(data):
+            break
+        pid, eid, offset = struct.unpack(">HHI", data[rec:rec + 8])
+        if not (pid == 0 or (pid == 3 and eid in (1, 10))):
+            continue
+        if offset + 2 > len(data):
+            continue
+        fmt = struct.unpack(">H", data[offset:offset + 2])[0]
+        try:
+            if fmt == 4:
+                result.update(_cmap4_codepoints(data, offset))
+            elif fmt == 6:
+                result.update(_cmap6_codepoints(data, offset))
+            elif fmt == 12:
+                result.update(_cmap12_codepoints(data, offset))
+        except Exception:
+            continue
+    return result
+
+
 def _font_codepoints(font: Any) -> Set[int]:
-    """读取 cmap 覆盖的 Unicode 码点；best cmap 失败时合并全部 cmap 子表。"""
+    """读取 cmap 覆盖的 Unicode 码点；best cmap 失败时按字节宽松解析，最后才合并全部子表。"""
     try:
         best = font.getBestCmap()
         if best:
             return {int(cp) for cp in best.keys()}
     except Exception:
         pass
+    # 严格解析失败：先按字节宽松解析 Unicode 子表（跳过越界条目）。
+    # 这一步必须优先于「合并全部 cmap 子表」——后者会把 Mac Roman 等非 Unicode
+    # 子表的字节码（0x00-0xFF）当成码点，既不对又让兜底逻辑失效。
+    raw = _codepoints_from_raw_cmap(font)
+    if raw:
+        return raw
     codepoints: Set[int] = set()
     try:
         for table in font["cmap"].tables:
             try:
+                if int(table.platformID) == 1:  # Mac 编码，不是 Unicode
+                    continue
                 codepoints.update(int(cp) for cp in table.cmap.keys())
             except Exception:
                 continue

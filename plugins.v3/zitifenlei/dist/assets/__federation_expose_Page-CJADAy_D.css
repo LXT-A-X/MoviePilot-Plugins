@@ -1,85 +1,86 @@
 
-.zt-topbar[data-v-245b6307] {
+.zt-topbar[data-v-5601f6bd] {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 16px;
 }
-.zt-list-card[data-v-245b6307] {
+.zt-list-card[data-v-5601f6bd] {
   height: 620px;
   overflow: hidden;
   display: flex;
   flex-direction: column;
 }
-.zt-list-body[data-v-245b6307] {
+.zt-list-body[data-v-5601f6bd] {
   min-height: 60px;
   flex: 1 1 auto;
   overflow-y: auto;
 }
 /* 结果卡片标题行：Vuetify 的 v-card-title 默认 display:block，放 v-spacer + 按钮会掉到第二行。
    PC 上改成单行 flex，按钮与「结果」同排靠右；窄屏时按钮换到下一排。 */
-.zt-card-title-row[data-v-245b6307] {
+.zt-card-title-row[data-v-5601f6bd] {
   display: flex;
   align-items: center;
 }
-.zt-card-title-row .zt-title-text[data-v-245b6307] {
+.zt-card-title-row .zt-title-text[data-v-5601f6bd] {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.zt-title-actions[data-v-245b6307] {
+.zt-title-actions[data-v-5601f6bd] {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 6px;
+  flex-shrink: 0;
 }
 /* 结果区筛选栏：状态下拉 + 搜索框 */
-.zt-filter-row[data-v-245b6307] {
+.zt-filter-row[data-v-5601f6bd] {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 8px 12px;
 }
-.zt-filter-status[data-v-245b6307] {
+.zt-filter-status[data-v-5601f6bd] {
   width: 130px;
   flex-shrink: 0;
 }
-.zt-filter-search[data-v-245b6307] {
+.zt-filter-search[data-v-5601f6bd] {
   flex: 1 1 auto;
   min-width: 120px;
 }
-.zt-record-body[data-v-245b6307] {
+.zt-record-body[data-v-5601f6bd] {
   min-height: 60px;
   flex: 1 1 auto;
   overflow-y: auto;
   padding: 8px;
   overscroll-behavior: contain;
 }
+/* 标题栏：容器变窄时三个操作按钮只留图标并保持靠右，
+   给「结果（N）」留出完整宽度，数字不会被挤掉；宽屏仍显示按钮文字 */
+@media (max-width: 1279.95px) {
+.zt-act-label[data-v-5601f6bd] {
+    display: none;
+}
+}
 @media (max-width: 959.95px) {
-.zt-card-title-row[data-v-245b6307] {
-    flex-wrap: wrap;
-    row-gap: 6px;
-}
-.zt-title-actions[data-v-245b6307] {
-    width: 100%;
-    margin-inline-start: 0 !important;
-}
   /* 手机端不做卡片内滚动：卡片随内容长高，整页由外层统一滚动，避免手指落在列表空白处时整页滑不动 */
-.zt-list-card[data-v-245b6307] {
+.zt-list-card[data-v-5601f6bd] {
     height: auto;
     overflow: visible;
 }
-.zt-list-body[data-v-245b6307],
-  .zt-record-body[data-v-245b6307] {
+.zt-list-body[data-v-5601f6bd],
+  .zt-record-body[data-v-5601f6bd] {
     overflow-y: visible;
     overscroll-behavior: auto;
 }
 }
 
 /* ===== 分组抽屉：组头按状态着色，点击折叠/展开 ===== */
-.zt-group[data-v-245b6307] {
+.zt-group[data-v-5601f6bd] {
   --zt-group-color: 158, 158, 158;
   margin-bottom: 8px;
   border: 1px solid rgba(var(--zt-group-color), 0.35);
@@ -88,15 +89,15 @@
   background: rgba(var(--zt-group-color), 0.06);
   overflow: hidden;
 }
-.zt-group-success[data-v-245b6307] { --zt-group-color: 76, 175, 80;
+.zt-group-success[data-v-5601f6bd] { --zt-group-color: 76, 175, 80;
 }
-.zt-group-warning[data-v-245b6307] { --zt-group-color: 255, 152, 0;
+.zt-group-warning[data-v-5601f6bd] { --zt-group-color: 255, 152, 0;
 }
-.zt-group-error[data-v-245b6307]   { --zt-group-color: 244, 67, 54;
+.zt-group-error[data-v-5601f6bd]   { --zt-group-color: 244, 67, 54;
 }
-.zt-group-grey[data-v-245b6307]    { --zt-group-color: 158, 158, 158;
+.zt-group-grey[data-v-5601f6bd]    { --zt-group-color: 158, 158, 158;
 }
-.zt-group-head[data-v-245b6307] {
+.zt-group-head[data-v-5601f6bd] {
   display: flex;
   align-items: center;
   gap: 4px;
@@ -104,10 +105,10 @@
   cursor: pointer;
   user-select: none;
 }
-.zt-group-head[data-v-245b6307]:hover {
+.zt-group-head[data-v-5601f6bd]:hover {
   background: rgba(var(--zt-group-color), 0.1);
 }
-.zt-group-name[data-v-245b6307] {
+.zt-group-name[data-v-5601f6bd] {
   flex: 1 1 auto;
   min-width: 0;
   font-size: 13.5px;
@@ -116,64 +117,64 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.zt-group-count[data-v-245b6307] {
+.zt-group-count[data-v-5601f6bd] {
   flex: 0 0 auto;
   font-size: 12px;
   opacity: 0.65;
 }
-.zt-group-stats[data-v-245b6307],
-.zt-group-actions[data-v-245b6307] {
+.zt-group-stats[data-v-5601f6bd],
+.zt-group-actions[data-v-5601f6bd] {
   display: inline-flex;
   align-items: center;
   gap: 4px;
   flex: 0 0 auto;
 }
-.zt-group-body[data-v-245b6307] {
+.zt-group-body[data-v-5601f6bd] {
   border-top: 1px dashed rgba(var(--zt-group-color), 0.3);
   padding: 2px 4px;
 }
 /* 右栏只有半屏宽：窄屏时组内状态计数收起，避免组头挤成两行 */
 @media (max-width: 959.95px) {
-.zt-group-stats[data-v-245b6307] { display: none;
+.zt-group-stats[data-v-5601f6bd] { display: none;
 }
 }
-.zt-loading-more[data-v-245b6307] {
+.zt-loading-more[data-v-5601f6bd] {
   font-size: 12px;
   opacity: 0.7;
 }
-.zt-card-title[data-v-245b6307] {
+.zt-card-title[data-v-5601f6bd] {
   font-size: 15px;
   font-weight: 600;
 }
-.zt-empty[data-v-245b6307] {
+.zt-empty[data-v-5601f6bd] {
   font-size: 13px;
   opacity: 0.6;
   text-align: center;
   line-height: 1.8;
 }
-.zt-empty-sub[data-v-245b6307] {
+.zt-empty-sub[data-v-5601f6bd] {
   font-size: 12px;
   opacity: 0.55;
 }
-.zt-font-name[data-v-245b6307] {
+.zt-font-name[data-v-5601f6bd] {
   font-size: 14px;
   font-weight: 500;
 }
 /* 缺字体/失败状态标签可点击（跳缺失字体页）：手型 + 虚线提示 */
-.zt-status-link[data-v-245b6307] {
+.zt-status-link[data-v-5601f6bd] {
   cursor: pointer;
   text-decoration: underline dashed;
   text-underline-offset: 2px;
 }
-.zt-status-link[data-v-245b6307]:hover {
+.zt-status-link[data-v-5601f6bd]:hover {
   filter: brightness(1.15);
 }
-.zt-font-meta[data-v-245b6307] {
+.zt-font-meta[data-v-5601f6bd] {
   font-size: 12px;
   opacity: 0.7;
   word-break: break-all;
 }
-.zt-status-hint[data-v-245b6307] {
+.zt-status-hint[data-v-5601f6bd] {
   opacity: 0.75;
   white-space: nowrap;
 }

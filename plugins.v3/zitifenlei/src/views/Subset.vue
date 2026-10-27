@@ -728,7 +728,7 @@ function stopPolling() {
                 @click="downloadAll"
               >
                 <v-icon start size="15">mdi-download-multiple</v-icon>
-                <span class="d-none d-sm-inline">全部下载</span>
+                <span class="zt-act-label">全部下载</span>
               </v-btn>
               <v-btn
                 size="small" variant="tonal" color="warning"
@@ -738,7 +738,7 @@ function stopPolling() {
                 @click="retryFailed"
               >
                 <v-icon start size="15">mdi-refresh</v-icon>
-                <span class="d-none d-sm-inline">重试失败</span>
+                <span class="zt-act-label">重试失败</span>
               </v-btn>
               <v-btn
                 size="small" variant="tonal" color="error"
@@ -748,7 +748,7 @@ function stopPolling() {
                 @click="clearConfirm = true"
               >
                 <v-icon start size="15">mdi-delete-sweep</v-icon>
-                <span class="d-none d-sm-inline">全部清空</span>
+                <span class="zt-act-label">全部清空</span>
               </v-btn>
             </div>
           </v-card-title>
@@ -953,6 +953,7 @@ function stopPolling() {
   align-items: center;
 }
 .zt-card-title-row .zt-title-text {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -963,6 +964,7 @@ function stopPolling() {
   align-items: center;
   flex-wrap: wrap;
   gap: 6px;
+  flex-shrink: 0;
 }
 /* 结果区筛选栏：状态下拉 + 搜索框 */
 .zt-filter-row {
@@ -986,15 +988,14 @@ function stopPolling() {
   padding: 8px;
   overscroll-behavior: contain;
 }
+/* 标题栏：容器变窄时三个操作按钮只留图标并保持靠右，
+   给「结果（N）」留出完整宽度，数字不会被挤掉；宽屏仍显示按钮文字 */
+@media (max-width: 1279.95px) {
+  .zt-act-label {
+    display: none;
+  }
+}
 @media (max-width: 959.95px) {
-  .zt-card-title-row {
-    flex-wrap: wrap;
-    row-gap: 6px;
-  }
-  .zt-title-actions {
-    width: 100%;
-    margin-inline-start: 0 !important;
-  }
   /* 手机端不做卡片内滚动：卡片随内容长高，整页由外层统一滚动，避免手指落在列表空白处时整页滑不动 */
   .zt-list-card {
     height: auto;
