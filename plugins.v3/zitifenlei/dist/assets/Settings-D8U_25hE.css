@@ -453,42 +453,42 @@
   max-width: 100%;
 }
 
-.zt-card-title[data-v-d857c06d] {
+.zt-card-title[data-v-bb7cd065] {
   font-size: 15px;
   font-weight: 600;
 }
 /* 插件停用时：其他配置黑化且不可点击 */
-.zt-disabled-zone.is-off[data-v-d857c06d] {
+.zt-disabled-zone.is-off[data-v-bb7cd065] {
   pointer-events: none;
   opacity: 0.45;
   filter: grayscale(0.9);
 }
-.zt-option-label[data-v-d857c06d] {
+.zt-option-label[data-v-bb7cd065] {
   font-size: 13px;
   color: inherit;
   opacity: 0.8;
 }
-.zt-radio-title[data-v-d857c06d] {
+.zt-radio-title[data-v-bb7cd065] {
   font-size: 13px;
 }
-.zt-radio-desc[data-v-d857c06d] {
+.zt-radio-desc[data-v-bb7cd065] {
   font-size: 12px;
   opacity: 0.65;
 }
-.zt-switch-row[data-v-d857c06d] {
+.zt-switch-row[data-v-bb7cd065] {
   display: flex;
   align-items: center;
   padding: 8px 0;
 }
-.zt-switch-title[data-v-d857c06d] {
+.zt-switch-title[data-v-bb7cd065] {
   font-size: 14px;
   font-weight: 500;
 }
-.zt-switch-desc[data-v-d857c06d] {
+.zt-switch-desc[data-v-bb7cd065] {
   font-size: 12px;
   opacity: 0.7;
 }
-.zt-hint[data-v-d857c06d] {
+.zt-hint[data-v-bb7cd065] {
   font-size: 12px;
   opacity: 0.6;
   margin-top: 8px;

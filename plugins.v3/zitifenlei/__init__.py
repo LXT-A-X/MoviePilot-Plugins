@@ -208,6 +208,8 @@ _DEFAULT_CONFIG = {
     "torrent_delay_sec": 60,
     # 字幕入库子集化前的最长等待（秒）：超时照常子集，缺字记入结果可重试
     "torrent_wait_sec": 300,
+    # 兜底扫描间隔（分钟）：定时任务每分钟唤醒一次，到点才真正扫描下载器
+    "torrent_scan_interval_min": 30,
     # 压缩包/路径关键词（逗号分隔）：只对压缩包生效，裸字体文件不看关键词
     "torrent_keywords": "font,fonts,字体",
     # 单文件上限（MB）与单种子最多截取文件数
@@ -425,7 +427,7 @@ class Zitifenlei(_PluginBase):
     plugin_name = "字体分类管家"
     plugin_desc = "字体归档整理与 ASS 字幕字体检查插件：扫描/上传字体到字体库，检查字幕缺失字体。"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/zitifenlei.png"
-    plugin_version = "3.1.8"
+    plugin_version = "3.1.9"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "zitifenlei_"
@@ -1009,7 +1011,8 @@ class Zitifenlei(_PluginBase):
                     "kwargs": {"day_of_week": "sun", "hour": 4, "minute": 30},
                 }
             ]
-        # 种子字体收集兜底：总开关开启才注册，每 30 分钟扫一次「基线之后完成」的种子
+        # 种子字体收集兜底：总开关开启才注册；每分钟唤醒一次，
+        # 由 _torrent_poll_task 按「扫描间隔」配置决定是否真正扫描
         try:
             if self._torrent_enabled():
                 jobs.append(
@@ -1018,7 +1021,7 @@ class Zitifenlei(_PluginBase):
                         "name": "种子字体收集兜底扫描",
                         "trigger": "cron",
                         "func": self._torrent_poll_task,
-                        "kwargs": {"minute": "*/30"},
+                        "kwargs": {"minute": "*"},
                     }
                 )
         except Exception:
@@ -3810,13 +3813,33 @@ class Zitifenlei(_PluginBase):
             "errors": errors,
         }
 
+    def _torrent_scan_interval_sec(self) -> int:
+        """兜底扫描间隔（秒）：配置项 torrent_scan_interval_min，限制在 1~1440 分钟。"""
+        return max(1, min(1440, self._torrent_cfg_int("torrent_scan_interval_min", 30))) * 60
+
     def _torrent_poll_task(self) -> None:
-        """定时兜底：扫描下载器已完成种子（只处理基线之后的）。"""
+        """定时兜底：按「扫描间隔」扫描下载器已完成种子（只处理基线之后的）。
+
+        任务本身每分钟唤醒一次，未到间隔直接返回，因此改间隔保存后即时生效。
+        """
         if not self._torrent_enabled():
+            return
+        now = int(time.time())
+        try:
+            last = int(self._db.get_setting("torrent_last_scan_ts", 0) or 0) if self._db else 0
+        except Exception:
+            last = 0
+        if last > 0 and now - last < self._torrent_scan_interval_sec():
             return
         if not self._torrent_poll_lock.acquire(blocking=False):
             return
         try:
+            # 先落时间戳：扫描异常也按间隔重试，避免每分钟刷一次错误
+            try:
+                if self._db:
+                    self._db.set_setting("torrent_last_scan_ts", now)
+            except Exception:
+                pass
             res = self._torrent_scan("", 0)
             if res.get("queued"):
                 try:
@@ -8107,6 +8130,12 @@ class Zitifenlei(_PluginBase):
         except Exception:
             hours = 0
         res = self._torrent_scan(downloader, hours)
+        # 手动扫过就算本轮的起点，避免定时任务马上再扫一遍
+        try:
+            if self._db:
+                self._db.set_setting("torrent_last_scan_ts", int(time.time()))
+        except Exception:
+            pass
         msg = (
             f"扫描 {res.get('scanned', 0)} 个已完成种子，入队 {res.get('queued', 0)} 个"
             f"（跳过历史 {res.get('skipped', 0)} 个）"

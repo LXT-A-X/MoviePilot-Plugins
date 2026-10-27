@@ -3955,10 +3955,11 @@ const DEFAULT_CONFIG = {
   subset_out_mode: 'copy',
   hdr_brightness: false,
   hdr_brightness_level: '',
-  // 种子字体收集：总开关 + 等待秒数 + 关键词/上限 + 收集去向
+  // 种子字体收集：总开关 + 等待秒数 + 兜底扫描间隔 + 关键词/上限 + 收集去向
   torrent_enabled: false,
   torrent_delay_sec: 60,
   torrent_wait_sec: 300,
+  torrent_scan_interval_min: 30,
   torrent_keywords: 'font,fonts,字体',
   torrent_max_file_mb: 2048,
   torrent_max_files: 500,
@@ -4031,6 +4032,7 @@ async function save() {
     };
     config.value.torrent_delay_sec = normInt(config.value.torrent_delay_sec, 60, 0, 3600);
     config.value.torrent_wait_sec = normInt(config.value.torrent_wait_sec, 300, 0, 3600);
+    config.value.torrent_scan_interval_min = normInt(config.value.torrent_scan_interval_min, 30, 1, 1440);
     config.value.torrent_max_file_mb = normInt(config.value.torrent_max_file_mb, 2048, 1, 40960);
     config.value.torrent_max_files = normInt(config.value.torrent_max_files, 500, 1, 5000);
     if (typeof props.api?.post === 'function') {
@@ -4210,19 +4212,19 @@ return (_ctx, _cache) => {
               size: "18",
               color: config.value.enabled ? 'success' : 'error'
             }, {
-              default: _withCtx(() => [...(_cache[32] || (_cache[32] = [
+              default: _withCtx(() => [...(_cache[33] || (_cache[33] = [
                 _createTextVNode("mdi-power", -1)
               ]))]),
               _: 1
             }, 8, ["color"]),
-            _cache[33] || (_cache[33] = _createTextVNode(" 插件总开关 ", -1))
+            _cache[34] || (_cache[34] = _createTextVNode(" 插件总开关 ", -1))
           ]),
           _: 1
         }),
         _createVNode(_component_v_card_text, null, {
           default: _withCtx(() => [
             _createElementVNode("div", _hoisted_2, [
-              _cache[34] || (_cache[34] = _createElementVNode("div", { class: "flex-grow-1" }, [
+              _cache[35] || (_cache[35] = _createElementVNode("div", { class: "flex-grow-1" }, [
                 _createElementVNode("div", { class: "zt-switch-title" }, "启用字体分类管家"),
                 _createElementVNode("div", { class: "zt-switch-desc" }, "关闭后插件所有功能不可用、后台定时任务停止，保存配置后生效")
               ], -1)),
@@ -4241,7 +4243,7 @@ return (_ctx, _cache) => {
                   density: "compact",
                   class: "mt-2"
                 }, {
-                  default: _withCtx(() => [...(_cache[35] || (_cache[35] = [
+                  default: _withCtx(() => [...(_cache[36] || (_cache[36] = [
                     _createTextVNode(" 插件已停用：其他页面将不可操作，仅可在本页重新开启。 ", -1)
                   ]))]),
                   _: 1
@@ -4264,12 +4266,12 @@ return (_ctx, _cache) => {
                 start: "",
                 size: "18"
               }, {
-                default: _withCtx(() => [...(_cache[36] || (_cache[36] = [
+                default: _withCtx(() => [...(_cache[37] || (_cache[37] = [
                   _createTextVNode("mdi-folder-cog-outline", -1)
                 ]))]),
                 _: 1
               }),
-              _cache[37] || (_cache[37] = _createTextVNode(" 目录配置 ", -1))
+              _cache[38] || (_cache[38] = _createTextVNode(" 目录配置 ", -1))
             ]),
             _: 1
           }),
@@ -4354,19 +4356,19 @@ return (_ctx, _cache) => {
                 start: "",
                 size: "18"
               }, {
-                default: _withCtx(() => [...(_cache[38] || (_cache[38] = [
+                default: _withCtx(() => [...(_cache[39] || (_cache[39] = [
                   _createTextVNode("mdi-tune-variant", -1)
                 ]))]),
                 _: 1
               }),
-              _cache[39] || (_cache[39] = _createTextVNode(" 归档设置 ", -1))
+              _cache[40] || (_cache[40] = _createTextVNode(" 归档设置 ", -1))
             ]),
             _: 1
           }),
           _createVNode(_component_v_card_text, null, {
             default: _withCtx(() => [
-              _cache[42] || (_cache[42] = _createElementVNode("div", { class: "zt-hint mb-3" }, "字体元数据统一由 fontTools 读取字体内部（名称 / 别名 / 字符覆盖），不再提供「文件名解析」模式。", -1)),
-              _cache[43] || (_cache[43] = _createElementVNode("div", { class: "zt-option-label mb-1 mt-2" }, "归档模式", -1)),
+              _cache[43] || (_cache[43] = _createElementVNode("div", { class: "zt-hint mb-3" }, "字体元数据统一由 fontTools 读取字体内部（名称 / 别名 / 字符覆盖），不再提供「文件名解析」模式。", -1)),
+              _cache[44] || (_cache[44] = _createElementVNode("div", { class: "zt-option-label mb-1 mt-2" }, "归档模式", -1)),
               _createVNode(_component_v_radio_group, {
                 modelValue: config.value.archive_mode,
                 "onUpdate:modelValue": _cache[6] || (_cache[6] = $event => ((config.value.archive_mode) = $event)),
@@ -4392,7 +4394,7 @@ return (_ctx, _cache) => {
                 _: 1
               }, 8, ["modelValue"]),
               _createElementVNode("div", _hoisted_5, [
-                _cache[40] || (_cache[40] = _createElementVNode("div", { class: "flex-grow-1" }, [
+                _cache[41] || (_cache[41] = _createElementVNode("div", { class: "flex-grow-1" }, [
                   _createElementVNode("div", { class: "zt-switch-title" }, "移动归档时删除重复源文件"),
                   _createElementVNode("div", { class: "zt-switch-desc" }, "仅作用于「移动原文件」模式：字体库已有同名字体、判重跳过时，自动删除监控目录里残留的重复源文件；复制模式不受影响（源文件本就保留）")
                 ], -1)),
@@ -4404,7 +4406,7 @@ return (_ctx, _cache) => {
                 }, null, 8, ["modelValue"])
               ]),
               _createElementVNode("div", _hoisted_6, [
-                _cache[41] || (_cache[41] = _createElementVNode("div", { class: "flex-grow-1" }, [
+                _cache[42] || (_cache[42] = _createElementVNode("div", { class: "flex-grow-1" }, [
                   _createElementVNode("div", { class: "zt-switch-title" }, "利用字体内部名称命名"),
                   _createElementVNode("div", { class: "zt-switch-desc" }, "开：归档时用字体内部的 PostScript 名命名（如 SourceHanSansCN-Bold）；关：保持原名（文件名）不变")
                 ], -1)),
@@ -4443,19 +4445,19 @@ return (_ctx, _cache) => {
                 start: "",
                 size: "18"
               }, {
-                default: _withCtx(() => [...(_cache[44] || (_cache[44] = [
+                default: _withCtx(() => [...(_cache[45] || (_cache[45] = [
                   _createTextVNode("mdi-cog-refresh-outline", -1)
                 ]))]),
                 _: 1
               }),
-              _cache[45] || (_cache[45] = _createTextVNode(" 自动化设置 ", -1))
+              _cache[46] || (_cache[46] = _createTextVNode(" 自动化设置 ", -1))
             ]),
             _: 1
           }),
           _createVNode(_component_v_card_text, null, {
             default: _withCtx(() => [
               _createElementVNode("div", _hoisted_7, [
-                _cache[46] || (_cache[46] = _createElementVNode("div", { class: "flex-grow-1" }, [
+                _cache[47] || (_cache[47] = _createElementVNode("div", { class: "flex-grow-1" }, [
                   _createElementVNode("div", { class: "zt-switch-title" }, "是否启用监控"),
                   _createElementVNode("div", { class: "zt-switch-desc" }, "总开关：统一控制「字体监控目录」「ASS 字幕检查目录」「ASS 自动子集化目录」三个目录的监控启停；关闭则三个目录都不监控")
                 ], -1)),
@@ -4467,7 +4469,7 @@ return (_ctx, _cache) => {
                 }, null, 8, ["modelValue"])
               ]),
               _createElementVNode("div", _hoisted_8, [
-                _cache[47] || (_cache[47] = _createElementVNode("div", { class: "flex-grow-1" }, [
+                _cache[48] || (_cache[48] = _createElementVNode("div", { class: "flex-grow-1" }, [
                   _createElementVNode("div", { class: "zt-switch-title" }, "是否自动执行监控结果"),
                   _createElementVNode("div", { class: "zt-switch-desc" }, "开：监控到新东西直接执行——字体直接归档、字幕直接检查、子集化直接运行；关：待定——字体进待确认、检查进待检查、子集化进待处理，等手动处理")
                 ], -1)),
@@ -4479,7 +4481,7 @@ return (_ctx, _cache) => {
                 }, null, 8, ["modelValue"])
               ]),
               _createElementVNode("div", _hoisted_9, [
-                _cache[48] || (_cache[48] = _createElementVNode("div", { class: "flex-grow-1" }, [
+                _cache[49] || (_cache[49] = _createElementVNode("div", { class: "flex-grow-1" }, [
                   _createElementVNode("div", { class: "zt-switch-title" }, "启动轻检"),
                   _createElementVNode("div", { class: "zt-switch-desc" }, "插件启动时只按文件大小/修改时间校验索引：磁盘已删除的撤销索引、变更的只重解析该文件、磁盘有而索引没有的新字体一并补索引；索引为空（新装/换库/升级）则自动从磁盘重建字体库。不做全量解析，不拖慢启动")
                 ], -1)),
@@ -4491,7 +4493,7 @@ return (_ctx, _cache) => {
                 }, null, 8, ["modelValue"])
               ]),
               _createElementVNode("div", _hoisted_10, [
-                _cache[49] || (_cache[49] = _createElementVNode("div", { class: "flex-grow-1" }, [
+                _cache[50] || (_cache[50] = _createElementVNode("div", { class: "flex-grow-1" }, [
                   _createElementVNode("div", { class: "zt-switch-title" }, "每周差异核对"),
                   _createElementVNode("div", { class: "zt-switch-desc" }, "每周日凌晨 4:30 与磁盘指纹比对一次索引，只重解析差异文件并清理失效记录，另抽检 50 个「未变」文件重算哈希（发现同大小同时间戳的内容替换）；按既定策略默认开启（保存后需重载插件生效）")
                 ], -1)),
@@ -4503,7 +4505,7 @@ return (_ctx, _cache) => {
                 }, null, 8, ["modelValue"])
               ]),
               _createElementVNode("div", _hoisted_11, [
-                _cache[50] || (_cache[50] = _createElementVNode("div", { class: "flex-grow-1" }, [
+                _cache[51] || (_cache[51] = _createElementVNode("div", { class: "flex-grow-1" }, [
                   _createElementVNode("div", { class: "zt-switch-title" }, "入库自动检查字幕"),
                   _createElementVNode("div", { class: "zt-switch-desc" }, "MP 转存完成（整理入库）时自动扫描该剧 ASS 字幕并检查字体，汇总通知（与「入库后自动子集化」互斥，同时只能开一个）")
                 ], -1)),
@@ -4515,7 +4517,7 @@ return (_ctx, _cache) => {
                 }, null, 8, ["modelValue"])
               ]),
               _createElementVNode("div", _hoisted_12, [
-                _cache[51] || (_cache[51] = _createElementVNode("div", { class: "flex-grow-1" }, [
+                _cache[52] || (_cache[52] = _createElementVNode("div", { class: "flex-grow-1" }, [
                   _createElementVNode("div", { class: "zt-switch-title" }, "发送通知"),
                   _createElementVNode("div", { class: "zt-switch-desc" }, "归档/检查完成时通过系统通知发送结果")
                 ], -1)),
@@ -4540,21 +4542,21 @@ return (_ctx, _cache) => {
                 start: "",
                 size: "18"
               }, {
-                default: _withCtx(() => [...(_cache[52] || (_cache[52] = [
+                default: _withCtx(() => [...(_cache[53] || (_cache[53] = [
                   _createTextVNode("mdi-download-box-outline", -1)
                 ]))]),
                 _: 1
               }),
-              _cache[53] || (_cache[53] = _createTextVNode(" 种子字体收集 ", -1))
+              _cache[54] || (_cache[54] = _createTextVNode(" 种子字体收集 ", -1))
             ]),
             _: 1
           }),
           _createVNode(_component_v_card_text, null, {
             default: _withCtx(() => [
               _createElementVNode("div", _hoisted_13, [
-                _cache[54] || (_cache[54] = _createElementVNode("div", { class: "flex-grow-1" }, [
+                _cache[55] || (_cache[55] = _createElementVNode("div", { class: "flex-grow-1" }, [
                   _createElementVNode("div", { class: "zt-switch-title" }, "启用种子字体收集"),
-                  _createElementVNode("div", { class: "zt-switch-desc" }, "只读下载器：从下载完成的种子里按文件清单截取字体（不扫描下载目录、不改下载优先级、不删任何源文件）。开启后自动包含「字幕入库前收集闸门 + 整理完成兜底 + 每 30 分钟兜底扫描」，要停就关这个总开关")
+                  _createElementVNode("div", { class: "zt-switch-desc" }, "只读下载器：从下载完成的种子里按文件清单截取字体（不扫描下载目录、不改下载优先级、不删任何源文件）。开启后自动包含「字幕入库前收集闸门 + 整理完成兜底 + 按设定间隔的兜底扫描」，要停就关这个总开关")
                 ], -1)),
                 _createVNode(_component_v_switch, {
                   modelValue: config.value.torrent_enabled,
@@ -4570,12 +4572,33 @@ return (_ctx, _cache) => {
                 default: _withCtx(() => [
                   _createVNode(_component_v_col, {
                     cols: "12",
-                    sm: "6"
+                    sm: "4"
+                  }, {
+                    default: _withCtx(() => [
+                      _createVNode(_component_v_text_field, {
+                        modelValue: config.value.torrent_scan_interval_min,
+                        "onUpdate:modelValue": _cache[17] || (_cache[17] = $event => ((config.value.torrent_scan_interval_min) = $event)),
+                        modelModifiers: { number: true },
+                        type: "number",
+                        min: "1",
+                        max: "1440",
+                        label: "兜底扫描间隔（分钟）",
+                        density: "compact",
+                        variant: "outlined",
+                        hint: "定时任务每分钟唤醒、到点才扫下载器；改完保存即时生效，太小会增加下载器查询频率",
+                        "persistent-hint": ""
+                      }, null, 8, ["modelValue"])
+                    ]),
+                    _: 1
+                  }),
+                  _createVNode(_component_v_col, {
+                    cols: "12",
+                    sm: "4"
                   }, {
                     default: _withCtx(() => [
                       _createVNode(_component_v_text_field, {
                         modelValue: config.value.torrent_delay_sec,
-                        "onUpdate:modelValue": _cache[17] || (_cache[17] = $event => ((config.value.torrent_delay_sec) = $event)),
+                        "onUpdate:modelValue": _cache[18] || (_cache[18] = $event => ((config.value.torrent_delay_sec) = $event)),
                         modelModifiers: { number: true },
                         type: "number",
                         min: "0",
@@ -4591,12 +4614,12 @@ return (_ctx, _cache) => {
                   }),
                   _createVNode(_component_v_col, {
                     cols: "12",
-                    sm: "6"
+                    sm: "4"
                   }, {
                     default: _withCtx(() => [
                       _createVNode(_component_v_text_field, {
                         modelValue: config.value.torrent_wait_sec,
-                        "onUpdate:modelValue": _cache[18] || (_cache[18] = $event => ((config.value.torrent_wait_sec) = $event)),
+                        "onUpdate:modelValue": _cache[19] || (_cache[19] = $event => ((config.value.torrent_wait_sec) = $event)),
                         modelModifiers: { number: true },
                         type: "number",
                         min: "0",
@@ -4625,7 +4648,7 @@ return (_ctx, _cache) => {
                     default: _withCtx(() => [
                       _createVNode(_component_v_text_field, {
                         modelValue: config.value.torrent_keywords,
-                        "onUpdate:modelValue": _cache[19] || (_cache[19] = $event => ((config.value.torrent_keywords) = $event)),
+                        "onUpdate:modelValue": _cache[20] || (_cache[20] = $event => ((config.value.torrent_keywords) = $event)),
                         label: "关键词（逗号分隔）",
                         density: "compact",
                         variant: "outlined",
@@ -4642,7 +4665,7 @@ return (_ctx, _cache) => {
                     default: _withCtx(() => [
                       _createVNode(_component_v_text_field, {
                         modelValue: config.value.torrent_max_file_mb,
-                        "onUpdate:modelValue": _cache[20] || (_cache[20] = $event => ((config.value.torrent_max_file_mb) = $event)),
+                        "onUpdate:modelValue": _cache[21] || (_cache[21] = $event => ((config.value.torrent_max_file_mb) = $event)),
                         modelModifiers: { number: true },
                         type: "number",
                         min: "1",
@@ -4662,7 +4685,7 @@ return (_ctx, _cache) => {
                     default: _withCtx(() => [
                       _createVNode(_component_v_text_field, {
                         modelValue: config.value.torrent_max_files,
-                        "onUpdate:modelValue": _cache[21] || (_cache[21] = $event => ((config.value.torrent_max_files) = $event)),
+                        "onUpdate:modelValue": _cache[22] || (_cache[22] = $event => ((config.value.torrent_max_files) = $event)),
                         modelModifiers: { number: true },
                         type: "number",
                         min: "1",
@@ -4679,22 +4702,22 @@ return (_ctx, _cache) => {
                 _: 1
               }),
               _createElementVNode("div", _hoisted_14, [
-                _cache[55] || (_cache[55] = _createElementVNode("div", { class: "flex-grow-1" }, [
+                _cache[56] || (_cache[56] = _createElementVNode("div", { class: "flex-grow-1" }, [
                   _createElementVNode("div", { class: "zt-switch-title" }, "收集后进「待整理」"),
                   _createElementVNode("div", { class: "zt-switch-desc" }, "开：截取到的字体先进待整理等你确认；关：直接归档进字体库（默认，走哈希去重与厂商归档）")
                 ], -1)),
                 _createVNode(_component_v_switch, {
                   modelValue: config.value.torrent_to_pending,
-                  "onUpdate:modelValue": _cache[22] || (_cache[22] = $event => ((config.value.torrent_to_pending) = $event)),
+                  "onUpdate:modelValue": _cache[23] || (_cache[23] = $event => ((config.value.torrent_to_pending) = $event)),
                   color: "primary",
                   "hide-details": ""
                 }, null, 8, ["modelValue"])
               ]),
               _createElementVNode("div", _hoisted_15, [
                 _createTextVNode(" 下载器：" + _toDisplayString(torrentDownloaderText.value), 1),
-                _cache[56] || (_cache[56] = _createElementVNode("br", null, null, -1)),
-                _createTextVNode(" 解压能力：" + _toDisplayString(torrentToolText.value) + "（7z/rar 需容器内安装 p7zip/unar，未装时只解 zip）", 1),
                 _cache[57] || (_cache[57] = _createElementVNode("br", null, null, -1)),
+                _createTextVNode(" 解压能力：" + _toDisplayString(torrentToolText.value) + "（7z/rar 需容器内安装 p7zip/unar，未装时只解 zip）", 1),
+                _cache[58] || (_cache[58] = _createElementVNode("br", null, null, -1)),
                 _createTextVNode(" 基线：" + _toDisplayString(torrentStatus.value.baseline_text || '未设置') + "（只处理基线之后完成的种子，历史不碰）", 1),
                 (torrentStatus.value.running)
                   ? (_openBlock(), _createElementBlock("span", _hoisted_16, " · 正在收集 " + _toDisplayString(torrentStatus.value.running) + " 个", 1))
@@ -4714,12 +4737,12 @@ return (_ctx, _cache) => {
                       start: "",
                       size: "16"
                     }, {
-                      default: _withCtx(() => [...(_cache[58] || (_cache[58] = [
+                      default: _withCtx(() => [...(_cache[59] || (_cache[59] = [
                         _createTextVNode("mdi-magnify-scan", -1)
                       ]))]),
                       _: 1
                     }),
-                    _cache[59] || (_cache[59] = _createTextVNode(" 立即检查下载器 ", -1))
+                    _cache[60] || (_cache[60] = _createTextVNode(" 立即检查下载器 ", -1))
                   ]),
                   _: 1
                 }, 8, ["loading", "disabled"]),
@@ -4733,12 +4756,12 @@ return (_ctx, _cache) => {
                       start: "",
                       size: "16"
                     }, {
-                      default: _withCtx(() => [...(_cache[60] || (_cache[60] = [
+                      default: _withCtx(() => [...(_cache[61] || (_cache[61] = [
                         _createTextVNode("mdi-clock-outline", -1)
                       ]))]),
                       _: 1
                     }),
-                    _cache[61] || (_cache[61] = _createTextVNode(" 重置基线为现在 ", -1))
+                    _cache[62] || (_cache[62] = _createTextVNode(" 重置基线为现在 ", -1))
                   ]),
                   _: 1
                 }),
@@ -4755,19 +4778,19 @@ return (_ctx, _cache) => {
                       start: "",
                       size: "16"
                     }, {
-                      default: _withCtx(() => [...(_cache[62] || (_cache[62] = [
+                      default: _withCtx(() => [...(_cache[63] || (_cache[63] = [
                         _createTextVNode("mdi-delete-sweep", -1)
                       ]))]),
                       _: 1
                     }),
-                    _cache[63] || (_cache[63] = _createTextVNode(" 清空记录 ", -1))
+                    _cache[64] || (_cache[64] = _createTextVNode(" 清空记录 ", -1))
                   ]),
                   _: 1
                 }, 8, ["loading", "disabled"])
               ]),
               (torrentRecords.value.length)
                 ? (_openBlock(), _createElementBlock("div", _hoisted_18, [
-                    _cache[64] || (_cache[64] = _createElementVNode("div", { class: "zt-option-label mb-1" }, "最近处理记录", -1)),
+                    _cache[65] || (_cache[65] = _createElementVNode("div", { class: "zt-option-label mb-1" }, "最近处理记录", -1)),
                     (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(torrentRecords.value, (r) => {
                       return (_openBlock(), _createElementBlock("div", {
                         key: r.id,
@@ -4799,57 +4822,57 @@ return (_ctx, _cache) => {
                 start: "",
                 size: "18"
               }, {
-                default: _withCtx(() => [...(_cache[65] || (_cache[65] = [
+                default: _withCtx(() => [...(_cache[66] || (_cache[66] = [
                   _createTextVNode("mdi-subtitles-outline", -1)
                 ]))]),
                 _: 1
               }),
-              _cache[66] || (_cache[66] = _createTextVNode(" 子集化设置 ", -1))
+              _cache[67] || (_cache[67] = _createTextVNode(" 子集化设置 ", -1))
             ]),
             _: 1
           }),
           _createVNode(_component_v_card_text, null, {
             default: _withCtx(() => [
               _createElementVNode("div", _hoisted_22, [
-                _cache[67] || (_cache[67] = _createElementVNode("div", { class: "flex-grow-1" }, [
+                _cache[68] || (_cache[68] = _createElementVNode("div", { class: "flex-grow-1" }, [
                   _createElementVNode("div", { class: "zt-switch-title" }, "入库后自动子集化"),
                   _createElementVNode("div", { class: "zt-switch-desc" }, "MP 转存完成时，对新增字幕执行子集化并内嵌字体（结果可在「子集化」页查看；与「入库自动检查字幕」互斥，同时只能开一个）")
                 ], -1)),
                 _createVNode(_component_v_switch, {
                   modelValue: config.value.auto_subset,
-                  "onUpdate:modelValue": _cache[23] || (_cache[23] = $event => ((config.value.auto_subset) = $event)),
+                  "onUpdate:modelValue": _cache[24] || (_cache[24] = $event => ((config.value.auto_subset) = $event)),
                   color: "primary",
                   "hide-details": ""
                 }, null, 8, ["modelValue"])
               ]),
               _createElementVNode("div", _hoisted_23, [
-                _cache[68] || (_cache[68] = _createElementVNode("div", { class: "flex-grow-1" }, [
+                _cache[69] || (_cache[69] = _createElementVNode("div", { class: "flex-grow-1" }, [
                   _createElementVNode("div", { class: "zt-switch-title" }, "MP 入库替换原字幕"),
                   _createElementVNode("div", { class: "zt-switch-desc" }, "开：入库子集化的成品直接替换媒体库原字幕（文件名不变，媒体库只保留一份）；关：保留原字幕，另生成 xx.ziti.ass 成品（默认）。只作用于 MP 入库，目录监控见下方「监控目录输出方式」，手动上传永不覆盖")
                 ], -1)),
                 _createVNode(_component_v_switch, {
                   modelValue: config.value.inbound_subset_overwrite,
-                  "onUpdate:modelValue": _cache[24] || (_cache[24] = $event => ((config.value.inbound_subset_overwrite) = $event)),
+                  "onUpdate:modelValue": _cache[25] || (_cache[25] = $event => ((config.value.inbound_subset_overwrite) = $event)),
                   color: "primary",
                   "hide-details": ""
                 }, null, 8, ["modelValue"])
               ]),
               _createElementVNode("div", _hoisted_24, [
-                _cache[69] || (_cache[69] = _createElementVNode("div", { class: "flex-grow-1" }, [
+                _cache[70] || (_cache[70] = _createElementVNode("div", { class: "flex-grow-1" }, [
                   _createElementVNode("div", { class: "zt-switch-title" }, "子集化进程隔离"),
                   _createElementVNode("div", { class: "zt-switch-desc" }, "开：字体子集化在独立工作进程执行，uharfbuzz 崩溃或病态字体只影响当前字幕，不会拖垮 MoviePilot 主进程；工作进程无法启动时自动回退进程内执行（默认开）")
                 ], -1)),
                 _createVNode(_component_v_switch, {
                   modelValue: config.value.subset_process_isolation,
-                  "onUpdate:modelValue": _cache[25] || (_cache[25] = $event => ((config.value.subset_process_isolation) = $event)),
+                  "onUpdate:modelValue": _cache[26] || (_cache[26] = $event => ((config.value.subset_process_isolation) = $event)),
                   color: "primary",
                   "hide-details": ""
                 }, null, 8, ["modelValue"])
               ]),
-              _cache[71] || (_cache[71] = _createElementVNode("div", { class: "zt-option-label mb-1 mt-2" }, "监控目录输出方式", -1)),
+              _cache[72] || (_cache[72] = _createElementVNode("div", { class: "zt-option-label mb-1 mt-2" }, "监控目录输出方式", -1)),
               _createVNode(_component_v_radio_group, {
                 modelValue: config.value.subset_out_mode,
-                "onUpdate:modelValue": _cache[26] || (_cache[26] = $event => ((config.value.subset_out_mode) = $event)),
+                "onUpdate:modelValue": _cache[27] || (_cache[27] = $event => ((config.value.subset_out_mode) = $event)),
                 density: "compact"
               }, {
                 default: _withCtx(() => [
@@ -4871,19 +4894,19 @@ return (_ctx, _cache) => {
                 ]),
                 _: 1
               }, 8, ["modelValue"]),
-              _cache[72] || (_cache[72] = _createElementVNode("div", { class: "zt-hint" }, "目录监控（ASS 自动子集化目录）的字幕成品按「输出目录/剧名/」子文件夹分类输出（如「你的名字.ass」→「你的名字」文件夹），多剧字幕互不混淆；手动上传的字幕子集结果留在插件临时文件夹，不受此设置影响。未配输出目录时不涉及复制/移动：复制=另生成 xx.ziti.ass 并保留源字幕，移动=成品就地替换源字幕", -1)),
-              _cache[73] || (_cache[73] = _createElementVNode("div", { class: "zt-hint" }, "字体已内嵌进 .ziti.ass 成品，不再产生 *_subsetted 字体备份夹；旧版本遗留的备份夹会在对应源字幕删除时自动清理", -1)),
-              _cache[74] || (_cache[74] = _createElementVNode("div", { class: "zt-option-label mb-1 mt-2" }, "HDR 字幕亮度", -1)),
+              _cache[73] || (_cache[73] = _createElementVNode("div", { class: "zt-hint" }, "目录监控（ASS 自动子集化目录）的字幕成品按「输出目录/剧名/」子文件夹分类输出（如「你的名字.ass」→「你的名字」文件夹），多剧字幕互不混淆；手动上传的字幕子集结果留在插件临时文件夹，不受此设置影响。未配输出目录时不涉及复制/移动：复制=另生成 xx.ziti.ass 并保留源字幕，移动=成品就地替换源字幕", -1)),
+              _cache[74] || (_cache[74] = _createElementVNode("div", { class: "zt-hint" }, "字体已内嵌进 .ziti.ass 成品，不再产生 *_subsetted 字体备份夹；旧版本遗留的备份夹会在对应源字幕删除时自动清理", -1)),
+              _cache[75] || (_cache[75] = _createElementVNode("div", { class: "zt-option-label mb-1 mt-2" }, "HDR 字幕亮度", -1)),
               _createElementVNode("div", _hoisted_27, [
-                _cache[70] || (_cache[70] = _createElementVNode("div", { class: "flex-grow-1" }, [
+                _cache[71] || (_cache[71] = _createElementVNode("div", { class: "flex-grow-1" }, [
                   _createElementVNode("div", { class: "zt-switch-title" }, "启用 HDR 亮度压暗"),
                   _createElementVNode("div", { class: "zt-switch-desc" }, "子集化/上传处理的字幕成品按所选档位压暗主色/描边/阴影，避免 HDR 片源下纯白字幕刺眼")
                 ], -1)),
                 _createVNode(_component_v_switch, {
                   modelValue: config.value.hdr_brightness,
                   "onUpdate:modelValue": [
-                    _cache[27] || (_cache[27] = $event => ((config.value.hdr_brightness) = $event)),
-                    _cache[28] || (_cache[28] = v => { if (!v) config.value.hdr_brightness_level = ''; })
+                    _cache[28] || (_cache[28] = $event => ((config.value.hdr_brightness) = $event)),
+                    _cache[29] || (_cache[29] = v => { if (!v) config.value.hdr_brightness_level = ''; })
                   ],
                   color: "primary",
                   "hide-details": ""
@@ -4891,7 +4914,7 @@ return (_ctx, _cache) => {
               ]),
               _createVNode(_component_v_select, {
                 modelValue: config.value.hdr_brightness_level,
-                "onUpdate:modelValue": _cache[29] || (_cache[29] = $event => ((config.value.hdr_brightness_level) = $event)),
+                "onUpdate:modelValue": _cache[30] || (_cache[30] = $event => ((config.value.hdr_brightness_level) = $event)),
                 items: hdrLevels,
                 "item-title": "title",
                 "item-value": "value",
@@ -4903,7 +4926,7 @@ return (_ctx, _cache) => {
                 hint: "档位即纯白亮度百分比（80% ⭐ HDR 主流推荐）；选择「关」或留空则不调整",
                 "persistent-hint": ""
               }, null, 8, ["modelValue", "disabled"]),
-              _cache[75] || (_cache[75] = _createElementVNode("div", { class: "zt-hint" }, "应用范围：全量子集化、目录监控自动子集化、入库子集化处理后生成的成品字幕（原始字幕不受影响）", -1))
+              _cache[76] || (_cache[76] = _createElementVNode("div", { class: "zt-hint" }, "应用范围：全量子集化、目录监控自动子集化、入库子集化处理后生成的成品字幕（原始字幕不受影响）", -1))
             ]),
             _: 1
           })
@@ -4923,19 +4946,19 @@ return (_ctx, _cache) => {
             start: "",
             size: "18"
           }, {
-            default: _withCtx(() => [...(_cache[76] || (_cache[76] = [
+            default: _withCtx(() => [...(_cache[77] || (_cache[77] = [
               _createTextVNode("mdi-content-save-outline", -1)
             ]))]),
             _: 1
           }),
-          _cache[77] || (_cache[77] = _createTextVNode(" 保存配置 ", -1))
+          _cache[78] || (_cache[78] = _createTextVNode(" 保存配置 ", -1))
         ]),
         _: 1
       }, 8, ["loading"])
     ]),
     _createVNode(_component_v_dialog, {
       modelValue: busyDialog.value,
-      "onUpdate:modelValue": _cache[31] || (_cache[31] = $event => ((busyDialog).value = $event)),
+      "onUpdate:modelValue": _cache[32] || (_cache[32] = $event => ((busyDialog).value = $event)),
       "max-width": "480px"
     }, {
       default: _withCtx(() => [
@@ -4948,17 +4971,17 @@ return (_ctx, _cache) => {
                   size: "20",
                   color: "warning"
                 }, {
-                  default: _withCtx(() => [...(_cache[78] || (_cache[78] = [
+                  default: _withCtx(() => [...(_cache[79] || (_cache[79] = [
                     _createTextVNode("mdi-progress-clock", -1)
                   ]))]),
                   _: 1
                 }),
-                _cache[79] || (_cache[79] = _createTextVNode(" 后台有任务运行 ", -1))
+                _cache[80] || (_cache[80] = _createTextVNode(" 后台有任务运行 ", -1))
               ]),
               _: 1
             }),
             _createVNode(_component_v_card_text, { class: "pt-2" }, {
-              default: _withCtx(() => [...(_cache[80] || (_cache[80] = [
+              default: _withCtx(() => [...(_cache[81] || (_cache[81] = [
                 _createTextVNode(" 当前有全量检查 / 扫描 / 子集化任务正在后台运行，暂时无法关闭插件。", -1),
                 _createElementVNode("br", null, null, -1),
                 _createElementVNode("br", null, null, -1),
@@ -4971,9 +4994,9 @@ return (_ctx, _cache) => {
                 _createVNode(_component_v_btn, {
                   color: "primary",
                   variant: "tonal",
-                  onClick: _cache[30] || (_cache[30] = $event => (busyDialog.value = false))
+                  onClick: _cache[31] || (_cache[31] = $event => (busyDialog.value = false))
                 }, {
-                  default: _withCtx(() => [...(_cache[81] || (_cache[81] = [
+                  default: _withCtx(() => [...(_cache[82] || (_cache[82] = [
                     _createTextVNode("我知道了", -1)
                   ]))]),
                   _: 1
@@ -4992,6 +5015,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Settings = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-d857c06d"]]);
+const Settings = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-bb7cd065"]]);
 
 export { Check as C, Dashboard as D, FontLibrary as F, Settings as S, _export_sfc as _, apiModule as a };
