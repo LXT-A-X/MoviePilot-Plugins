@@ -9,8 +9,12 @@ const props = defineProps({
 })
 const emit = defineEmits(['notify', 'action'])
 
-// ===== assfonts 状态 =====
-const status = ref({ binary_ok: false, binary_path: '', index: { exists: false, count: 0, mtime: 0, size: 0 }, lib_dir: '' })
+// ===== 子集化引擎状态（内置 HarfBuzz）=====
+const status = ref({ engine: 'harfbuzz', hb_ok: false, font_index: {}, lib_dir: '' })
+const statusLoaded = ref(false)
+const engineReady = computed(() => !!status.value.hb_ok)
+const indexReady = computed(() => !!status.value.font_index?.faces)
+const indexCount = computed(() => status.value.font_index?.faces || 0)
 
 // ===== 左栏：待处理 =====
 const pendingList = ref([])
@@ -44,20 +48,24 @@ const statusFilterOptions = [
 async function loadStatus() {
   try {
     status.value = await apiModule.get(props.api, '/subset/index')
-  } catch (e) { /* 忽略 */ }
+  } catch (e) { /* 忽略 */ } finally {
+    statusLoaded.value = true
+  }
 }
-// 重建 assfonts 字体索引：新归档/删减字体后，让检查与子集化按最新字体库口径比对
+// 全部重建字体库：清空索引后逐文件重新解析（日常归档/入库是增量增/减，不走这里）
 const rebuildingIndex = ref(false)
+const rebuildConfirm = ref(false)
 async function rebuildIndex() {
   if (rebuildingIndex.value) return
   rebuildingIndex.value = true
+  rebuildConfirm.value = false
   try {
     await apiModule.post(props.api, '/subset/rebuild_index')
-    emit('notify', 'assfonts 索引已重建，检查/子集化将按新字体库口径比对', 'success')
+    emit('notify', '字体库已全部重建（逐文件重新解析）', 'success')
     await loadStatus()
     emit('action', { type: 'subset_done' })
   } catch (e) {
-    emit('notify', e.message || '重建索引失败')
+    emit('notify', e.message || '全部重建失败')
   } finally {
     rebuildingIndex.value = false
   }
@@ -151,11 +159,7 @@ function onRecordsScroll(e) {
 }
 
 function indexTime() {
-  const t = status.value?.index?.mtime
-  if (!t) return ''
-  const d = new Date(t * 1000)
-  const p = (n) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+  return status.value?.font_index?.last_rebuild || ''
 }
 
 function statusColor(r) {
@@ -312,7 +316,7 @@ async function _doDownload(r) {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = res.name || (r.file_name.replace(/\.ass$/i, '') + '.assfonts.ass')
+  a.download = res.name || (r.file_name.replace(/\.ass$/i, '') + '.ziti.ass')
   document.body.appendChild(a)
   a.click()
   document.body.removeChild(a)
@@ -465,7 +469,7 @@ function stopPolling() {
         color="primary"
         :disabled="!enabled || scanning || !pendingList.length"
         :loading="scanning"
-        title="处理「待处理」中的全部字幕（assfonts 子集化并内嵌字体）"
+        title="处理「待处理」中的全部字幕（子集化并内嵌字体）"
         @click="scanAll"
       >
         <v-icon start size="18">mdi-magnify-scan</v-icon>
@@ -502,29 +506,35 @@ function stopPolling() {
       </v-btn>
       <v-spacer></v-spacer>
       <span class="zt-status-hint text-body-2">
-        <v-icon :size="15" :color="status.binary_ok ? 'success' : 'error'">
-          {{ status.binary_ok ? 'mdi-check-circle' : 'mdi-close-circle' }}
+        <v-icon :size="15" :color="indexReady ? 'success' : 'warning'">
+          {{ indexReady ? 'mdi-database-check' : 'mdi-database-off' }}
         </v-icon>
-        assfonts：{{ status.binary_ok ? '就绪' : '未就绪' }}
-        <v-icon :size="15" :color="status.index.exists ? 'success' : 'warning'" class="ml-2">
-          {{ status.index.exists ? 'mdi-database-check' : 'mdi-database-off' }}
-        </v-icon>
-        索引：{{ status.index.exists ? `${status.index.count} 个字体` : '未构建' }}（{{ indexTime() || '—' }}）
+        字体库索引：{{ indexReady ? `${indexCount} 个 face` : '未构建' }}（{{ indexTime() || '—' }}）
       </span>
       <v-btn
         variant="text"
         size="small"
         color="primary"
         class="ml-2"
-        :disabled="!enabled || !status.binary_ok"
+        :disabled="!enabled"
         :loading="rebuildingIndex"
-        title="重新扫描字体库目录生成索引（新归档/删减字体后执行，让检查与子集化口径同步）"
-        @click="rebuildIndex"
+        title="清空索引后逐文件重新解析字体库（全部重建，非增量；耗时取决于字体数量）"
+        @click="rebuildConfirm = true"
       >
         <v-icon start size="15">mdi-database-refresh</v-icon>
-        重建索引
+        全部重建
       </v-btn>
     </div>
+
+    <v-alert
+      v-if="statusLoaded && !engineReady"
+      type="error"
+      variant="tonal"
+      density="compact"
+      class="mb-3"
+    >
+      HarfBuzz 子集化引擎未就绪，子集化不可用。请到「仪表盘 → 依赖」中重新安装 uharfbuzz。
+    </v-alert>
 
     <v-row no-gutters class="zt-subset-row">
       <!-- 左栏：待处理 -->
@@ -575,7 +585,7 @@ function stopPolling() {
               color="success"
               :disabled="!enabled || downloadAllBusy || !downloadableRecords.length"
               :loading="downloadAllBusy"
-              title="下载当前列表全部成功成品的 .assfonts.ass 文件"
+              title="下载当前列表全部成功成品字幕"
               @click="downloadAll"
             >
               <v-icon start size="15">mdi-download-multiple</v-icon>
@@ -665,6 +675,23 @@ function stopPolling() {
         </v-card>
       </v-col>
     </v-row>
+
+    <!-- 全部重建确认：日常归档/入库是增量/减量，只有这里清空索引逐文件重解析 -->
+    <v-dialog v-model="rebuildConfirm" max-width="440">
+      <v-card>
+        <v-card-title class="text-h6">全部重建字体库？</v-card-title>
+        <v-card-text>
+          将清空现有字体索引，再逐文件重新解析整个字体库（生成 face/别名/字符覆盖）。
+          日常归档与入库仍是增量/减量，不需要用这里。耗时取决于字体数量，期间检索可能变慢。
+          人工映射与字幕缺失快照不受影响。
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer></v-spacer>
+          <v-btn variant="text" @click="rebuildConfirm = false">取消</v-btn>
+          <v-btn color="primary" variant="tonal" :loading="rebuildingIndex" @click="rebuildIndex">开始重建</v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
   </div>
 </template>
 

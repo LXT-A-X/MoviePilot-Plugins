@@ -1,2 +1,3 @@
 fontTools>=4.0.0
+uharfbuzz>=0.30.0
 watchdog>=3.0.0

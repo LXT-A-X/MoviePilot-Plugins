@@ -35,10 +35,8 @@ const pluginConfig = ref({
   input_dir: '',
   lib_dir: '',
   ass_dir: '',
-  scan_mode: 'internal',
   archive_mode: 'copy',
-  auto_monitor: false,
-  auto_check: false,
+  monitor_enabled: false,
   notify_enabled: false,
   ...(props.initialConfig || {}),
 })

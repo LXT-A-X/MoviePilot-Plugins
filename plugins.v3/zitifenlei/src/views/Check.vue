@@ -36,14 +36,14 @@ const activeRecord = computed(() =>
   records.value.find(r => r.id === selectedId.value) || null
 )
 
-// 检查「匹配基准」：index=assfonts 子集索引（与子集化同一口径，多键匹配更准）；
-// db=字体库记录（索引未构建/不可用时的回退口径，可能误报缺失）
+// 检查「匹配基准」：index=fontTools 字体索引（与子集化同一口径，逐 face/字符覆盖）；
+// db=字体库记录（索引不可用时的回退口径，只判字体名）
 // 由 /ass/list 响应顶层 match_source 决定（列表为空时也显示）
 const matchSource = ref('')
 const matchSourceText = computed(() => {
   const s = matchSource.value || records.value[0]?.match_source || ''
-  if (s === 'index') return '子集索引（assfonts fonts.json），与子集化同一口径'
-  if (s === 'db') return '字体库记录（索引未构建，去「子集化」页点右上角「重建索引」后可切换为子集索引口径）'
+  if (s === 'index') return '字体索引（fontTools），与子集化同一口径'
+  if (s === 'db') return '字体库记录（索引不可用时的兜底，仅按字体名判缺失）'
   return ''
 })
 
@@ -231,6 +231,20 @@ function goFontSearch(name) {
   emit('notify', `可在字体库搜索：${name}`, 'info')
 }
 
+// 字形级缺失明细（字体名 → 缺失字符数/字符），来自 /ass/detail 的 missing_details
+function missingDetailFor(name) {
+  return (detail.value?.missing_details || []).find(x => x.name === name) || null
+}
+
+function missingCharText(name) {
+  return missingDetailFor(name)?.missing_chars || ''
+}
+
+function missingCharCount(name) {
+  const d = missingDetailFor(name)
+  return d?.missing_count || 0
+}
+
 // 软刷新左侧记录列表 + 缺失窗口（保留当前选中，不重置界面）：
 // 切 Tab 回来 / refreshKey 触发 / 30 秒轮询兜底 共用——监控新字幕按 id 倒序出现在列表顶部
 async function refreshRecordsSoft() {
@@ -394,10 +408,10 @@ onUnmounted(() => {
               >
                 <template #prepend>
                   <v-icon
-                    :color="rec.status === 'ok' ? 'success' : 'error'"
+                    :color="rec.status === 'ok' ? 'success' : (rec.status === 'partial_check' ? 'warning' : 'error')"
                     size="18"
                   >
-                    {{ rec.status === 'ok' ? 'mdi-check-circle' : 'mdi-alert-circle' }}
+                    {{ rec.status === 'ok' ? 'mdi-check-circle' : (rec.status === 'partial_check' ? 'mdi-help-circle-outline' : 'mdi-alert-circle') }}
                   </v-icon>
                 </template>
                 <v-list-item-title class="zt-record-name text-body-2">
@@ -423,6 +437,15 @@ onUnmounted(() => {
                     class="ml-1"
                   >
                     缺 {{ rec.missing_count }} 个
+                  </v-chip>
+                  <v-chip
+                    v-else-if="rec.status === 'partial_check'"
+                    size="x-small"
+                    color="warning"
+                    variant="tonal"
+                    class="ml-1"
+                  >
+                    未验证字形
                   </v-chip>
                   <v-chip
                     v-else
@@ -497,10 +520,10 @@ onUnmounted(() => {
                     <v-chip
                       size="x-small"
                       variant="tonal"
-                      :color="detail.status === 'ok' ? 'success' : (detail.status === 'pending' ? 'warning' : 'error')"
+                      :color="detail.status === 'ok' ? 'success' : (detail.status === 'pending' || detail.status === 'partial_check' ? 'warning' : 'error')"
                       class="ml-2"
                     >
-                      {{ detail.status === 'ok' ? '字体完整' : (detail.status === 'pending' ? '待检查' : `缺 ${detail.missing_count} 个字体`) }}
+                      {{ detail.status === 'ok' ? '字体完整（已逐字符验证）' : (detail.status === 'pending' ? '待检查' : (detail.status === 'partial_check' ? '未验证字形（仅名称匹配）' : `缺 ${detail.missing_count} 个字体`)) }}
                     </v-chip>
                     <v-chip
                       v-if="detail.subsetted"
@@ -522,6 +545,19 @@ onUnmounted(() => {
                 class="mb-3"
               >
                 该字幕尚未检查，点击「检查」按钮对比字体库。
+              </v-alert>
+
+              <!-- 未验证字形（partial_check）：仅名称匹配，未做逐字符覆盖验证 -->
+              <v-alert
+                v-if="detail.status === 'partial_check'"
+                type="warning"
+                variant="tonal"
+                density="compact"
+                class="mb-3"
+              >
+                <v-icon size="16" class="mr-1">mdi-help-circle-outline</v-icon>
+                本次检查未完成字形级验证（字体名在库内但未逐字符比对 cmap 覆盖，常见于字体索引未构建、字幕无有效对白或解析异常）。
+                如需准确结论，请先确认字体库目录已配置并重建索引，再点击「检查」重新验证。
               </v-alert>
 
               <!-- 子集化提示：ASS 已内嵌（子集化）字体 -->
@@ -562,7 +598,12 @@ onUnmounted(() => {
                   variant="tonal"
                   class="ma-1 zt-missing-chip"
                 >
-                  {{ f }}
+                  <div class="zt-missing-chip-body">
+                    <span>{{ f }}</span>
+                    <span v-if="missingCharText(f)" class="zt-missing-chars">
+                      缺 {{ missingCharCount(f) }} 字符：{{ missingCharText(f) }}
+                    </span>
+                  </div>
                   <v-icon size="14" class="ml-1 zt-search-icon" @click="goFontSearch(f)">
                     mdi-magnify
                   </v-icon>
@@ -665,5 +706,24 @@ onUnmounted(() => {
 .zt-card-title {
   font-size: 15px;
   font-weight: 600;
+}
+/* 缺失字体逐字符明细：名称 + 缺失字符行 */
+.zt-missing-chip {
+  height: auto !important;
+  padding-top: 4px !important;
+  padding-bottom: 4px !important;
+}
+.zt-missing-chip-body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  line-height: 1.35;
+}
+.zt-missing-chars {
+  font-size: 11px;
+  font-family: monospace;
+  opacity: 0.8;
+  word-break: break-all;
+  max-width: 100%;
 }
 </style>

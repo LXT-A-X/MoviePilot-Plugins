@@ -20,6 +20,7 @@ const logs = ref([])
 const deps = ref({ items: [], ok_count: 0, total: 0 })
 const depsDialog = ref(false)
 const depsLoading = ref(false)
+const installingKey = ref('')
 
 let refreshTimer = null
 function startPolling() {
@@ -46,6 +47,21 @@ async function loadDeps() {
 }
 
 const depsOk = computed(() => deps.value.total > 0 && deps.value.ok_count === deps.value.total)
+
+// 重新安装单个缺失依赖（pip，白名单：uharfbuzz / fonttools / watchdog）
+async function installDep(d) {
+  if (!d || d.ok || installingKey.value) return
+  installingKey.value = d.key
+  try {
+    await apiModule.post(props.api, '/deps/install', { package: d.key })
+    emit('notify', `${d.name} 安装完成，正在重新检测…`, 'success')
+    await loadDeps()
+  } catch (e) {
+    emit('notify', e.message || `${d.name} 安装失败`, 'error')
+  } finally {
+    installingKey.value = ''
+  }
+}
 
 async function loadStats() {
   try {
@@ -176,9 +192,9 @@ watch(() => props.refreshKey, () => {
           </v-btn>
         </v-card-title>
         <v-card-text class="pt-0">
-          <div v-if="!deps.value.items.length" class="zt-empty pa-4">暂未检测</div>
+          <div v-if="!deps.items.length" class="zt-empty pa-4">暂未检测</div>
           <v-list v-else density="compact" lines="two" class="pa-0">
-            <v-list-item v-for="d in deps.value.items" :key="d.key">
+            <v-list-item v-for="d in deps.items" :key="d.key">
               <template #prepend>
                 <v-icon :color="d.ok ? 'success' : 'error'" size="20">{{ d.ok ? 'mdi-check-circle' : 'mdi-close-circle' }}</v-icon>
               </template>
@@ -191,10 +207,26 @@ watch(() => props.refreshKey, () => {
               <v-list-item-subtitle>
                 {{ d.ok ? d.detail : d.detail + '（' + d.impact + '）' }}
               </v-list-item-subtitle>
+              <template #append>
+                <v-btn
+                  v-if="!d.ok && ['uharfbuzz', 'fonttools', 'watchdog'].includes(d.key)"
+                  size="small"
+                  variant="tonal"
+                  color="primary"
+                  :loading="installingKey === d.key"
+                  :disabled="!!installingKey"
+                  title="通过 pip 重新安装该依赖"
+                  @click="installDep(d)"
+                >
+                  <v-icon start size="14">mdi-download</v-icon>
+                  重新安装
+                </v-btn>
+              </template>
             </v-list-item>
           </v-list>
           <div class="zt-deps-hint text-body-2">
-            依赖由 MoviePilot 安装插件时按 requirements.txt 自动安装；缺失时功能降级（见各项说明）。
+            依赖由 MoviePilot 安装插件时按 requirements.txt 自动安装；缺失时可点「重新安装」用 pip 补齐
+            （uharfbuzz 安装后立即生效，fontTools/watchdog 需重启插件）。
           </div>
         </v-card-text>
       </v-card>

@@ -1,5 +1,5 @@
 <script setup>
-import { onActivated, onDeactivated, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref } from 'vue'
 import apiModule from '../api/fontManager.js'
 
 const props = defineProps({
@@ -9,10 +9,13 @@ const props = defineProps({
 })
 const emit = defineEmits(['notify', 'action'])
 
-const summary = ref({ check: [], subset: [], lib_dir: '', binary_ok: false })
+const summary = ref({ check: [], subset: [], lib_dir: '', hb_ok: false, engine: 'harfbuzz', index_faces: 0 })
 const uploads = ref([])
+const mappings = ref([])
 const loading = ref(false)
 const expanded = ref({ check: false, subset: false })
+// 严格上传：可选目标缺失字体（人工映射）；不选则按字体内部名称/别名自动匹配
+const targetHint = ref('')
 
 const uploadRef = ref(null)
 const uploading = ref(false)
@@ -20,6 +23,12 @@ const classifying = ref(false)
 const clearing = ref(false)
 
 const PREVIEW_N = 5
+
+// 可选的缺失目标（检查缺失列表），用于上传时人工指定映射
+const targetOptions = computed(() => (summary.value.check || []).map(f => ({
+  name: f.name,
+  title: f.chars ? `${f.name}（缺 ${f.codepoints_count || 0} 字：${f.chars}）` : f.name,
+})))
 
 async function loadSummary() {
   loading.value = true
@@ -40,7 +49,7 @@ async function loadUploads() {
   }
 }
 
-// 上传字体（左右两栏共用；不校验匹配，归类时统一入库）
+// 上传字体（左右两栏共用）：严格校验（名称/别名命中且覆盖缺失字符），可选人工指定目标
 async function handleUpload(event) {
   const files = Array.from(event.target.files || [])
   event.target.value = ''
@@ -48,12 +57,14 @@ async function handleUpload(event) {
   // 大量文件一次请求易触发网关请求体限制（410/413），分批顺序上传，每批 3 个
   const BATCH = 3
   let total = 0
+  const rejected = []
   uploading.value = true
   try {
     for (let i = 0; i < files.length; i += BATCH) {
       const chunk = files.slice(i, i + BATCH)
       const form = new FormData()
       for (const file of chunk) form.append('file', file)
+      if (targetHint.value) form.append('target', targetHint.value)
       const res = await props.api.post(
         'plugin/Zitifenlei/missing/upload',
         form,
@@ -64,12 +75,21 @@ async function handleUpload(event) {
         emit('notify', `第 ${i / BATCH + 1} 批上传失败：${body.message || '上传失败'}`)
         break
       } else {
-        total += (body?.data?.count ?? chunk.length)
+        total += (body?.data?.count ?? 0)
+        for (const r of body?.data?.rejected || []) rejected.push(r)
       }
     }
-    emit('notify', `已上传 ${total} 个字体，点击「归类」入库并刷新索引`, 'success')
+    if (total) {
+      emit('notify', `已上传 ${total} 个字体（通过缺失校验），点击「归类」入库`, 'success')
+    }
+    if (rejected.length) {
+      const detail = rejected.slice(0, 3).map(r => `${r.file_name}：${r.reason}`).join('；')
+      emit('notify', `${rejected.length} 个字体未通过校验：${detail}`, 'warning')
+    }
+    if (!total && !rejected.length) emit('notify', '没有字体通过缺失校验', 'warning')
     await loadUploads()
     await loadSummary()
+    await loadMappings()
   } catch (e) {
     emit('notify', e.message || '上传失败')
   } finally {
@@ -83,14 +103,72 @@ async function classify() {
   classifying.value = true
   try {
     const res = await apiModule.post(props.api, '/missing/classify')
-    emit('notify', res?.index_ok ? '已入库并刷新索引，请回到「子集化」页重新运行' : (res?.message || '已入库'), 'success')
+    const recheck = res?.recheck || {}
+    let msg = res?.message || '已入库'
+    if (recheck.checked) {
+      msg += `（已重检 ${recheck.checked} 个字幕：完整 ${recheck.ok}，仍缺 ${recheck.missing}）`
+    }
+    emit('notify', msg, 'success')
+    if ((res?.failed || []).length) {
+      emit('notify', `${res.failed.length} 个字体未入库：${res.failed.slice(0, 3).join('；')}`, 'warning')
+    }
     await loadUploads()
     await loadSummary()
+    await loadMappings()
     emit('action', { type: 'missing_classified' })
   } catch (e) {
     emit('notify', e.message || '归类失败')
   } finally {
     classifying.value = false
+  }
+}
+
+// ===== 人工映射（改派） =====
+const remapDialog = ref(false)
+const remapItem = ref(null)
+const remapTarget = ref('')
+const remapping = ref(false)
+
+function openRemap(u) {
+  remapItem.value = u
+  remapTarget.value = u.matched || ''
+  remapDialog.value = true
+}
+
+async function submitRemap() {
+  if (!remapItem.value || !remapTarget.value) return
+  remapping.value = true
+  try {
+    await apiModule.post(props.api, '/missing/remap', {
+      path: remapItem.value.path,
+      target: remapTarget.value,
+    })
+    emit('notify', '已改派缺失目标', 'success')
+    remapDialog.value = false
+    await loadUploads()
+    await loadMappings()
+  } catch (e) {
+    emit('notify', e.message || '改派失败')
+  } finally {
+    remapping.value = false
+  }
+}
+
+async function loadMappings() {
+  try {
+    mappings.value = await apiModule.get(props.api, '/missing/mappings')
+  } catch (e) {
+    mappings.value = []
+  }
+}
+
+async function removeMapping(m) {
+  try {
+    await apiModule.del(props.api, '/missing/mappings/remove', { id: m.id })
+    mappings.value = mappings.value.filter(x => x.id !== m.id)
+    emit('notify', '已删除映射记录', 'success')
+  } catch (e) {
+    emit('notify', e.message || '删除失败')
   }
 }
 
@@ -131,6 +209,7 @@ function shownItems(side) {
 onMounted(() => {
   loadSummary()
   loadUploads()
+  loadMappings()
   startPolling()
 })
 // keep-alive 缓存场景：切回时恢复轮询并重拉数据（Q1 修复；Q14 后切 Tab
@@ -138,6 +217,7 @@ onMounted(() => {
 onActivated(() => {
   loadSummary()
   loadUploads()
+  loadMappings()
   startPolling()
 })
 // 切走（进入 keep-alive 缓存）时停止轮询，避免后台不可见视图持续打接口（Q1 修复）
@@ -171,10 +251,16 @@ function stopPolling() {
       <v-card-text class="pt-0">
         <div class="zt-status-line text-body-2 mb-3">
           <span class="mr-5">
-            <v-icon :size="16" :color="summary.binary_ok ? 'success' : 'error'" class="mr-1">
-              {{ summary.binary_ok ? 'mdi-check-circle' : 'mdi-close-circle' }}
+            <v-icon :size="16" :color="summary.hb_ok ? 'success' : 'error'" class="mr-1">
+              {{ summary.hb_ok ? 'mdi-check-circle' : 'mdi-close-circle' }}
             </v-icon>
-            assfonts：{{ summary.binary_ok ? '就绪' : '未就绪' }}
+            子集化引擎：{{ summary.hb_ok ? 'HarfBuzz' : '未就绪' }}
+          </span>
+          <span class="mr-5">
+            <v-icon :size="16" :color="summary.index_faces ? 'success' : 'warning'" class="mr-1">
+              {{ summary.index_faces ? 'mdi-format-font' : 'mdi-alert' }}
+            </v-icon>
+            字体索引：{{ summary.index_faces || 0 }} faces
           </span>
           <span class="mr-5">
             <v-icon :size="16" :color="summary.lib_dir ? 'success' : 'warning'" class="mr-1">
@@ -188,7 +274,8 @@ function stopPolling() {
           </span>
         </div>
         <v-alert v-if="uploads.length" type="info" density="compact" class="mb-3">
-          已上传字体将在「归类」时统一归档到字体库并自动刷新 assfonts 索引；库中已有同名字体自动跳过不覆盖。
+          上传即校验：字体名/别名必须命中缺失目标，且至少覆盖一个缺失字符；点击已上传字体可「改派」目标。
+          归类时统一归档并自动重检受影响字幕。
         </v-alert>
         <div class="zt-uploads pa-3" v-if="uploads.length">
           <v-chip
@@ -197,15 +284,29 @@ function stopPolling() {
             size="small"
             variant="tonal"
             color="primary"
-            class="mr-2 mb-2"
+            class="mr-2 mb-2 zt-upload-chip"
             close
-            :title="u.file_name"
+            :title="`${u.file_name} → ${u.matched || '?'}${u.covered_chars ? '（覆盖 ' + u.covered_chars + '）' : ''}；点击改派`"
+            @click="openRemap(u)"
             @click:close="removeUpload(u.path)"
           >
             {{ u.file_name }}
+            <span v-if="u.matched" class="zt-chip-target">→ {{ u.matched }}</span>
           </v-chip>
         </div>
-        <div class="d-flex flex-wrap gap-2">
+        <div class="d-flex flex-wrap gap-2 align-center">
+          <v-select
+            v-model="targetHint"
+            :items="targetOptions"
+            item-title="title"
+            item-value="name"
+            label="目标缺失字体（可选）"
+            density="compact"
+            variant="outlined"
+            hide-details
+            clearable
+            class="zt-target-select"
+          ></v-select>
           <v-btn
             color="primary"
             variant="tonal"
@@ -219,7 +320,7 @@ function stopPolling() {
           <input
             ref="uploadRef"
             type="file"
-            accept=".ttf,.otf,.ttc,.woff,.woff2"
+            accept=".ttf,.otf,.ttc,.otc,.woff,.woff2,.zip"
             multiple
             style="display: none"
             @change="handleUpload"
@@ -229,7 +330,7 @@ function stopPolling() {
             variant="tonal"
             :disabled="!enabled || classifying || !uploads.length"
             :loading="classifying"
-            title="全部上传字体入库 + 重建索引（运行中不可重复点击）"
+            title="全部上传字体入库 + 自动增量更新索引（运行中不可重复点击）"
             @click="classify"
           >
             <v-icon start size="18">mdi-database-import</v-icon>
@@ -270,7 +371,11 @@ function stopPolling() {
                   <v-icon color="warning" size="18">mdi-alert</v-icon>
                 </template>
                 <v-list-item-title class="zt-font-name">{{ f.name }}</v-list-item-title>
-                <v-list-item-subtitle class="zt-font-meta">{{ f.count }} 个字幕缺失</v-list-item-subtitle>
+                <v-list-item-subtitle class="zt-font-meta">
+                  {{ f.count }} 个字幕缺失
+                  <template v-if="f.chars"> · 缺 {{ f.codepoints_count || 0 }} 字符：<span class="zt-char-preview">{{ f.chars }}</span></template>
+                  <template v-else-if="f.glyph"> · 字符级缺失</template>
+                </v-list-item-subtitle>
               </v-list-item>
             </v-list>
             <div v-if="(summary.check || []).length > PREVIEW_N" class="text-center pa-2">
@@ -314,9 +419,80 @@ function stopPolling() {
       </v-col>
     </v-row>
 
+    <v-card v-if="mappings.length" class="zt-card-bg mt-4">
+      <v-card-title class="zt-card-title">
+        <v-icon start size="18">mdi-link-variant</v-icon>
+        人工映射审计（{{ mappings.length }}）
+      </v-card-title>
+      <v-card-text class="pt-0">
+        <v-list density="compact" class="pa-0">
+          <v-list-item v-for="m in mappings" :key="m.id">
+            <v-list-item-title class="zt-font-meta">
+              {{ m.source_name }} → {{ m.target_name }}
+            </v-list-item-title>
+            <v-list-item-subtitle class="zt-font-meta">
+              {{ m.note || '人工映射' }} · {{ m.created_at }}
+            </v-list-item-subtitle>
+            <template #append>
+              <v-btn
+                icon="mdi-trash-can-outline"
+                size="x-small"
+                variant="text"
+                color="error"
+                title="删除该映射记录"
+                @click="removeMapping(m)"
+              ></v-btn>
+            </template>
+          </v-list-item>
+        </v-list>
+      </v-card-text>
+    </v-card>
+
     <div class="zt-tip mt-3 text-body-2">
-      提示：上传字体 → 点「归类」入库并自动刷新索引 → 回到「子集化」页重新运行即可。
+      提示：上传字体（支持 .zip）→ 校验通过后点「归类」入库 → 自动重检受影响字幕 → 回到「子集化」页重新运行。
     </div>
+
+    <!-- 改派：给已上传字体人工指定缺失目标 -->
+    <v-dialog v-model="remapDialog" max-width="460">
+      <v-card class="zt-card-bg">
+        <v-card-title class="zt-card-title">
+          <v-icon start size="18">mdi-link-variant</v-icon>
+          改派缺失目标
+        </v-card-title>
+        <v-card-text>
+          <div class="text-body-2 mb-3">
+            字体：{{ remapItem?.file_name }}
+            <span v-if="remapItem?.name">（内部名：{{ remapItem.name }}）</span>
+          </div>
+          <div v-if="remapItem?.covered_chars" class="zt-font-meta mb-3">
+            当前覆盖字符：{{ remapItem.covered_chars }}
+          </div>
+          <v-select
+            v-model="remapTarget"
+            :items="targetOptions"
+            item-title="title"
+            item-value="name"
+            label="缺失目标字体"
+            density="compact"
+            variant="outlined"
+            hide-details
+          ></v-select>
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer></v-spacer>
+          <v-btn variant="text" @click="remapDialog = false">取消</v-btn>
+          <v-btn
+            color="primary"
+            variant="tonal"
+            :loading="remapping"
+            :disabled="!remapTarget"
+            @click="submitRemap"
+          >
+            确认改派
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
   </div>
 </template>
 
@@ -354,5 +530,22 @@ function stopPolling() {
 }
 .zt-tip {
   opacity: 0.65;
+}
+.zt-target-select {
+  min-width: 220px;
+  max-width: 320px;
+  flex: 0 1 280px;
+}
+.zt-upload-chip {
+  cursor: pointer;
+}
+.zt-chip-target {
+  opacity: 0.75;
+  margin-left: 4px;
+}
+.zt-char-preview {
+  font-family: monospace;
+  opacity: 0.9;
+  word-break: break-all;
 }
 </style>

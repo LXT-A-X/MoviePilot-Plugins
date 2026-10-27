@@ -4,11 +4,31 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "moviepilot-zitifenlei"
-version = "3.0.3"
+version = "3.0.4"
 description = "字体归档整理 + ASS 字幕字体检查 + 子集化（MoviePilot V3）"
 readme = "使用手册.md"
 requires-python = ">=3.10"
 dependencies = [
     "fontTools>=4.0.0",
+    "uharfbuzz>=0.30.0",
     "watchdog>=3.0.0",
+]
+
+# 说明：本插件在 MoviePilot 中通过「插件仓库 ZIP」安装（整个目录放进 plugins.v3/），
+# wheel 仅用于源码归档/分发与内容校验，不是部署方式。
+# 为了让 wheel 真正包含插件源码与前端 dist 产物（旧配置构建出的 wheel 只有元数据），
+# 这里显式把当前目录映射为包 zitifenlei。
+[tool.setuptools]
+packages = ["zitifenlei"]
+
+[tool.setuptools.package-dir]
+zitifenlei = "."
+
+[tool.setuptools.package-data]
+zitifenlei = [
+    "dist/**/*",
+    "dist/assets/**/*",
+    "index.html",
+    "使用手册.md",
+    "requirements.txt",
 ]

@@ -60,8 +60,10 @@ const visibleNodes = computed(() => {
 // 左侧列表容器滚动接近底部时追加一屏字体
 const listCardRef = ref(null)
 function onListScroll() {
-  const el = listCardRef.value
-  if (!el) return
+  const comp = listCardRef.value
+  // v-card 是组件实例，滚动尺寸在根 DOM（$el）上；直接用实例取 scrollTop 会得到 undefined
+  const el = comp?.$el || comp
+  if (!el || typeof el.scrollTop !== 'number') return
   if (el.scrollTop + el.clientHeight >= el.scrollHeight - 120) {
     renderedFonts.value += FONT_BATCH_SIZE
   }
@@ -94,6 +96,11 @@ const previewError = ref('')
 const previewName = ref('')
 const previewFamily = ref('')
 const previewFont = ref(null)
+// 预览字号/颜色可调 + 字符数展示（fontTools 统计）
+const previewSize = ref(64)
+const previewColor = ref('#ffffff')
+const previewCharCount = ref(0)
+const previewFaceCount = ref(0)
 const faceLoading = ref(false)
 const faceError = ref('')
 const PREVIEW_FONT_FAMILY = 'zt-preview-font'
@@ -136,7 +143,10 @@ function friendlyPreviewError(e) {
 
 const previewStyle = computed(() => {
   if (!previewFont.value) return {}
-  return { fontFamily: `'${PREVIEW_FONT_FAMILY}', sans-serif` }
+  return {
+    fontFamily: `'${PREVIEW_FONT_FAMILY}', sans-serif`,
+    color: previewColor.value,
+  }
 })
 
 // 厂商列表（来自 vendors 接口 + 当前列表聚合）
@@ -361,6 +371,8 @@ async function selectFont(font) {
   try {
     const res = await apiModule.get(props.api, '/fonts/preview', { id: font.id })
     if (seq !== previewReqSeq) return
+    previewCharCount.value = Number(res?.char_count || 0)
+    previewFaceCount.value = Number(res?.face_count || 0)
     const data = res?.data || ''
     if (!data) {
       faceError.value = '该字体文件不存在或无法读取'
@@ -593,6 +605,8 @@ async function openPreview(font) {
     const res = await apiModule.get(props.api, '/fonts/preview', { id: font.id })
     previewName.value = res?.name || font.name || ''
     previewFamily.value = res?.family || font.family || ''
+    previewCharCount.value = Number(res?.char_count || 0)
+    previewFaceCount.value = Number(res?.face_count || 0)
     const data = res?.data || ''
     if (!data) {
       previewError.value = '该字体文件不存在或无法读取'
@@ -906,6 +920,14 @@ onUnmounted(() => {
               <div class="zt-section-label mb-2">
                 <v-icon start size="16">mdi-format-font</v-icon>
                 字体预览
+                <v-chip
+                  v-if="previewCharCount"
+                  size="x-small"
+                  variant="tonal"
+                  class="ml-2"
+                >
+                  {{ previewCharCount }} 字符<template v-if="previewFaceCount > 1"> · {{ previewFaceCount }} faces</template>
+                </v-chip>
               </div>
               <div class="zt-preview-sample">
                 <v-progress-circular
@@ -916,11 +938,25 @@ onUnmounted(() => {
                 ></v-progress-circular>
                 <div v-else-if="faceError" class="zt-empty pa-4">{{ faceError }}</div>
                 <div v-else :style="previewStyle">
-                  <div style="font-size: 42px; font-weight: 700">观沧海</div>
+                  <div :style="{ fontSize: previewSize + 'px', fontWeight: 700, lineHeight: 1.2 }">观沧海</div>
                   <div style="font-size: 16px; margin-top: 8px">
                     ABCDEFGHIJKLM · abcdefghijklm · 0123456789
                   </div>
                 </div>
+              </div>
+              <div class="zt-preview-controls mt-2">
+                <span class="zt-preview-control-label">字号</span>
+                <v-slider
+                  v-model="previewSize"
+                  :min="24"
+                  :max="120"
+                  :step="2"
+                  density="compact"
+                  hide-details
+                  class="zt-preview-slider"
+                ></v-slider>
+                <span class="zt-preview-control-label">颜色</span>
+                <input v-model="previewColor" type="color" class="zt-color-input" />
               </div>
             </div>
           </v-card-text>
@@ -1096,10 +1132,29 @@ onUnmounted(() => {
           ></v-progress-circular>
           <div v-else-if="previewError" class="zt-empty">{{ previewError }}</div>
           <div v-else class="zt-preview-body">
-            <div class="zt-preview-name mb-2">{{ previewName }}</div>
+            <div class="zt-preview-name mb-2">
+              {{ previewName }}
+              <v-chip v-if="previewCharCount" size="x-small" variant="tonal" class="ml-2">
+                {{ previewCharCount }} 字符<template v-if="previewFaceCount > 1"> · {{ previewFaceCount }} faces</template>
+              </v-chip>
+            </div>
             <div class="zt-preview-family mb-3">{{ previewFamily }}</div>
+            <div class="zt-preview-controls mb-3">
+              <span class="zt-preview-control-label">字号</span>
+              <v-slider
+                v-model="previewSize"
+                :min="24"
+                :max="120"
+                :step="2"
+                density="compact"
+                hide-details
+                class="zt-preview-slider"
+              ></v-slider>
+              <span class="zt-preview-control-label">颜色</span>
+              <input v-model="previewColor" type="color" class="zt-color-input" />
+            </div>
             <div class="zt-preview-sample" :style="previewStyle">
-              <span style="font-size: 42px; font-weight: 700">观沧海</span>
+              <span :style="{ fontSize: previewSize + 'px', fontWeight: 700, display: 'block', lineHeight: 1.2 }">观沧海</span>
               <span style="font-size: 16px; display: block; margin-top: 8px">
                 ABCDEFGHIJKLM abcdefghijklm 0123456789
               </span>
@@ -1212,6 +1267,30 @@ onUnmounted(() => {
 .zt-preview-family {
   font-size: 13px;
   opacity: 0.75;
+}
+.zt-preview-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.zt-preview-control-label {
+  font-size: 12px;
+  opacity: 0.75;
+}
+.zt-preview-slider {
+  flex: 1 1 120px;
+  min-width: 100px;
+  max-width: 200px;
+}
+.zt-color-input {
+  width: 40px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
 }
 /* 数据库管理区块：与顶部拉开视觉距离，避免误触 */
 .zt-db-block {

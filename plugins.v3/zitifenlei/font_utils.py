@@ -20,6 +20,12 @@ except Exception:
 FONT_EXTENSIONS = (".ttf", ".otf", ".ttc", ".otc", ".woff", ".woff2")
 ASS_EXTENSIONS = (".ass",)
 
+# ── 上传/解析安全上限（P1-11）：防止超大字体/压缩包拖垮宿主或 OOM ──
+MAX_FONT_FILE_BYTES = 128 * 1024 * 1024  # 单字体 128MB（覆盖超大 CJK 合集）
+MAX_ASS_FILE_BYTES = 16 * 1024 * 1024  # 单字幕 16MB
+MAX_UPLOAD_FILES = 50  # 单次请求最多接收文件数（含压缩包展开后）
+MAX_UPLOAD_TOTAL_BYTES = 512 * 1024 * 1024  # 单次请求总量 512MB
+
 # ── 厂商识别规则（优先级：内部元数据制造商名 > 目录名映射 > 文件名规则 > 未知）──
 
 # 1) 内部制造商名（nameID 8）→ 中文厂商映射：把 fontTools 读出的英文字符串归一到中文
@@ -135,6 +141,9 @@ def is_ass_file(name: str) -> bool:
     return name.lower().endswith(ASS_EXTENSIONS)
 
 
+_ASS_SECTION_MARKERS = ("[script info]", "[events]", "[v4+ styles]", "[v4++ styles]", "[v4 styles]")
+
+
 def _decode_ass_text(ass_bytes: bytes) -> str:
     """ASS 文本编码自适应解码：UTF-16 BOM / 前 1KB 含 NUL → UTF-16；否则 UTF-8。
 
@@ -153,7 +162,53 @@ def _decode_ass_text(ass_bytes: bytes) -> str:
             return ass_bytes.decode("utf-16", errors="replace")
         except Exception:
             return ""
-    return ass_bytes.decode("utf-8", errors="replace")
+    text = ass_bytes.decode("utf-8", errors="replace")
+    bad = text.count("\ufffd")
+    if not bad or bad / max(1, len(text)) < 0.001:
+        return text
+    # UTF-8 明显解坏：GBK/Big5 老字幕回退，只接受能认出标准 ASS 段名的结果
+    for encoding in ("gb18030", "big5", "cp936"):
+        try:
+            alt = ass_bytes.decode(encoding)
+        except Exception:
+            continue
+        if "\ufffd" in alt:
+            continue
+        if any(marker in alt[:4096].lower() for marker in _ASS_SECTION_MARKERS):
+            return alt
+    return text
+
+
+# 标准 ASS 段落名（小写）。字体内嵌数据行是 33 偏移的编码文本，
+# 偶然会出现 "[" 开头、"]" 结尾的行；只看方括号会把它误判成段标题，
+# 导致 [Fonts] 后续字体被丢弃 / 剥离时截断。段边界只认标准段名。
+_ASS_SECTIONS = frozenset(
+    {
+        "script info",
+        "v4 styles",
+        "v4+ styles",
+        "v4++ styles",
+        "events",
+        "fonts",
+        "font",
+        "glyphs",
+        "graphics",
+        "aegisub project garbage",
+        "aegisub attached fonts",
+    }
+)
+
+
+def ass_section_name(line: str) -> str:
+    """该行是标准 ASS 段标题时返回小写段名（含方括号），否则返回空串。"""
+    s = line.strip().lstrip("\ufeff")
+    if not s.startswith("["):
+        return ""
+    end = s.find("]")
+    if end <= 1:
+        return ""
+    name = s[1:end].strip().lower()
+    return f"[{name}]" if name in _ASS_SECTIONS else ""
 
 
 def has_embedded_fonts(ass_bytes: bytes) -> bool:
@@ -216,6 +271,40 @@ def get_font_psname(file_path: str | Path) -> str:
         return ""
 
 
+def map_vendor(raw_vendor: str, parent_dir: str = "", file_name: str = "", hint: str = "") -> str:
+    """厂商识别统一入口（内部制造商名 → 目录名 → 文件名 → 原文兜底）。
+
+    font_metadata.py 与 parse_font_metadata 共用，避免两套映射规则。
+    """
+    vendor = ""
+    if raw_vendor:
+        # 1) 内部制造商名映射（Arphic → 文鼎、Founder → 方正、DynaComware → 华康…）
+        for pattern, mapped in _VENDOR_NAME_MAP:
+            if pattern.search(raw_vendor):
+                vendor = mapped
+                break
+    if not vendor and parent_dir:
+        # 2) 目录名映射：字体库目录结构自带厂商标识（与扫描/归档目录名对应）
+        for pattern, mapped in _DIR_VENDOR_HINTS:
+            if pattern.search(parent_dir):
+                vendor = mapped
+                break
+    if not vendor:
+        # 3) 文件名规则兜底
+        stem = Path(file_name).stem if file_name else ""
+        for pattern, mapped in _VENDOR_HINTS:
+            if (stem and pattern.search(stem)) or (hint and pattern.search(hint)):
+                vendor = mapped
+                break
+    if not vendor and raw_vendor:
+        # 4) 内部制造商名有值但未命中映射表：保留原文（如 "Microsoft Corp."）
+        vendor = raw_vendor
+    if not vendor:
+        vendor = "未知厂商"
+    # 厂商值落地硬约束：不允许出现路径分隔符，防止归档时建出嵌套目录
+    return re.sub(r"[\\/]+", "", vendor).strip() or "未知厂商"
+
+
 def parse_font_metadata(
     file_path: str | Path,
     scan_mode: str = "internal",
@@ -237,8 +326,12 @@ def parse_font_metadata(
     family = ""
     vendor = ""
     designer = ""
+    # 内部解析是否成功：TTFont 打不开（损坏/半截/格式不支持）时为 False。
+    # 调用方据此拒绝把无法解析的字体静默按文件名归档入库。
+    internal_ok = True
 
     if scan_mode == "internal" and TTFont is not None:
+        internal_ok = False
         try:
             ttfont = TTFont(str(file_path), fontNumber=0, lazy=True)
             try:
@@ -251,6 +344,7 @@ def parse_font_metadata(
                     ttfont.close()
                 except Exception:
                     pass
+            internal_ok = True
         except Exception:
             name = ""
             family = ""
@@ -265,39 +359,19 @@ def parse_font_metadata(
 
     # ── 厂商识别：内部制造商名 → 目录名 → 文件名 → 内部原文兜底 ──
     raw_vendor = vendor  # nameID 8 读出的原始制造商名
-    vendor = ""
-    if raw_vendor:
-        # 1) 内部制造商名映射（Arphic → 文鼎、Founder → 方正、DynaComware → 华康…）
-        for pattern, mapped in _VENDOR_NAME_MAP:
-            if pattern.search(raw_vendor):
-                vendor = mapped
-                break
-    if not vendor:
-        # 2) 目录名映射：字体库目录结构自带厂商标识（与扫描/归档目录名对应）
-        dir_text = str(file_path.parent)
-        for pattern, mapped in _DIR_VENDOR_HINTS:
-            if pattern.search(dir_text):
-                vendor = mapped
-                break
-    if not vendor:
-        # 3) 文件名规则兜底
-        for pattern, mapped in _VENDOR_HINTS:
-            if pattern.search(Path(file_name).stem) or pattern.search(hint):
-                vendor = mapped
-                break
-    if not vendor and raw_vendor:
-        # 4) 内部制造商名有值但未命中映射表：保留原文（如 "Microsoft Corp."）
-        vendor = raw_vendor
-    if not vendor:
-        vendor = "未知厂商"
-    # 厂商值落地硬约束：不允许出现路径分隔符，防止归档时建出嵌套目录（如历史上的 "Adobe/Google"）
-    vendor = re.sub(r"[\\/]+", "", vendor).strip() or "未知厂商"
+    vendor = map_vendor(
+        raw_vendor,
+        parent_dir=str(file_path.parent),
+        file_name=file_name,
+        hint=hint,
+    )
 
     return {
         "name": name,
         "family": family,
         "vendor": vendor,
         "designer": designer,
+        "internal_ok": internal_ok,
     }
 
 
@@ -318,9 +392,18 @@ def parse_ass_fonts(ass_bytes: bytes) -> List[str]:
             seen.add(f)
             fonts.append(f)
 
-    # {\fnXXXX} 标签
-    for m in re.finditer(r"\\fn([^\\}]+)", text):
-        _add(m.group(1))
+    # {\fnXXXX} 标签：只在单行内匹配（排除换行），并跳过 ASS 注释行——
+    # 注释里可能出现「\fn 覆盖」之类的说明文字，跨行匹配会把整段字幕吞成字体名，
+    # 导致缺失列表/通知出现垃圾条目（曾把 [V4+ Styles] 整段当成一个字体名）。
+    body = "\n".join(
+        line
+        for line in text.splitlines()
+        if not line.lstrip().startswith(";")
+        and not line.lstrip().lower().startswith("comment:")
+    )
+    for m in re.finditer(r"\\fn([^\\}\r\n]{1,64})", body):
+        # 嵌套在 \t(…\fnX) / \clip(…) 里时值末尾会带 ")"（与 glyph_checker 口径一致）
+        _add(m.group(1).rstrip(")").strip())
 
     # Style: Name, Fontname, Fontsize, ...
     for line in text.splitlines():
@@ -348,3 +431,20 @@ def normalize_font_key(name: str) -> str:
     name = unicodedata.normalize("NFKC", name)
     name = name.replace(" ", "").replace("　", "")
     return name.lower()
+
+
+# 路径分隔符、Windows 保留字符与控制字符：字体内部名称来自不可信文件，拼路径前必须替换
+_UNSAFE_FILENAME_RE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+
+
+def safe_filename_component(value: str, fallback: str = "font", limit: int = 120) -> str:
+    """把字体内部名称/厂商清洗成可安全落盘的单个路径组件。
+
+    - /  \\  :  *  ?  "  <  >  |  与控制字符 → 下划线（含 Windows 盘符与 ../）
+    - 去掉首尾空格/点（Windows 不允许尾点），去掉开头的点（避免 ../ 与隐藏文件）
+    - 超长截断；清洗后为空则用 fallback
+    """
+    name = _UNSAFE_FILENAME_RE.sub("_", str(value or ""))
+    name = name.strip(" .")
+    name = re.sub(r"^\.+", "", name)[:limit]
+    return name.strip(" .") or fallback

@@ -6,6 +6,8 @@ MoviePilot V2 插件 - 字体归档整理 + ASS 字幕字体检查
 from __future__ import annotations
 
 import base64
+import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -16,7 +18,7 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 try:
     from fastapi import Body, Request, HTTPException
@@ -95,15 +97,30 @@ try:
     from app.sdk.events import eventmanager
     from app.schemas.types import EventType
 except Exception:
-    eventmanager = None
+    class _DummyEventManager:
+        """本地/测试环境桩：无宿主 SDK 时让事件装饰器原样返回函数。"""
+
+        def register(self, _event: Any):
+            def _decorator(func: Any) -> Any:
+                return func
+
+            return _decorator
+
+    eventmanager = _DummyEventManager()
 
     class EventType:  # 兜底：仅避免在无宿主环境导入时崩溃
         TransferComplete = "transfer.complete"
+        SubtitleTransferComplete = "transfer.subtitle.complete"
         WebhookMessage = "webhook.message"
 
 from .db import FontDB
 from .font_utils import (
+    ASS_EXTENSIONS,
     FONT_EXTENSIONS,
+    MAX_ASS_FILE_BYTES,
+    MAX_FONT_FILE_BYTES,
+    MAX_UPLOAD_FILES,
+    MAX_UPLOAD_TOTAL_BYTES,
     TTFont,
     is_font_file,
     is_ass_file,
@@ -111,9 +128,29 @@ from .font_utils import (
     get_font_psname,
     parse_ass_fonts,
     normalize_font_key,
+    safe_filename_component,
     has_embedded_fonts,
 )
-from . import subsets as af
+from . import archive_utils as arch
+from .hdr_utils import apply_hdr_brightness
+from .font_metadata import FontInspection, inspect_font
+from .glyph_checker import FaceCoverage, evaluate_usage, parse_ass_usage
+from .harfbuzz_engine import (
+    FaceRef,
+    SubsetEmbed,
+    SubsetResult,
+    _choose_face as hb_choose_face,
+    default_output_path as hb_output_path,
+    hb_available,
+    refresh_backend as hb_refresh_backend,
+    subset_ass_file as hb_subset_ass_file,
+)
+from .subset_worker_client import (
+    SubsetWorkerClient,
+    SubsetWorkerCrashed,
+    SubsetWorkerStartError,
+    SubsetWorkerTimeout,
+)
 
 _DEFAULT_CONFIG = {
     "enabled": True,
@@ -121,7 +158,12 @@ _DEFAULT_CONFIG = {
     "lib_dir": "",
     "ass_dir": "",
     "subset_dir": "",
-    "scan_mode": "internal",
+    # 缺失字体专用接收目录（独立于字体库/监控目录）：放入的字体先等写入稳定，
+    # 再逐 face 严格校验是否命中当前缺失目标并真实覆盖至少一个缺失字符；
+    # 通过 → 直接归档入字体库；未通过 → 移入该目录下 rejected/ 留档，不入库不索引
+    "missing_font_dir": "",
+    # 字体元数据统一由 fontTools 解析（font_metadata.inspect_font），不再提供「文件名解析」模式，
+    # 老配置里的 scan_mode 键不再读取
     "archive_mode": "copy",
     "font_name_internal": False,  # 利用字体内部名称（PostScript 名 nameID 6）命名归档：开用内部名，关保持原名
     # 移动归档时删除判重跳过的残留源文件：只作用于「移动原文件」模式——
@@ -129,22 +171,28 @@ _DEFAULT_CONFIG = {
     # 开关开=删除残留；关=保留（复制模式不受影响，源文件本就保留）
     "move_delete_duplicate": True,
     "monitor_enabled": False,  # 是否启用监控（总开关）：统一控制字体监控目录 / ASS字幕目录监控 / ASS目录监控子集的启停
-    # 老版本监控开关（auto_monitor/auto_check）已被 monitor_enabled 合并，保留键仅用于旧配置迁移读取
-    "auto_monitor": False,
-    "auto_check": False,
+    # 老版本监控开关（auto_monitor/auto_check）已合并进 monitor_enabled，不再作为配置项暴露；
+    # init_plugin 迁移时仍从宿主旧配置读取一次
     "auto_inbound": True,
     "auto_collect": True,
     "notify_enabled": False,
-    # 子集化（assfonts）设置
+    # 索引维护：启动轻检（stat 级校验 + 磁盘清单对比补发现新字体）+ 每周差异核对
+    # （cron 定时增量比对 + 哈希抽检）。按既定策略默认开启，可在设置中关闭
+    "startup_light_check": True,
+    "weekly_reconcile": True,
+    # 子集化设置
     "auto_subset": False,
     "subset_overwrite": False,
-    "subset_rename": True,
+    # 子集化在独立工作进程中执行（uharfbuzz 段错误/病态字体只影响当前字幕，
+    # 不拖垮 MoviePilot 主进程）；工作进程无法启动时自动回退进程内执行
+    "subset_process_isolation": True,
+    # MP 入库成品是否直接替换媒体库原字幕（独立开关：不影响目录监控与手动上传）
+    "inbound_subset_overwrite": False,
     "subset_out_dir": "",
     "subset_out_mode": "copy",
-    "subset_sync_subdir": False,  # 同步子集字体夹（*_subsetted）：默认不同步（字体已内嵌进字幕，夹子仅供备份）
     # HDR 字幕亮度（子集化/上传字幕处理后按档位压暗主色/描边/阴影，避免 HDR 下刺眼）
-    "hdr_brightness": "",
-    "hdr_brightness_level": "80",
+    "hdr_brightness": False,
+    "hdr_brightness_level": "",
 }
 
 # _archive_font_file 返回码：>0=归档成功（返回字体 ID），None=处理失败。
@@ -175,6 +223,29 @@ def _font_subdir_name(suffix: str) -> str:
     return (suffix or "").lower().lstrip(".") or "font"
 
 
+_ADMIN_WRITE_DEPENDENCIES: Optional[List[Any]] = None
+
+
+def _admin_write_dependencies() -> List[Any]:
+    """高危写接口的管理员依赖。
+
+    宿主插件路由只按声明里的 auth 做「是否已登录」校验，不会自动加管理员校验；
+    清库/删文件/装依赖/改配置等写接口必须显式挂 get_current_active_superuser。
+    宿主不提供该依赖时返回空列表（退回原行为，不影响插件加载）。
+    """
+    global _ADMIN_WRITE_DEPENDENCIES
+    if _ADMIN_WRITE_DEPENDENCIES is None:
+        try:
+            from fastapi import Depends
+            from app.api.dependencies.auth import get_current_active_superuser
+
+            _ADMIN_WRITE_DEPENDENCIES = [Depends(get_current_active_superuser)]
+        except Exception:
+            _ADMIN_WRITE_DEPENDENCIES = []
+    return list(_ADMIN_WRITE_DEPENDENCIES)
+
+
+
 def _dest_exists_recursive(dir_: Path, base: str, suffix: str) -> Optional[Path]:
     """判重：在目标目录 dir_（含平铺旧布局与格式子文件夹/子目录递归）内查找
     同基础名 + 同扩展名的已存在文件，命中返回该文件路径（供跳过/去重），未命中返回 None。
@@ -202,6 +273,70 @@ def _dest_exists_recursive(dir_: Path, base: str, suffix: str) -> Optional[Path]
     if plain.exists() or (dir_ / target / f"{base}{suffix}").exists():
         return plain if plain.exists() else (dir_ / target / f"{base}{suffix}")
     return None
+
+
+def _wait_file_stable(
+    path: Path, timeout: float = 10.0, interval: float = 0.25, settle: float = 0.5
+) -> bool:
+    """等待文件写入完成：连续两次 stat 的 size 与 mtime_ns 一致才视为稳定。
+
+    网络盘（PollingObserver 轮询/大字体跨盘复制）下 2 秒防抖不足以保证写完，
+    半截文件入库后会被名称判重永久跳过，因此归档前必须显式探测。
+    已静置超过 settle 秒的文件直接判定稳定，批量扫描存量字体不额外等待。
+    """
+    try:
+        prev = Path(path).stat()
+    except OSError:
+        return False
+    if time.time() - prev.st_mtime >= max(0.0, float(settle)):
+        return True
+    deadline = time.time() + max(0.0, float(timeout))
+    while time.time() < deadline:
+        time.sleep(max(0.05, float(interval)))
+        try:
+            cur = Path(path).stat()
+        except OSError:
+            return False
+        if cur.st_size == prev.st_size and cur.st_mtime_ns == prev.st_mtime_ns:
+            return True
+        prev = cur
+    return False
+
+
+def _files_identical(a: Path, b: Path) -> bool:
+    """两份字体是否完全相同：先比 size，再比 SHA-256（分块读取，避免大文件占内存）。
+
+    任何读取/校验异常一律返回 False（宁可多存一份，也不误删用户源文件）。
+    """
+    try:
+        sa = Path(a).stat()
+        sb = Path(b).stat()
+        if sa.st_size != sb.st_size:
+            return False
+
+        def _sha(p: Path) -> str:
+            h = hashlib.sha256()
+            with Path(p).open("rb") as fh:
+                for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                    h.update(chunk)
+            return h.hexdigest()
+
+        return _sha(Path(a)) == _sha(Path(b))
+    except Exception:
+        return False
+
+
+def _unique_archive_base(name_index: Dict[Tuple[str, str], str], base: str, suffix: str) -> str:
+    """同名但内容不同时，生成 -2/-3… 的可用基础名（不覆盖、不跳过、不删源文件）。"""
+    suffix_key = suffix.lower()
+    candidate = base
+    n = 1
+    while (candidate.lower(), suffix_key) in name_index:
+        n += 1
+        candidate = f"{base}-{n}"
+        if n > 999:
+            return f"{base}-{uuid.uuid4().hex[:6]}"
+    return candidate
 
 
 def _ensure_plugin_logfile() -> str:
@@ -266,7 +401,7 @@ class Zitifenlei(_PluginBase):
     plugin_name = "字体分类管家"
     plugin_desc = "字体归档整理与 ASS 字幕字体检查插件：扫描/上传字体到字体库，检查字幕缺失字体。"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/zitifenlei.png"
-    plugin_version = "3.0.3"
+    plugin_version = "3.0.4"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "zitifenlei_"
@@ -281,8 +416,6 @@ class Zitifenlei(_PluginBase):
     _tmp_dir: Optional[Path] = None
     _watcher_observers: Optional[List[Any]] = None
     _lock = threading.RLock()
-    # assfonts 索引（fonts.json）键集缓存签名：(mtime_ns, size, lib_dir) -> 归一化键集
-    _index_font_cache: Optional[Tuple[tuple, set]] = None
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -290,8 +423,12 @@ class Zitifenlei(_PluginBase):
         # watchdog 观察者列表：事件驱动 Observer + 兼容轮询 PollingObserver（双保险）
         self._watcher_observers: List[Any] = []
         # 检查页「缺失字体修复」暂存的上传：tmp_path -> {path, file_name, name, family, vendor, matched}
-        # 重启后这些文件由 _cleanup_tmp 视为孤儿清理，无需持久化
+        # 进程内缓冲需加锁（上传/列表/归类多线程并发）+ TTL 清理；_cleanup_tmp 会引用这些路径
         self._missing_uploads: Dict[str, Any] = {}
+        self._missing_uploads_lock = threading.RLock()
+        self._missing_uploads_ttl = 6 * 3600  # 6 小时未归类视为过期
+        # 常驻子集化工作进程客户端（懒启动；停插件/重载配置时关闭）
+        self._subset_worker: Optional[SubsetWorkerClient] = None
         # 入库（TransferComplete）字幕扫描：剧根 key -> 本次新增字幕绝对路径列表；
         # 计时器聚合「等入库完毕再扫」，多次事件按 key 合并去重
         # key 优先用 tmdbid，缺失时退化为 title/目录串
@@ -309,9 +446,19 @@ class Zitifenlei(_PluginBase):
         # 已处理源文件防抖：resolved path -> 处理时间戳。事件驱动 Observer 与轮询 PollingObserver
         # 会对同一文件各触发一次，靠这里在 60s 窗口内去重，避免「一份文件归档两份/建两条记录」
         self._processed_recent: Dict[str, float] = {}
+        # 监控事件重试计数：失败一次不算「已处理」，清标记后有限重试（防复制半截文件永久丢事件）
+        self._watch_retries: Dict[str, int] = {}
+        # 维护期间被推迟处理的监控事件路径（维护结束立即补处理）
+        self._deferred_watch: set = set()
         # 全量检查/扫描互斥锁：前端按钮在运行中禁用之外，后端再兜底挡住并发触发，
         # 避免两个请求同时 copy/写库产生竞态（重复触发直接返回「正在运行」）
         self._scan_lock = threading.RLock()
+        # 破坏性维护门闩（数据库恢复/清库/字体删除/全量重建/清空检查记录）：
+        # 与 watcher、字体归档、字幕检查、子集化互斥，避免「刚删又写」「恢复中仍在索引」
+        self._maintenance_lock = threading.RLock()
+        # 运行中的轻量任务计数（归档/单文件事件等不持有 _scan_lock 的线程）：
+        # 停服排空必须等它归零，避免「文件已进库、数据库记录没写进」的半截态
+        self._active_jobs = 0
         # 优雅停止标志：stop_service 先置位，运行中的扫描/检查/子集化把「当前条目」完整
         # 处理完（copy+写库）再退出，剩余的条目不再处理，避免「文件在库、记录缺失」半截态
         self._stopping = False
@@ -327,11 +474,12 @@ class Zitifenlei(_PluginBase):
             "fonts_pending": [],  # 目录自动收集关闭时进入「待确认」的字体名（未归档）
             "subs_missing": [],  # {"name", "count", "fonts": 前几个缺失字体名}
             "subs_subset": [],  # 已子集化字幕文件名
-            "subs_ok": [],  # 字体齐全字幕文件名
+            "subs_ok": [],  # 字体齐全（已完成字形级验证）字幕文件名
+            "subs_unverified": [],  # 仅名称匹配、未完成字形级验证的字幕文件名
             "timer": None,
         }
         self._notify_agg_delay = 6  # 聚合窗口（秒）
-        # 自动归档后的 assfonts 索引重建：脏标记 + 延迟聚合定时器（防批量归档反复重建）
+        # 自动归档后的字体索引重建：脏标记 + 延迟聚合定时器（防批量归档反复重建）
         self._index_dirty = False
         self._index_rebuild_timer: Optional[threading.Timer] = None
         # ── 轮询接口瘦身缓存（Q2/Q3/Q4/Q5 修复）─────────────────
@@ -355,6 +503,14 @@ class Zitifenlei(_PluginBase):
         self._dest_name_index_limit = 64  # 厂商目录数上限，超出清空重建
         # _prune_stale_records 低频化闸门：记录上次执行时间，5 分钟内不重复全表 stat
         self._last_prune_ts = 0.0
+        # ── fontTools 增量索引（v2）──
+        # 全量重建/懒建索引互斥锁：与扫描锁分离，避免检查时等子集化任务
+        self._index_build_lock = threading.RLock()
+        self._index_last_build_ts = 0.0
+        # 全量重建进行中：其他调用方（检查/子集化）直接跳过，宁可不动也不要按旧/空索引误判缺失
+        self._index_rebuilding = False
+        # HarfBuzz 探测缓存（签名环境不变不重复 import）
+        self._hb_probe: Optional[Tuple[bool, str]] = None
 
     def _ass_is_subsetted(self, fp: str) -> bool:
         """判定 ASS 是否已内嵌字体，带 (mtime_ns, size) 签名缓存（Q2/Q3 修复）。
@@ -437,15 +593,14 @@ class Zitifenlei(_PluginBase):
             _ensure_plugin_logfile()
         except Exception:
             pass
+        # 重载配置可能创建新 DB/临时目录：先关掉上一轮常驻工作进程，避免僵尸进程
+        self._close_subset_worker()
         try:
             data_path = self.get_data_path()
             Path(data_path).mkdir(parents=True, exist_ok=True)
             self._db_path = Path(data_path) / "fonts.db"
             self._tmp_dir = Path(data_path) / "tmp"
             Path(self._tmp_dir).mkdir(parents=True, exist_ok=True)
-            # assfonts 字体索引目录（fonts.json 落在这里，不污染字体库目录）
-            self._assfonts_idx = Path(data_path) / "assfonts_idx"
-            Path(self._assfonts_idx).mkdir(parents=True, exist_ok=True)
             self._db = FontDB(self._db_path)
         except Exception as err:
             _logger.error("字体分类管家数据库初始化失败: %s", err)
@@ -498,22 +653,30 @@ class Zitifenlei(_PluginBase):
                         self._db.add_log(f"插件日志文件: {_logf}", "info")
                 except Exception:
                     pass
+                self._stopping = False
                 self._start_watcher()
+                # 恢复检查页「缺失字体修复」上传缓冲（持久化），再清理孤儿临时文件
+                self._load_missing_uploads()
                 # 清理临时目录中的孤儿文件（未被待确认/字幕记录引用的上传缓存）
                 self._cleanup_tmp()
+                # 启动轻检：索引为空时从磁盘重建字体库，失效/变更文件增量修正（后台线程，不阻塞启动）
+                self._schedule_startup_light_check()
             except Exception as err:
                 _logger.error("字体分类管家初始化失败: %s", err)
                 self._enabled = False
 
     def stop_service(self) -> None:
         """停止后台服务：停监控、清理孤儿临时文件、关闭数据库"""
-        # 优雅停止：先立档，运行中的扫描/子集化把当前条写完、剩余不再处理
+        # 优雅停止：先关启用开关（新事件/新通知/新重建一律拒绝），再立停止标志
+        self._enabled = False
         self._stopping = True
         self._stop_watcher()
         self._stop_polling()
         # 等待运行中的全量扫描/检查/子集化把当前条目完整写完（copy+写库完成才放锁），
         # 期间不关数据库，保证「文件入库 + 记录落库」原子成立；超时兜底强制继续
         self._wait_scan_drain(60)
+        # 排空后关闭常驻子集化工作进程（正常 shutdown，超时强杀）
+        self._close_subset_worker()
         # 取消未到期的入库扫描聚合计时器
         with self._lock:
             for t in self._show_timers.values():
@@ -560,18 +723,75 @@ class Zitifenlei(_PluginBase):
                 pass
             self._db = None
 
-    def _wait_scan_drain(self, timeout: float = 60.0) -> None:
-        """等待运行中的扫描/检查/子集化排空（当前条目已完整处理、释放互斥锁）。
+    def _job_begin(self) -> None:
+        """登记一个运行中的轻量任务（归档/单文件事件线程）。"""
+        with self._lock:
+            self._active_jobs += 1
 
-        停插件时调用：_stopping 已置位 → 运行线程处理完当前条即退出并释放 _scan_lock，
-        这里等到锁可获取即视为排空完成，随后才关库，杜绝「文件进了库、记录没写进」。
+    def _maintenance_begin(self, label: str) -> bool:
+        """获取破坏性维护权（非阻塞）：同一时刻只允许一个维护动作。
+
+        维护期间 watcher / 自动扫描 / 索引重建 / 子集化一律让步，
+        避免「恢复或清库过程中后台仍在写库/索引」造成状态错位。
+        """
+        if self._maintenance_lock.acquire(blocking=False):
+            try:
+                self._db.add_log(f"维护开始：{label}（监控与后台任务暂停）", "warning")
+            except Exception:
+                pass
+            return True
+        return False
+
+    def _maintenance_end(self, label: str = "") -> None:
+        """释放维护权，并立刻补处理维护期间被推迟的监控事件。"""
+        try:
+            if label:
+                self._db.add_log(f"维护结束：{label}", "info")
+        except Exception:
+            pass
+        pending: List[str] = []
+        with self._lock:
+            pending = list(self._deferred_watch)
+            self._deferred_watch.clear()
+        for path in pending:
+            try:
+                self._schedule_watch_handle(path)
+            except Exception:
+                continue
+        try:
+            self._maintenance_lock.release()
+        except Exception:
+            pass
+
+    def _maintenance_active(self) -> bool:
+        """是否正处于破坏性维护中（非阻塞探测，不改变锁状态）。"""
+        if self._maintenance_lock.acquire(blocking=False):
+            self._maintenance_lock.release()
+            return False
+        return True
+
+    def _job_end(self) -> None:
+        """结束一个轻量任务；计数只减不增，异常路径也不会把计数拖成负数。"""
+        with self._lock:
+            if self._active_jobs > 0:
+                self._active_jobs -= 1
+
+    def _wait_scan_drain(self, timeout: float = 60.0) -> None:
+        """等待运行中的扫描/检查/子集化/归档排空。
+
+        停插件时调用：_stopping 已置位 → 运行线程处理完当前条即退出并释放 _scan_lock；
+        归档/单文件事件不持有 _scan_lock，靠 _active_jobs 计数判断。这里等到
+        「扫描锁空闲 且 任务计数为 0」才视为排空完成，随后才关库，杜绝
+        「文件进了库、记录没写进」半截态。
         """
         try:
             import time as _time
 
             deadline = _time.time() + timeout
             while _time.time() < deadline:
-                if self._scan_lock.acquire(blocking=False):
+                with self._lock:
+                    jobs_idle = self._active_jobs == 0
+                if jobs_idle and self._scan_lock.acquire(blocking=False):
                     self._scan_lock.release()
                     return
                 _time.sleep(0.2)
@@ -603,6 +823,17 @@ class Zitifenlei(_PluginBase):
                     ):
                         if r.get("file_path"):
                             referenced.add(str(Path(r["file_path"]).resolve()))
+                    # 子集化待处理（含压缩包展开的 .ass）在重启后仍需可处理
+                    for r in self._db.query("SELECT file_path FROM subset_pending WHERE file_path != ''"):
+                        if r.get("file_path"):
+                            referenced.add(str(Path(r["file_path"]).resolve()))
+                    # 缺失字体修复已上传待归类（持久化表 + 内存缓冲）：不能当孤儿删
+                    for r in self._db.query("SELECT path FROM missing_uploads WHERE path != ''"):
+                        if r.get("path"):
+                            referenced.add(str(Path(r["path"]).resolve()))
+                    with self._missing_uploads_lock:
+                        for p in self._missing_uploads.keys():
+                            referenced.add(str(Path(p).resolve()))
             except Exception:
                 pass
             removed = 0
@@ -616,7 +847,7 @@ class Zitifenlei(_PluginBase):
                     except Exception:
                         pass
             # 子集字体夹（<stem>_subsetted）孤儿目录清理：对应源字幕已不存在时删除
-            # （字体已内嵌进成品字幕，夹子仅是 assfonts 的备份，默认不同步输出目录）
+            # （字体已内嵌进成品字幕，夹子仅是备份，默认不同步输出目录）
             for d in Path(self._tmp_dir).iterdir():
                 if not d.is_dir() or not d.name.endswith("_subsetted"):
                     continue
@@ -627,6 +858,32 @@ class Zitifenlei(_PluginBase):
                         removed += 1
                     except Exception:
                         pass
+            # 压缩包解压目录：清掉未被记录引用的解压文件，目录（含子目录）清空后删除
+            for d in Path(self._tmp_dir).iterdir():
+                if not d.is_dir() or not d.name.startswith("_unzip_"):
+                    continue
+                for f in list(d.rglob("*")):
+                    if not f.is_file():
+                        continue
+                    if str(f.resolve()) in referenced:
+                        continue
+                    try:
+                        f.unlink()
+                        removed += 1
+                    except Exception:
+                        pass
+                try:
+                    for sub in sorted(
+                        [p for p in d.rglob("*") if p.is_dir()],
+                        key=lambda p: len(p.parts),
+                        reverse=True,
+                    ):
+                        if not any(sub.iterdir()):
+                            sub.rmdir()
+                    if not any(d.iterdir()):
+                        d.rmdir()
+                except Exception:
+                    pass
             if removed:
                 _logger.debug("字体分类管家清理 %d 个临时文件", removed)
         except Exception as err:
@@ -651,7 +908,19 @@ class Zitifenlei(_PluginBase):
         # 实时处理新增/变动文件，不注册定时全量扫描——6 小时兜底会把监控目录存量文件整体重扫，
         # 复制模式下同名字体反复归档出 xxx-2/xxx-3 副本堆积（已由 _archive_font_file 同名去重兜住）。
         # watchdog 完全缺失时的 60 秒轮询兜底（_start_polling）同样幂等，不会重复归档/重复建记录。
-        return []
+        if not bool(self.get_resource_or_config("weekly_reconcile")):
+            return []
+        # 每周差异核对：只按 size+mtime 比对并重解析差异文件（未变文件零解析），
+        # 与「启动轻检」互补；关闭配置后不再注册该定时任务
+        return [
+            {
+                "id": "ZitifenleiWeeklyReconcile",
+                "name": "字体索引每周差异核对",
+                "trigger": "cron",
+                "func": self._weekly_reconcile_task,
+                "kwargs": {"day_of_week": "sun", "hour": 4, "minute": 30},
+            }
+        ]
 
     def get_resource_or_config(self, key: str) -> Any:
         """读取配置（兼容运行时更新）：宿主配置有该键才用宿主值，
@@ -666,6 +935,22 @@ class Zitifenlei(_PluginBase):
 
     def __auto_monitor_scan(self) -> None:
         """自动监控：扫描输入目录中的字体并自动归档"""
+        # 缺失字体专用目录兜底扫描（事件漏发/网络盘无事件时也能严格校验收录）：
+        # 独立于「目录自动收集」开关——它是单独的严格接收通道，不放宽为普通归档
+        try:
+            missing_dir = self.get_resource_or_config("missing_font_dir") or ""
+            if missing_dir and Path(missing_dir).is_dir():
+                for f in list(Path(missing_dir).iterdir()):
+                    if self._stopping:
+                        break
+                    if f.is_file() and is_font_file(f.name):
+                        self._handle_missing_dir_font(f)
+        except Exception as err:
+            try:
+                if self._db is not None:
+                    self._db.add_log(f"缺失字体目录扫描失败: {err}", "warning")
+            except Exception:
+                pass
         # 「是否自动执行监控结果」关闭：监控字体改走「待确认」，由实时监控逐文件登记，
         # 轮询兜底不再整体重扫监控目录（避免每 60s rglob 整目录 + 「归档 N 个」计数虚高）
         if self.get_resource_or_config("auto_collect") is False:
@@ -680,7 +965,7 @@ class Zitifenlei(_PluginBase):
                 added = len(stats["added"])
                 if added:
                     self._db.add_log(f"自动监控：归档 {added} 个字体", "info")
-                    # 轮询兜底归档后同样自动重建 assfonts 索引
+                    # 轮询兜底归档后同样自动重建字体索引
                     self._schedule_index_rebuild()
                 elif stats["skipped"] or stats["failed"]:
                     self._db.add_log(
@@ -746,17 +1031,19 @@ class Zitifenlei(_PluginBase):
                 return
             self._plugin._schedule_watch_handle(str(dest))
 
-    def _schedule_watch_handle(self, path: str) -> None:
+    def _schedule_watch_handle(self, path: str, delay: float = 2.0) -> None:
         """watchdog 事件统一防抖：同一路径 2 秒内重复事件重置计时器，
         文件写入/改名完成后才真正处理，避免读到半文件或漏掉改名后的正名文件。
+
+        失败重试路径可用更大的 delay 再入队（不占用户操作）。
         """
-        if not self._enabled or self._db is None:
+        if self._stopping or not self._enabled or self._db is None:
             return
         with self._lock:
             timer = self._watch_timers.get(path)
             if timer:
                 timer.cancel()
-            timer = threading.Timer(2.0, self._on_watch_event, args=(path,))
+            timer = threading.Timer(max(0.1, float(delay)), self._on_watch_event, args=(path,))
             timer.daemon = True
             timer.start()
             self._watch_timers[path] = timer
@@ -809,6 +1096,11 @@ class Zitifenlei(_PluginBase):
             )
         input_dir = self.get_resource_or_config("input_dir") or ""
         ass_dir = self.get_resource_or_config("ass_dir") or ""
+        missing_dir_cfg = self.get_resource_or_config("missing_font_dir") or ""
+        if missing_dir_cfg and not Path(missing_dir_cfg).is_dir():
+            self._db.add_log(
+                f"已配置「缺失字体接收目录」但目录不可达（{missing_dir_cfg}）：放入的字体无法严格校验", "warning"
+            )
         paths: List[Path] = []
         if input_dir and Path(input_dir).is_dir():
             paths.append(Path(input_dir))
@@ -816,6 +1108,11 @@ class Zitifenlei(_PluginBase):
             paths.append(Path(ass_dir))
         if subset_dir_cfg and Path(subset_dir_cfg).is_dir():
             paths.append(Path(subset_dir_cfg))
+        if missing_dir_cfg and Path(missing_dir_cfg).is_dir():
+            paths.append(Path(missing_dir_cfg))
+        # 字体库目录也纳入监控：外部直接放入/替换的字体事件级发现（只增量索引，不归档）
+        if lib_dir_cfg and Path(lib_dir_cfg).is_dir():
+            paths.append(Path(lib_dir_cfg))
         if not paths:
             self._db.add_log(
                 f"目录监控未启动：监控目录不可达（input_dir={input_dir or '(空)'}，ass_dir={ass_dir or '(空)'}）",
@@ -930,17 +1227,33 @@ class Zitifenlei(_PluginBase):
                 _logger.debug("目录轮询异常跳过", exc_info=True)
 
     def _on_watch_event(self, path: str) -> None:
+        """单文件事件包装：计入 _active_jobs，停服排空时不会在写库中途被掐断。"""
+        self._job_begin()
+        try:
+            self._on_watch_event_impl(path)
+        finally:
+            self._job_end()
+
+    def _on_watch_event_impl(self, path: str) -> None:
         """单文件事件：字体 → 自动归档；字幕 → 自动检查
 
         Q6 修复：锁内只做「去重表检查 + 标记」，磁盘 IO（字体复制/移动、字幕
         全文件读取）全部移到锁外——批量投递时 watchdog 事件线程不再为等锁排队，
         2 秒防抖窗口恢复意义；共享缓冲（_processed_recent/_notify_agg）访问仍各自加锁。
         """
-        if not self._enabled or self._db is None:
+        if self._stopping or not self._enabled or self._db is None:
+            return
+        # 破坏性维护中（数据库恢复/清库/字体删除/全量重建）：不处理本次事件，
+        # 登记为待处理路径，维护结束立即补处理（不丢事件、不与维护并发写库）
+        if self._maintenance_active():
+            with self._lock:
+                if len(self._deferred_watch) < 2000:
+                    self._deferred_watch.add(str(path))
             return
         # 过滤 NAS 系统目录与回收站（参考实时软连接插件）：@eaDir / #recycle / 隐藏文件等
         if self._is_system_hidden_path(Path(path)):
             return
+        success = False
         try:
             p = Path(path)
             if not p.is_file():
@@ -956,6 +1269,23 @@ class Zitifenlei(_PluginBase):
                 # 先标记再处理：后续同一文件的重复事件直接跳过（双观察者并发安全）
                 self._processed_recent[key] = now
             try:
+                # 缺失字体专用目录：先稳定等待，再逐 face 严格校验（不与普通归档重复处理）
+                missing_dir_cfg = self.get_resource_or_config("missing_font_dir") or ""
+                if (
+                    missing_dir_cfg
+                    and is_font_file(p.name)
+                    and _path_within(p, Path(missing_dir_cfg))
+                ):
+                    success = self._handle_missing_dir_font(p)
+                    return
+                # 字体库目录内直接放入/替换的字体（用户手动放/外部工具同步）：
+                # 只做增量索引，不归档、不移动、不删源文件（同一目录不被两套流程重复处理）
+                lib_dir_cfg = self.get_resource_or_config("lib_dir") or ""
+                if lib_dir_cfg and is_font_file(p.name) and _path_within(p, Path(lib_dir_cfg)):
+                    if self._index_font_path(p):
+                        self._db.add_log(f"字体库变更已增量索引: {p.name}", "info")
+                    success = True
+                    return
                 if is_font_file(p.name):
                     # 归档函数内部自带成功/失败日志，此处不再重复记录；
                     # 返回值：>0=已归档，_ARCH_PENDING=进入待确认（目录自动收集关闭），
@@ -965,14 +1295,17 @@ class Zitifenlei(_PluginBase):
                         if ret is not None and ret > 0:
                             # 归档结果进通知聚合缓冲：同一批连续放入的文件合并成一条归类通知
                             self._notify_agg["fonts"].append(p.name)
-                            # 归档成功自动重建 assfonts 索引（延迟聚合，防批量归档反复重建）
+                            # 归档成功自动重建字体索引（延迟聚合，防批量归档反复重建）
                             self._schedule_index_rebuild()
+                            success = True
                         elif ret == _ARCH_PENDING:
                             # 只进待确认（未归档）：走独立「待确认」通知，不再误报「已自动归档」
                             self._notify_agg["fonts_pending"].append(p.name)
+                            success = True
                         elif ret in (_ARCH_DUP, _ARCH_DUP_DELETED, _ARCH_DUP_DEL_FAILED):
                             # 库中已有该字体：同样进通知（用户放了文件却「没归档」需要有交代）
                             self._notify_agg["fonts_skipped"].append(p.name)
+                            success = True
                             if ret == _ARCH_DUP_DELETED:
                                 self._notify_agg["fonts_dup_deleted"] = int(
                                     self._notify_agg.get("fonts_dup_deleted") or 0
@@ -998,10 +1331,12 @@ class Zitifenlei(_PluginBase):
                         # 「ASS目录监控子集」：放入即进入子集化流程——
                         # 「目录自动收集」开 → 立即后台自动子集化；关 → 进子集化页「待处理」等手动
                         self._schedule_subset_watch(p)
+                        success = True
                         self._db.add_log(f"子集监控: {p.name} → 已进入子集化流程", "info")
                         return
                     result = self._check_ass_file(p, source="auto")
                     if result:
+                        success = True
                         self._db.add_log(
                             f"实时检查字幕: {p.name} → {result['status_text']}",
                             "warning" if result["missing_count"] else "info",
@@ -1019,6 +1354,9 @@ class Zitifenlei(_PluginBase):
                             elif result.get("subsetted"):
                                 # 已内嵌（子集化）字幕自带字体，不依赖字体库
                                 self._notify_agg["subs_subset"].append(p.name)
+                            elif result.get("status") == "partial_check":
+                                # 仅名称匹配、未完成字形级验证：不能报「字体齐全」
+                                self._notify_agg["subs_unverified"].append(p.name)
                             elif result.get("status") != "pending":
                                 # 待检查状态（目录自动收集关闭时的登记）不通知「字体齐全」，避免误导
                                 self._notify_agg["subs_ok"].append(p.name)
@@ -1033,11 +1371,33 @@ class Zitifenlei(_PluginBase):
                 # 本次处理结束，移除防抖条目（RLock 可重入）
                 with self._lock:
                     self._watch_timers.pop(path, None)
+                    # 归档/检查超时判定的时机：只有确实处理成功才保留 60s 去重窗口；
+                    # 失败（半截文件/IO 抖动/库目录未配置）必须清除标记并安排有限重试，
+                    # 否则后续 modify 事件会被去重吞掉，文件要等下一次人工扫描才被处理。
+                    if not success and not self._stopping:
+                        key_retry = str(p.resolve())
+                        self._processed_recent.pop(key_retry, None)
+                        tries = int(self._watch_retries.get(key_retry, 0))
+                        if tries < 3:
+                            self._watch_retries[key_retry] = tries + 1
+                            try:
+                                self._schedule_watch_handle(str(p), delay=5.0 * (tries + 1))
+                                self._db.add_log(
+                                    f"监控处理未完成，已安排第 {tries + 1} 次重试：{p.name}", "warning"
+                                )
+                            except Exception:
+                                pass
+                        else:
+                            self._watch_retries.pop(key_retry, None)
+                    elif success:
+                        self._watch_retries.pop(str(p.resolve()), None)
                     # 限制增长：超过阈值时清理 5 分钟前的旧条目
                     if len(self._processed_recent) > 2000:
                         expire = now - 300.0
                         for k in [kk for kk, tt in self._processed_recent.items() if tt < expire]:
                             self._processed_recent.pop(k, None)
+                    if len(self._watch_retries) > 2000:
+                        self._watch_retries.clear()
         except Exception:
             # 文件在 stat/resolve 阶段消失（瞬时文件/系统临时文件）——静默忽略
             return
@@ -1046,6 +1406,13 @@ class Zitifenlei(_PluginBase):
         """监控到的字体进「待确认」列表（目录自动收集关闭时的行为，与手动上传一致）"""
         if self._db is None:
             return None
+        # 稳定性探测：写入中的半截字体不进待确认
+        if not _wait_file_stable(file_path):
+            try:
+                self._db.add_log(f"跳过 {file_path.name}：文件仍在写入，稍后重试", "warning")
+            except Exception:
+                pass
+            return None
         try:
             if self._db.query_one(
                 "SELECT id FROM pending_fonts WHERE file_path = ?", (str(file_path),)
@@ -1053,13 +1420,19 @@ class Zitifenlei(_PluginBase):
                 return None
             if self._db.count_fonts_by_path(str(file_path)):
                 return None
-            scan_mode = self.get_resource_or_config("scan_mode") or "internal"
+            scan_mode = "internal"  # fontTools 为唯一权威解析口径
             try:
                 meta = parse_font_metadata(
                     file_path, scan_mode=scan_mode, filename_hint=file_path.stem
                 )
             except Exception:
                 meta = {"name": file_path.stem, "family": file_path.stem, "vendor": "未知厂商", "designer": ""}
+            if not meta.get("internal_ok", True):
+                # 无法解析的字体不进待确认，避免用户一键整理时把坏文件归档入库
+                self._db.add_log(
+                    f"跳过 {file_path.name}：字体无法解析（可能损坏或仍在写入）", "warning"
+                )
+                return None
             self._db.add_pending(
                 {
                     "file_name": file_path.name,
@@ -1084,7 +1457,74 @@ class Zitifenlei(_PluginBase):
                     pass
             return None
 
+    def _handle_missing_dir_font(self, file_path: Path) -> bool:
+        """缺失字体专用目录：等稳定 → 逐 face 严格校验 → 收录或拒绝。
+
+        与普通字体库目录的区别（两套策略互不重复处理，靠目录归属路由）：
+        - 普通库/监控目录：常规归档，只校验指纹与元数据；
+        - 缺失专用目录：必须命中当前缺失目标，且同一 face 真实覆盖至少一个缺失字符；
+          无关/损坏/未覆盖任何缺字的字体拒绝入库，移入同目录 rejected/ 留档（不删用户文件）。
+        返回 True=已处理完毕（收录/拒绝），False=本次未完成（外层安排有限重试）。
+        """
+        if self._db is None:
+            return False
+        # 稳定性探测：写入中的半截字体不校验（半文件必然解析失败，白等一次重试）
+        if not _wait_file_stable(file_path):
+            return False
+        try:
+            targets = self._missing_glyph_targets()
+        except Exception as err:
+            self._db.add_log(f"缺失字体目录校验失败（读取缺失目标异常）: {err}", "warning")
+            return False
+        verdict = self._evaluate_font_for_targets(file_path, targets) if targets else {
+            "ok": False,
+            "reason": "当前没有缺失字体目标（缺失列表为空）",
+            "name": "",
+        }
+        if not verdict.get("ok"):
+            reason = str(verdict.get("reason") or "未覆盖任何缺字")
+            missing_dir = Path(self.get_resource_or_config("missing_font_dir") or "")
+            try:
+                rejected_dir = missing_dir / "rejected"
+                rejected_dir.mkdir(parents=True, exist_ok=True)
+                dest = rejected_dir / file_path.name
+                if dest.exists():
+                    dest = rejected_dir / f"{file_path.stem}-{int(time.time())}{file_path.suffix}"
+                shutil.move(str(file_path), str(dest))
+                self._db.add_log(
+                    f"缺失字体目录拒绝 {file_path.name}：{reason}（已移至 rejected/ 留档）", "warning"
+                )
+            except Exception as err:
+                self._db.add_log(
+                    f"缺失字体目录拒绝 {file_path.name}：{reason}（留档移动失败: {err}）", "warning"
+                )
+            return True
+        ret = self._archive_font_file(file_path, source="missing")
+        if ret is not None and ret > 0:
+            self._schedule_index_rebuild()
+            self._db.add_log(
+                f"缺失字体目录收录 {file_path.name} → 解决「{verdict.get('matched')}」"
+                f"（覆盖 {verdict.get('covered_chars') or '缺失字符'}）",
+                "info",
+            )
+            return True
+        if ret in (_ARCH_PENDING, _ARCH_DUP, _ARCH_DUP_DELETED, _ARCH_DUP_DEL_FAILED):
+            if ret == _ARCH_PENDING:
+                self._db.add_log(
+                    f"缺失字体目录收录 {file_path.name} → 已加入「待确认」（目录自动收集关闭）", "info"
+                )
+            return True
+        return False
+
     def _archive_font_file(self, file_path: Path, source: str = "auto") -> Optional[int]:
+        """归档入口包装：计入 _active_jobs，停服排空时等本次 copy+写库完整结束。"""
+        self._job_begin()
+        try:
+            return self._archive_font_file_impl(file_path, source)
+        finally:
+            self._job_end()
+
+    def _archive_font_file_impl(self, file_path: Path, source: str = "auto") -> Optional[int]:
         """自动归档单个字体（监控发现）：直接写入字体库（不经待确认）。
 
         「目录自动收集」关闭时：监控到的字体改进「待确认」，等待一键整理。
@@ -1119,14 +1559,29 @@ class Zitifenlei(_PluginBase):
                 return _ARCH_DUP
         except Exception:
             pass
-        scan_mode = self.get_resource_or_config("scan_mode") or "internal"
+        scan_mode = "internal"  # fontTools 为唯一权威解析口径
+        # 稳定性探测：写入未完成的半截文件不入库（否则名称判重会让完整文件永远被跳过）
+        if not _wait_file_stable(file_path):
+            self._db.add_log(
+                f"跳过 {file_path.name}：文件仍在写入（等待稳定超时），稍后重试", "warning"
+            )
+            return None
         try:
             meta = parse_font_metadata(file_path, scan_mode=scan_mode, filename_hint=file_path.stem)
         except Exception:
             meta = {"name": file_path.stem, "family": file_path.stem, "vendor": "未知厂商", "designer": ""}
+        # 解析失败（fontTools 打不开）不入库：损坏/半截字体进库后难以清理，明确记警告并等待人工确认
+        if not meta.get("internal_ok", True):
+            self._db.add_log(
+                f"跳过 {file_path.name}：字体无法解析（可能损坏或仍在写入），请确认后手动整理",
+                "warning",
+            )
+            return None
         archive_mode = self.get_resource_or_config("archive_mode") or "copy"
         try:
-            dest_dir = Path(lib_dir) / str(meta.get("vendor", "未知厂商"))
+            dest_dir = Path(lib_dir) / safe_filename_component(
+                str(meta.get("vendor") or "未知厂商"), "未知厂商"
+            )
             dest_dir.mkdir(parents=True, exist_ok=True)
             base = str(meta.get("name") or file_path.stem)
             # 「利用字体内部名称命名」开启时：用字体内部 PostScript 名（nameID 6），
@@ -1138,6 +1593,8 @@ class Zitifenlei(_PluginBase):
                         base = internal_name
                 except Exception:
                     pass
+            # 内部名来自不可信字体文件：清洗后方可拼路径（防 ../、盘符、分隔符越界）
+            base = safe_filename_component(base)
             # 按格式分子文件夹归档：字体库/厂商/格式/基础名.后缀（同字体不同格式共存，目录清晰）
             fmt_dir = dest_dir / _font_subdir_name(file_path.suffix)
             # Q5 修复：判重走"目标厂商目录已存在文件名"索引（_dest_names_for 首次
@@ -1150,9 +1607,9 @@ class Zitifenlei(_PluginBase):
                 existing = None
             if existing is not None:
                 existing = Path(existing)
-            if existing:
-                # 字体库已存在同名同后缀字体（含旧平铺布局与格式子文件夹）：
-                # 跳过本次归档（不再生成 -2/-3 副本，保证轮询/兜底全量扫描存量文件时幂等）
+            if existing and _files_identical(file_path, existing):
+                # 字体库已存在「内容完全相同」的同名同后缀字体（含旧平铺布局与格式子文件夹）：
+                # 跳过本次归档，保证轮询/兜底全量扫描存量文件时幂等
                 self._db.add_log(f"跳过 {file_path.name}：字体库已存在 {existing.name}", "info")
                 skip_ret = _ARCH_DUP
                 # 「移动原文件」模式 + 开关开启：删除监控目录残留的重复源文件，
@@ -1172,15 +1629,47 @@ class Zitifenlei(_PluginBase):
                 # 源文件虽然同源已入库（仅更名），同样算已处理，「待整理」不再计入
                 self._db.mark_font_processed(str(file_path))
                 return skip_ret
+            if existing:
+                # 同名但内容不同（升级版/同 family 不同字重被解析成同名）：
+                # 绝不能按名称判重删源文件，改名 -2/-3 另存，旧版与新版本都保留
+                base = _unique_archive_base(name_index, base, file_path.suffix)
+                self._db.add_log(
+                    f"{file_path.name} 与库内 {existing.name} 同名但内容不同，另存为 {base}{file_path.suffix}",
+                    "warning",
+                )
             try:
                 fmt_dir.mkdir(parents=True, exist_ok=True)
             except Exception:
                 pass
             dest = fmt_dir / f"{base}{file_path.suffix}"
+            # 第二道防线：即使清洗规则被绕过，目标也必须仍在字体库内
+            if not _path_within(dest, Path(lib_dir)):
+                self._db.add_log(f"拒绝归档：目标越界 {dest}", "error")
+                return None
+            # 原子落盘：先写隐藏临时名，校验大小与源一致后再 os.replace 换正名。
+            # 半截/复制失败只会留下临时文件（随即清理），不会出现「正名文件内容不完整」。
+            src_size = file_path.stat().st_size
+            tmp_dest = fmt_dir / f".{dest.name}.tmp-{uuid.uuid4().hex[:8]}"
+            try:
+                shutil.copy2(str(file_path), str(tmp_dest))
+                written = tmp_dest.stat().st_size
+                if written != src_size:
+                    raise RuntimeError(f"写入大小不一致（源 {src_size}，目标 {written}）")
+                os.replace(str(tmp_dest), str(dest))
+            except Exception:
+                try:
+                    tmp_dest.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                raise
+            # move 模式：正名落位且校验通过后才删源文件（跨盘 move 也不会有半截丢失）
             if archive_mode == "move":
-                shutil.move(str(file_path), str(dest))
-            else:
-                shutil.copy2(str(file_path), str(dest))
+                try:
+                    file_path.unlink()
+                except Exception as err:
+                    self._db.add_log(
+                        f"已归档 {dest.name}，但删除源文件 {file_path.name} 失败: {err}", "warning"
+                    )
         except Exception as err:
             self._db.add_log(f"自动归档失败 {file_path.name}: {err}", "error")
             return None
@@ -1198,25 +1687,12 @@ class Zitifenlei(_PluginBase):
                     "file_path": str(dest),
                 }
             )
-            # 记录源文件已处理（复制模式下源文件留存字体监控目录，「待整理」不再计入）
-            self._db.mark_font_processed(str(file_path))
-            self._db.add_log(f"自动归档: {dest.name}", "info")
-            # 归档成功：同步更新目录文件名索引，批内后续同名字体可直接判重跳过
-            try:
-                dkey = str(dest_dir)
-                if dkey in self._dest_name_index:
-                    self._dest_name_index[dkey].add((dest.stem.lower(), dest.suffix.lower()))
-            except Exception:
-                pass
-            # 归档成功：标记 assfonts 索引需要重建（由调用方调度延迟聚合重建）
-            self._index_dirty = True
-            return font_id
         except Exception as err:
             # 写库失败：回滚刚归档的文件，不留「文件进库、记录缺失」的孤儿
-            # （copy 模式删掉副本；move 模式源已被移走，搬回原位）
+            # （copy 模式删掉副本；move 模式源已被删且未恢复时搬回原位）
             try:
                 if dest.exists():
-                    if archive_mode == "move" and Path(str(file_path)).resolve() != dest.resolve():
+                    if archive_mode == "move" and not Path(str(file_path)).exists():
                         shutil.move(str(dest), str(file_path))
                         self._db.add_log(f"自动归档回滚: {dest.name} 已移回 {file_path.name}", "warning")
                     else:
@@ -1224,8 +1700,30 @@ class Zitifenlei(_PluginBase):
                         self._db.add_log(f"自动归档回滚: 已删除副本 {dest.name}", "warning")
             except Exception:
                 pass
-            self._db.add_log(f"写库失败 {dest.name}: {err}", "error")
+            try:
+                self._db.add_log(f"写库失败 {dest.name}: {err}", "error")
+            except Exception:
+                pass
             return None
+        # 记录已落库：后续标记/索引失败只记日志，绝不能再回滚文件（否则记录指向不存在的文件）
+        try:
+            # 记录源文件已处理（复制模式下源文件留存字体监控目录，「待整理」不再计入）
+            self._db.mark_font_processed(str(file_path))
+            self._db.add_log(f"自动归档: {dest.name}", "info")
+            # 同步写入 fontTools 增量索引（face/cmap/别名），字形级检测与子集化立即可用
+            self._index_font_path(dest)
+            # 归档成功：同步更新目录文件名索引，批内后续同名字体可直接判重命中
+            dkey = str(dest_dir)
+            if dkey in self._dest_name_index:
+                self._dest_name_index[dkey][(dest.stem.lower(), dest.suffix.lower())] = str(dest)
+            # 归档成功：标记字体索引需要重建（由调用方调度延迟聚合重建）
+            self._index_dirty = True
+        except Exception as err:
+            try:
+                self._db.add_log(f"归档后置处理失败 {dest.name}: {err}", "warning")
+            except Exception:
+                pass
+        return font_id
 
     def _archive_from_dir(self, directory: Path, source: str = "auto") -> Dict[str, Any]:
         """批量自动归档目录内字体（定时兜底）：直接写入字体库，不经过待确认。
@@ -1306,6 +1804,8 @@ class Zitifenlei(_PluginBase):
 
         连续放入的一批文件（如一次拖 5 个字体 + 几部字幕）合并成一条归类通知。
         """
+        if self._stopping or not self._enabled:
+            return
         with self._lock:
             t = self._notify_agg.get("timer")
             if t:
@@ -1385,6 +1885,7 @@ class Zitifenlei(_PluginBase):
             subs_missing = list(buf.get("subs_missing") or [])
             subs_subset = list(buf.get("subs_subset") or [])
             subs_ok = list(buf.get("subs_ok") or [])
+            subs_unverified = list(buf.get("subs_unverified") or [])
             buf["fonts"] = []
             buf["fonts_skipped"] = []
             buf["fonts_dup_deleted"] = 0
@@ -1395,6 +1896,7 @@ class Zitifenlei(_PluginBase):
             buf["subs_missing"] = []
             buf["subs_subset"] = []
             buf["subs_ok"] = []
+            buf["subs_unverified"] = []
             buf["timer"] = None
         if not (
             fonts
@@ -1406,6 +1908,7 @@ class Zitifenlei(_PluginBase):
             or subs_missing
             or subs_subset
             or subs_ok
+            or subs_unverified
         ):
             return
         if not self.get_resource_or_config("notify_enabled"):
@@ -1434,7 +1937,7 @@ class Zitifenlei(_PluginBase):
                 f"⏳ 已加入待确认 {len(fonts_pending)} 个字体，等待一键整理：{'、'.join(shown)}"
                 + (f" 等 {more} 个" if more > 0 else ""),
             )
-        if subs_missing or subs_subset or subs_ok:
+        if subs_missing or subs_subset or subs_ok or subs_unverified:
             # 字幕检查通知（仅字幕，按缺失/子集化/齐全分类）
             lines: List[str] = []
             for m in subs_missing:
@@ -1456,117 +1959,606 @@ class Zitifenlei(_PluginBase):
                 shown = subs_ok[:10]
                 more = len(subs_ok) - len(shown)
                 lines.append(
-                    f"✅ 字体齐全 {len(subs_ok)} 个：{'、'.join(shown)}"
+                    f"✅ 字体齐全（已逐字符验证）{len(subs_ok)} 个：{'、'.join(shown)}"
+                    + (f" 等 {more} 个" if more > 0 else "")
+                )
+            if subs_unverified:
+                shown = subs_unverified[:10]
+                more = len(subs_unverified) - len(shown)
+                lines.append(
+                    f"⚠️ 未验证字形（仅名称匹配）{len(subs_unverified)} 个：{'、'.join(shown)}"
                     + (f" 等 {more} 个" if more > 0 else "")
                 )
             if subs_missing:
                 lines.append("可在「检查页」上传缺失字体入库消除标记")
             self._notify("字体分类管家：字幕检查", "\n".join(lines))
 
-    # ─── 子集化（assfonts）───────────────────────────────
-    def _subset_binary(self) -> Optional[Path]:
-        """插件自带 bin/assfonts 可执行文件路径（不存在返回 None）"""
-        return af.get_binary(Path(__file__).resolve().parent)
+    # ─── 子集化引擎 ──────────────────────────────────────
+    def _subset_engine_ready(self) -> Tuple[bool, str]:
+        """子集化引擎就绪判断（内置 HarfBuzz / uharfbuzz）。
 
-    def _ensure_subset_index(self) -> bool:
-        """确保 assfonts 字体索引存在（懒构建）。返回索引是否可用。"""
+        返回 (ok, 说明)。上传/全量/重试/自动子集化入口统一用它。
+        """
+        hb_ok, hb_info = self._hb_status()
+        if hb_ok:
+            return True, "harfbuzz"
+        return False, f"子集化引擎不可用：{hb_info}"
+
+    # ─── fontTools 增量索引（v2，字形级检测/子集化的权威口径） ───
+
+    def _index_font_path(self, path: str | Path) -> bool:
+        """单个字体文件 → 解析全部 face 并事务性写入索引。
+
+        归档/入库路径调用；失败只记日志，不回滚已完成的归档（索引可重建修复）。
+        """
+        if self._db is None:
+            return False
         try:
-            if self._assfonts_idx is None:
-                return False
-            if (self._assfonts_idx / "fonts.json").is_file():
-                return True
-            binary = self._subset_binary()
-            if not binary:
-                return False
-            lib_dir = self.get_resource_or_config("lib_dir") or ""
-            if not lib_dir or not Path(lib_dir).is_dir():
-                return False
-            ok, msg = af.build_index(binary, [lib_dir], self._assfonts_idx)
-            # 索引（重）构建完成后清键集缓存，新归档字体立即可被检查侧命中
-            self._index_font_cache = None
-            if ok:
-                self._db.add_log(f"assfonts 字体索引已构建（{lib_dir}）", "info")
-            else:
-                self._db.add_log(f"assfonts 索引构建失败: {msg}", "error")
-            return ok
+            resolved = Path(path).resolve()
+            inspection = inspect_font(resolved)
+            result = self._db.upsert_font_file(inspection)
+            if inspection.status == "invalid":
+                self._db.add_log(
+                    f"字体索引: {resolved.name} 解析失败（{inspection.error}）",
+                    "warning",
+                )
+            if result.get("changed"):
+                self._index_dirty = True
+                # 字体库新增/更新字体后，缺失聚合缓存立即失效（按新覆盖重算）
+                self._invalidate_missing_agg()
+            return True
         except Exception as err:
             if self._db is not None:
                 try:
-                    self._db.add_log(f"assfonts 索引检查失败: {err}", "error")
+                    self._db.add_log(f"字体索引写入失败 {Path(path).name}: {err}", "warning")
                 except Exception:
                     pass
             return False
 
-    def _index_font_keys(self) -> Optional[set]:
-        """从 assfonts 索引（fonts.json）收集「字体库目录内」全部可用名字 → 归一化键集合。
-
-        assfonts 索引保存 family / full name / PostScript name 三套名字（多键匹配），
-        检查侧改用它能消除「full name / PS 名误报缺失」与 TTC 匹配问题；
-        必须按 lib_dir 过滤（索引同时被 assfonts 灌入系统字体目录）。
-
-        索引不可用（未构建 / 解析失败 / 未配置字体库目录）返回 None，
-        调用方回退字体库记录（见 _lib_font_keys），并写一条诊断日志指明原因。
-        （mtime_ns, size, lib_dir）签名缓存：索引文件未变不重读；个别网络挂载
-        stat 失败时跳过缓存直接读文件，不退出。
-        """
-        lib_dir = self.get_resource_or_config("lib_dir") or ""
-        if not lib_dir or not Path(lib_dir).is_dir() or self._assfonts_idx is None:
-            self._diag_index_unavailable("lib_dir 未配置或目录不可达")
-            return None
+    def _remove_font_from_index(self, path: str | Path) -> bool:
+        """删除字体文件记录（磁盘删除/记录清理时同步撤销索引贡献）。"""
+        if self._db is None or not path:
+            return False
+        candidates = [str(path)]
         try:
-            fp = Path(self._assfonts_idx) / "fonts.json"
-            if not fp.is_file():
-                self._diag_index_unavailable("fonts.json 不存在（索引未构建）")
-                return None
-            sig = None
-            cache = self._index_font_cache
-            try:
-                st = fp.stat()
-                sig = (st.st_mtime_ns, st.st_size, lib_dir)
-                if cache and cache[0] == sig:
-                    return cache[1]
-            except Exception:
-                sig = None  # 无法 stat：跳过缓存，直接读文件
-            data = af.load_index(self._assfonts_idx)
-            if data is None:
-                self._diag_index_unavailable("fonts.json 读取/解析失败")
-                return None
-            keys = {k for k in (normalize_font_key(x) for x in af.index_font_keys(data, lib_dir)) if k}
-            if sig is not None:
-                self._index_font_cache = (sig, keys)
-            return keys
-        except Exception as err:
-            self._diag_index_unavailable(f"索引读取异常: {err}")
-            return None
-
-    def _diag_index_unavailable(self, reason: str) -> None:
-        """索引不可用时落一条诊断日志（同一原因只记一次，避免列表接口每 30 秒轮询刷屏）"""
-        try:
-            key = "idx_unusable:" + reason
-            if getattr(self, "_index_diag_last", None) == key:
-                return
-            self._index_diag_last = key
-            if self._db is not None:
-                self._db.add_log(
-                    f"检查匹配基准回退字体库记录：{reason}（可在「子集化」页点「重建索引」）",
-                    "warning",
-                )
+            candidates.insert(0, str(Path(path).resolve()))
         except Exception:
             pass
+        for candidate in candidates:
+            try:
+                if self._db.remove_font_file(candidate).get("removed"):
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _rebuild_font_index(
+        self, force_hash: bool = False, full: bool = False, hash_sample: int = 0
+    ) -> Dict[str, Any]:
+        """扫描字体库目录提交索引；删除磁盘上已不存在的索引记录。
+
+        默认增量（日常归档/入库）：size+mtime_ns 未变的文件直接跳过解析。
+        full=True（子集化页「全部重建」）：解析结果先写暂存表，全部完成后单事务
+        原子切换到正式索引；中途停止/异常则丢弃暂存、保留旧索引（不再清空后裸奔）。
+
+        完整性门槛（P0）：`inspect_font` 返回 status=invalid 属于「确认损坏」，可安全
+        重写；但文件读取/权限/IO/解析抛异常属于「结果不确定」——不能静默丢弃其旧索引
+        贡献。全量模式下出现任何不确定失败一律不提交暂存（保留旧索引），除非显式
+        allow_incomplete。增量模式无法确定时同样不写该文件（旧记录保持不动）。
+
+        hash_sample>0 时对「stat 未变」的文件额外抽检 N 个重算 SHA-256（周核对用）：
+        size+mtime 相同但内容被替换（复制工具/恢复备份/touch 保时间戳）也能被发现。
+        """
+        stats: Dict[str, Any] = {
+            "ok": False,
+            "scanned": 0,
+            "indexed": 0,
+            "unchanged": 0,
+            "invalid": 0,
+            "failed": 0,
+            "failed_paths": [],
+            "removed": 0,
+            "hash_checked": 0,
+            "hash_mismatch": 0,
+            "error": "",
+        }
+        if self._db is None:
+            stats["error"] = "数据库未初始化"
+            return stats
+        # 破坏性维护（数据库恢复/清库/删除字体）进行中：本轮不重建，避免与恢复交叉写索引
+        if not self._maintenance_lock.acquire(blocking=False):
+            stats["error"] = "维护任务执行中，索引重建已跳过"
+            return stats
+        try:
+            return self._rebuild_font_index_impl(
+                stats, force_hash=force_hash, full=full, hash_sample=hash_sample
+            )
+        finally:
+            try:
+                self._maintenance_lock.release()
+            except Exception:
+                pass
+
+    def _rebuild_font_index_impl(
+        self,
+        stats: Dict[str, Any],
+        force_hash: bool = False,
+        full: bool = False,
+        hash_sample: int = 0,
+        allow_incomplete: bool = False,
+    ) -> Dict[str, Any]:
+        lib_dir = self.get_resource_or_config("lib_dir") or ""
+        if not lib_dir or not Path(lib_dir).is_dir():
+            stats["error"] = "字体库目录未配置或不存在"
+            return stats
+        root = Path(lib_dir).resolve()
+        with self._index_build_lock:
+            self._index_rebuilding = True
+            try:
+                if full:
+                    try:
+                        self._db.stage_font_index_begin()
+                    except Exception as err:
+                        stats["error"] = f"初始化重建暂存区失败: {err}"
+                        return stats
+                seen: set = set()
+                try:
+                    candidates = [
+                        item
+                        for item in root.rglob("*")
+                        if item.is_file() and is_font_file(item.name) and not self._is_system_hidden_path(item)
+                    ]
+                except Exception as err:
+                    stats["error"] = f"扫描字体库失败: {err}"
+                    if full:
+                        try:
+                            self._db.stage_font_index_discard()
+                        except Exception:
+                            pass
+                    return stats
+                aborted = False
+
+                def _record_uncertain(item_name: str, why: str) -> None:
+                    """记录「结果不确定」的文件：不静默漏过，全量模式下阻止提交。"""
+                    stats["failed"] += 1
+                    if len(stats["failed_paths"]) < 20:
+                        stats["failed_paths"].append(item_name)
+                    try:
+                        self._db.add_log(f"字体索引结果不确定 {item_name}: {why}", "warning")
+                    except Exception:
+                        pass
+
+                hash_budget = max(0, int(hash_sample))
+
+                def _hash_mismatch(resolved: Path, existing: Dict[str, Any]) -> bool:
+                    """抽检：重算 SHA-256 与索引记录比对（发现同大小同时间戳的内容替换）。
+
+                    hash_budget 用尽后不再计算，直接按 stat 判定未变。
+                    """
+                    nonlocal hash_budget
+                    if hash_budget <= 0:
+                        return False
+                    old_sha = str(existing.get("sha256") or "")
+                    if not old_sha:
+                        return False
+                    hash_budget -= 1
+                    try:
+                        h = hashlib.sha256()
+                        with resolved.open("rb") as fh:
+                            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                                h.update(chunk)
+                        stats["hash_checked"] += 1
+                        if h.hexdigest() != old_sha:
+                            stats["hash_mismatch"] += 1
+                            return True
+                    except Exception as err:
+                        _record_uncertain(resolved.name, f"哈希抽检失败: {err}")
+                    return False
+
+                for item in sorted(candidates):
+                    if self._stopping:
+                        aborted = True
+                        break
+                    try:
+                        resolved = item.resolve()
+                    except Exception as err:
+                        _record_uncertain(item.name, f"解析真实路径失败: {err}")
+                        continue
+                    key = str(resolved)
+                    seen.add(key)
+                    stats["scanned"] += 1
+                    try:
+                        st = resolved.stat()
+                    except Exception as err:
+                        _record_uncertain(item.name, f"读取文件属性失败: {err}")
+                        continue
+                    try:
+                        existing = self._db.get_font_file(key)
+                        if (
+                            not full
+                            and not force_hash
+                            and existing
+                            and int(existing.get("size") or 0) == st.st_size
+                            and int(existing.get("mtime_ns") or 0) == st.st_mtime_ns
+                            and str(existing.get("status") or "ok") in ("ok", "partial")
+                        ):
+                            if not _hash_mismatch(resolved, existing):
+                                stats["unchanged"] += 1
+                                continue
+                        inspection = inspect_font(resolved)
+                        if full:
+                            self._db.stage_font_index_add(inspection)
+                        else:
+                            self._db.upsert_font_file(inspection)
+                        stats["indexed"] += 1
+                        if inspection.status == "invalid":
+                            stats["invalid"] += 1
+                        elif stats["indexed"] == 1 or stats["indexed"] % 200 == 0:
+                            self._db.add_log(
+                                f"字体索引重建中：已处理 {stats['indexed']} 个文件（当前 {resolved.name}）",
+                                "info",
+                            )
+                    except Exception as err:
+                        # 解析/写索引抛异常 = 结果不确定（权限/IO/解析器异常）：
+                        # 不能当作「确认损坏」丢弃旧索引贡献，也不能静默漏过
+                        _record_uncertain(item.name, str(err))
+                if aborted:
+                    # 停服/中途中断：全量重建丢弃暂存，正式索引保持上一次的可用状态
+                    if full:
+                        try:
+                            self._db.stage_font_index_discard()
+                        except Exception:
+                            pass
+                    stats["error"] = "重建已中止（旧索引保留）"
+                    return stats
+                if full:
+                    # 提交前完整性门槛：候选必须全部有明确结果（有效/确认损坏），
+                    # 出现任何「结果不确定」的文件一律不切换，保留旧索引（默认拒绝不完整索引）
+                    accounted = stats["indexed"] + stats["unchanged"] + stats["failed"]
+                    if not allow_incomplete and (
+                        stats["failed"] or accounted != len(candidates)
+                    ):
+                        try:
+                            self._db.stage_font_index_discard()
+                        except Exception:
+                            pass
+                        detail = "、".join(stats["failed_paths"][:5])
+                        stats["error"] = (
+                            f"全量重建未提交：{stats['failed']} 个文件结果不确定"
+                            + (f"（{detail}）" if detail else "")
+                            + "，已保留旧索引。请检查文件权限/网络盘后重试"
+                        )
+                        try:
+                            self._db.add_log(stats["error"], "warning")
+                        except Exception:
+                            pass
+                        return stats
+                    try:
+                        self._db.stage_font_index_commit(lib_dir=str(root), engine="fontTools")
+                    except Exception as err:
+                        try:
+                            self._db.stage_font_index_discard()
+                        except Exception:
+                            pass
+                        stats["error"] = f"切换索引失败（旧索引保留）: {err}"
+                        return stats
+                else:
+                    # 增量模式：清理磁盘上已不存在的（只处理字体库根目录下的记录，外部路径不动）
+                    try:
+                        rows = self._db.query("SELECT id, path FROM font_files")
+                        for row in rows:
+                            path_text = str(row.get("path") or "")
+                            if not path_text or path_text in seen:
+                                continue
+                            try:
+                                if _path_within(Path(path_text), root):
+                                    removed = self._db.remove_font_file(path_text)
+                                    if removed.get("removed"):
+                                        stats["removed"] += 1
+                            except Exception:
+                                continue
+                    except Exception:
+                        pass
+                    try:
+                        self._db.index_set("last_rebuild", self._db.now())
+                        self._db.index_set("engine", "fontTools")
+                        self._db.index_set("lib_dir", str(root))
+                    except Exception:
+                        pass
+                self._index_last_build_ts = time.time()
+                stats["ok"] = True
+                if stats["indexed"] or stats["removed"] or full:
+                    # 索引内容变化（新增/更新/删除）→ 缺失聚合按新库重算
+                    self._invalidate_missing_agg()
+                return stats
+            finally:
+                self._index_rebuilding = False
+
+    def _ensure_font_index(self, force: bool = False) -> bool:
+        """索引可用性保障：库目录变更/索引为空时懒做一次全量扫描（带节流）。
+
+        有重建进行中时直接返回 False：让检查/子集化本轮跳过，宁可不动，
+        也不要在旧索引或空索引上批量误报缺字体。
+        """
+        if self._db is None or self._index_rebuilding:
+            return False
+        lib_dir = self.get_resource_or_config("lib_dir") or ""
+        if not lib_dir or not Path(lib_dir).is_dir():
+            return False
+        resolved_lib = str(Path(lib_dir).resolve())
+        try:
+            summary = self._db.index_stats()
+        except Exception:
+            summary = {"faces": 0}
+        indexed_lib = str(self._db.index_get("lib_dir", "") or "")
+        if not force and summary.get("faces") and indexed_lib == resolved_lib:
+            return True
+        now = time.time()
+        if not force and (now - self._index_last_build_ts) < 300 and summary.get("faces"):
+            return True
+        if not self._index_build_lock.acquire(blocking=False):
+            # 另一个线程正在重建：本轮不要用抢锁前读到的旧状态给出结论
+            return False
+        try:
+            # 抢到锁后重新读：避免把重建前的空/旧 summary 当成当前状态
+            try:
+                summary2 = self._db.index_stats()
+            except Exception:
+                summary2 = {"faces": 0}
+            indexed_lib2 = str(self._db.index_get("lib_dir", "") or "")
+            if not force and summary2.get("faces") and indexed_lib2 == resolved_lib:
+                return True
+            if force or (time.time() - self._index_last_build_ts) >= 1.0:
+                result = self._rebuild_font_index()
+                if result.get("ok"):
+                    self._db.add_log(
+                        f"字体索引已重建：扫描 {result['scanned']}、更新 {result['indexed']}、"
+                        f"未变 {result['unchanged']}、清理 {result['removed']}",
+                        "info",
+                    )
+                elif result.get("error"):
+                    self._db.add_log(f"字体索引重建失败：{result['error']}", "warning")
+            try:
+                return bool(self._db.index_stats().get("faces"))
+            except Exception:
+                return False
+        finally:
+            self._index_build_lock.release()
+
+    def _startup_light_check(self) -> None:
+        """启动轻检包装：持索引构建锁，避免与全量重建/其他轻检并发互删索引行。"""
+        with self._index_build_lock:
+            self._startup_light_check_impl()
+
+    def _startup_light_check_impl(self) -> None:
+        """启动轻检（后台线程）：stat 比对磁盘与索引，不做全量解析。
+
+        - 索引为空（新装/换库/升级后重建）→ 从磁盘重建字体库；
+        - 已索引文件磁盘不存在 → 撤销其索引贡献；
+        - size/mtime 变化 → 只重解析这几个文件；
+        - 磁盘上存在但索引里没有的新字体（watchdog 漏事件/外部直接放入/迁移丢记录）
+          → 一并增量补索引：轻检不能只看数据库记录，否则永远发现不了「未入索引的新文件」；
+        - 未变化文件零解析开销，万级字体库也不拖慢启动。
+        """
+        if self._db is None:
+            return
+        try:
+            lib_dir = self.get_resource_or_config("lib_dir") or ""
+            if not lib_dir or not Path(lib_dir).is_dir():
+                return
+            root = Path(lib_dir)
+            rows = self._db.query("SELECT path, size, mtime_ns FROM font_files")
+            if not rows:
+                stats = self._rebuild_font_index()
+                if stats.get("ok"):
+                    self._db.add_log(
+                        f"启动轻检：索引为空，已从磁盘重建字体库"
+                        f"（更新 {stats.get('indexed', 0)}、清理 {stats.get('removed', 0)}）",
+                        "info",
+                    )
+                elif stats.get("error"):
+                    self._db.add_log(f"启动轻检：字体库重建失败（{stats['error']}）", "warning")
+                return
+            missing = changed = 0
+            indexed_paths: set = set()
+            for row in rows:
+                if self._stopping:
+                    return
+                path_text = str(row.get("path") or "")
+                if not path_text:
+                    continue
+                indexed_paths.add(path_text)
+                try:
+                    p = Path(path_text)
+                    if not p.is_file():
+                        if self._remove_font_from_index(path_text):
+                            missing += 1
+                        continue
+                    st = p.stat()
+                    if (
+                        int(row.get("size") or 0) == st.st_size
+                        and int(row.get("mtime_ns") or 0) == st.st_mtime_ns
+                    ):
+                        continue
+                    if self._index_font_path(p):
+                        changed += 1
+                except Exception:
+                    continue
+            # 磁盘清单对比：补发现「磁盘存在、索引没有」的新字体（轻量 stat，不解析全部）
+            discovered = 0
+            try:
+                for item in root.rglob("*"):
+                    if self._stopping:
+                        break
+                    if not item.is_file() or not is_font_file(item.name):
+                        continue
+                    if self._is_system_hidden_path(item):
+                        continue
+                    try:
+                        resolved_key = str(item.resolve())
+                    except Exception:
+                        continue
+                    if resolved_key in indexed_paths:
+                        continue
+                    if self._index_font_path(item):
+                        discovered += 1
+                        indexed_paths.add(resolved_key)
+            except Exception as err:
+                self._db.add_log(f"启动轻检：磁盘清单对比失败（{err}）", "warning")
+            if missing or changed or discovered:
+                self._invalidate_missing_agg()
+                self._db.add_log(
+                    f"启动轻检完成：撤销失效 {missing} 个、增量更新 {changed} 个、"
+                    f"新发现补索引 {discovered} 个（共 {len(rows)} 个已索引文件）",
+                    "info" if not missing else "warning",
+                )
+        except Exception as err:
+            try:
+                if self._db is not None:
+                    self._db.add_log(f"启动轻检失败: {err}", "warning")
+            except Exception:
+                pass
+
+    def _schedule_startup_light_check(self) -> None:
+        """按配置在后台线程执行启动轻检（不阻塞插件初始化）。"""
+        if not bool(self.get_resource_or_config("startup_light_check")):
+            return
+        if not self._enabled or self._db is None:
+            return
+        t = threading.Thread(target=self._startup_light_check, name="zt-light-check", daemon=True)
+        t.start()
+
+    def _weekly_reconcile_task(self) -> None:
+        """每周差异核对（cron）：size+mtime 指纹比对磁盘与索引，只重解析差异文件。
+
+        stat 指纹相同不代表内容相同（复制工具/NAS/恢复备份可能保留 mtime），
+        因此每周额外抽检 _WEEKLY_HASH_SAMPLE 个「未变」文件重算 SHA-256：
+        抽检不一致 → 视为已变更，重解析并刷新索引贡献。
+        """
+        if not self._enabled or self._db is None:
+            return
+        if not bool(self.get_resource_or_config("weekly_reconcile")):
+            return
+        result = self._rebuild_font_index(hash_sample=self._WEEKLY_HASH_SAMPLE)
+        if not result.get("ok"):
+            self._db.add_log(f"每周差异核对失败：{result.get('error') or '未知错误'}", "warning")
+            return
+        self._db.add_log(
+            f"每周差异核对完成：扫描 {result.get('scanned', 0)}、更新 {result.get('indexed', 0)}、"
+            f"未变 {result.get('unchanged', 0)}、清理 {result.get('removed', 0)}、"
+            f"哈希抽检 {result.get('hash_checked', 0)}（命中内容替换 {result.get('hash_mismatch', 0)}）",
+            "info",
+        )
+        if int(result.get("indexed") or 0) or int(result.get("removed") or 0):
+            self._recheck_missing_after_library_change("每周差异核对")
+
+    def _glyph_check(self, raw: bytes) -> Optional[Any]:
+        """字形级检测：ASS 用到的每个字体名 → 索引 face → 逐字符缺失。索引不可用返回 None。"""
+        if self._db is None or not self._ensure_font_index():
+            return None
+        try:
+            usage, warnings = parse_ass_usage(raw)
+        except Exception as err:
+            self._db.add_log(f"ASS 字形解析失败: {err}", "warning")
+            return None
+        if not usage:
+            return None
+
+        def _lookup(name: str) -> List[FaceCoverage]:
+            rows = self._db.lookup_faces(name) or []
+            return [
+                FaceCoverage(
+                    face_id=int(row.get("face_id") or 0),
+                    file_path=str(row.get("file_path") or ""),
+                    face_index=int(row.get("face_index") or 0),
+                    names=list(row.get("names") or []),
+                    codepoints=set(row.get("codepoints") or set()),
+                )
+                for row in rows
+            ]
+
+        result = evaluate_usage(usage.values(), _lookup)
+        for warning in warnings:
+            try:
+                self._db.add_log(f"ASS 解析提示: {warning}", "info")
+            except Exception:
+                pass
+        return result
+
+    def _lookup_face_refs(self, name: str) -> List[FaceRef]:
+        """子集化用：字体名 → FaceRef（过滤已不存在的文件）。"""
+        if self._db is None:
+            return []
+        refs: List[FaceRef] = []
+        for row in self._db.lookup_faces(name) or []:
+            path = str(row.get("file_path") or "")
+            if not path or not Path(path).is_file():
+                continue
+            refs.append(
+                FaceRef(
+                    file_path=path,
+                    face_index=int(row.get("face_index") or 0),
+                    codepoints=set(row.get("codepoints") or set()),
+                    names=list(row.get("names") or []),
+                )
+            )
+        return refs
+
+    def _hb_status(self) -> Tuple[bool, str]:
+        if self._hb_probe is None:
+            self._hb_probe = hb_available()
+        return self._hb_probe
+
+    def _snapshot_remaining(
+        self, row: Dict[str, Any], coverage_cache: Optional[Dict[str, set]] = None
+    ) -> Tuple[set, set, str]:
+        """字形快照行 → (全部缺失码点, 仍缺码点, 仍缺字符)。
+
+        按「当前字体库」该字体名（含别名/TTC 各 face）的字符覆盖实时扣除：
+        从字体库上传/归档补齐字体后，已覆盖的缺失字符自动消失，无需重新检查字幕。
+        """
+        raw_cps = row.get("missing_codepoints")
+        try:
+            if isinstance(raw_cps, (list, tuple, set)):
+                cps = {int(v) for v in raw_cps}  # latest_missing_glyphs 已解析成列表
+            else:
+                cps = {int(v) for v in json.loads(raw_cps or "[]")}
+        except Exception:
+            cps = set()
+        name = str(row.get("font_name") or "")
+        key = normalize_font_key(name)
+        if coverage_cache is not None and key in coverage_cache:
+            covered = coverage_cache[key]
+        else:
+            covered = set()
+            try:
+                if self._db is not None:
+                    for face in self._db.lookup_faces(name) or []:
+                        covered |= set(face.get("codepoints") or set())
+            except Exception:
+                pass
+            if coverage_cache is not None:
+                coverage_cache[key] = covered
+        remain = cps - covered
+        chars = "".join(chr(cp) for cp in sorted(remain) if 0 < cp <= 0x10FFFF)
+        return cps, remain, chars
 
     def _lib_font_keys(self) -> Tuple[set, str]:
         """检查侧「字体库有哪些字体」统一口径：返回 (归一化键集, 匹配来源)。
 
-        索引可用 → (索引键集, "index")：与子集化共用同一份 assfonts fonts.json；
-        索引不可用（未构建/读不到/库目录未配置）→ 回退字体库记录 family，
-        (DB键集, "db")，保证旧环境检查功能不整体失效。
+        优先级：fontTools 增量索引 font_aliases（权威，含 family/全名/PS/排版名别名）
+        → 字体库记录 family（"db"，索引不可用时的兜底）。
         """
         if self._db is None:
             return set(), "db"
         try:
-            idx = self._index_font_keys()
-            if idx is not None:
-                return idx, "index"
+            # fontTools 增量索引（权威口径）：font_aliases 已是归一化键
+            if self._ensure_font_index():
+                rows = self._db.query("SELECT alias FROM font_aliases")
+                keys = {str(r.get("alias") or "") for r in rows}
+                keys.discard("")
+                if keys:
+                    return keys, "index"
         except Exception:
             pass
         try:
@@ -1576,10 +2568,10 @@ class Zitifenlei(_PluginBase):
         return fams, "db"
 
     def _schedule_index_rebuild(self, delay: float = 5.0) -> None:
-        """自动归档后延迟聚合重建 assfonts 索引：一次拖入多个字体时 5 秒窗口内合并为一次重建，
+        """自动归档后延迟聚合重建索引：一次拖入多个字体时 5 秒窗口内合并为一次重建，
         避免逐文件重建拖慢监控；同时跳过已重建的重复调度。"""
         try:
-            if not self._index_dirty:
+            if self._stopping or not self._enabled or not self._index_dirty:
                 return
             timer = self._index_rebuild_timer
             if timer:
@@ -1607,15 +2599,17 @@ class Zitifenlei(_PluginBase):
                 self._index_dirty = False
                 ok, msg = self._rebuild_subset_index_silent()
                 if ok:
-                    self._db.add_log("assfonts 字体索引已自动重建（自动归档后）", "info")
+                    self._db.add_log("字体索引已自动重建（自动归档后）", "info")
+                    # 自动归档补齐字体后，立即重检受影响字幕（字体已在索引里，重建不会重复计入新增）
+                    self._recheck_missing_after_library_change("自动归档")
                 else:
-                    self._db.add_log(f"assfonts 索引自动重建失败: {msg}", "warning")
+                    self._db.add_log(f"字体索引自动重建失败: {msg}", "warning")
             finally:
                 self._scan_lock.release()
         except Exception as err:
             try:
                 if self._db is not None:
-                    self._db.add_log(f"assfonts 索引自动重建异常: {err}", "warning")
+                    self._db.add_log(f"字体索引自动重建异常: {err}", "warning")
             except Exception:
                 pass
 
@@ -1663,13 +2657,15 @@ class Zitifenlei(_PluginBase):
             pass
         return name
 
-    def _sync_subset_output(self, out: Path, subdir: Path, show: str = "") -> Tuple[Optional[Path], str]:
+    def _sync_subset_output(self, out: Path, show: str = "") -> Tuple[Optional[Path], str]:
         """子集化成品同步到「子集化输出目录」（subset_out_dir）。
 
         未配置输出目录 → 返回 (None, "")（保持原目录产物，不影响调用方）；
-        配置了 → 按 subset_out_mode 复制(copy)/移动(move) 成品 ass 与子集字体夹到输出目录，
+        配置了 → 按 subset_out_mode 复制(copy)/移动(move) 成品 ass 到输出目录，
         show（剧名）非空时输出到 输出目录/<剧名>/ 子文件夹（监控来源按剧分类，多剧不混在一起），
         返回 (同步后成品路径, 说明)。失败/无需同步时返回 (None, 说明)。
+
+        字体已内嵌进 .ziti.ass，不再产生 *_subsetted 字体夹，因此这里只同步字幕成品。
         """
         out_dir = self.get_resource_or_config("subset_out_dir") or ""
         if not out_dir:
@@ -1692,16 +2688,7 @@ class Zitifenlei(_PluginBase):
                 shutil.move(str(out), str(dst))
             else:
                 shutil.copy2(str(out), str(dst))
-            # 子集字体夹（<stem>_subsetted）：仅当「是否在输出端保留子集化字体文件夹」开启时才随成品同步。
-            # 子集字体已内嵌进 .assfonts.ass，该夹子仅是 assfonts 顺手的备份，不同步不影响播放。
-            if subdir and subdir.is_dir() and bool(self.get_resource_or_config("subset_sync_subdir")):
-                dst_sub = d / subdir.name
-                if mode == "move":
-                    if dst_sub.exists():
-                        shutil.rmtree(dst_sub, ignore_errors=True)
-                    shutil.move(str(subdir), str(dst_sub))
-                elif not dst_sub.exists():
-                    shutil.copytree(str(subdir), str(dst_sub))
+            # 子集字体已内嵌进 .ziti.ass，不再随成品同步字体夹（旧版 *_subsetted 仅备份，已移除）
             if self._db is not None:
                 self._db.add_log(f"子集化成品{'移动' if mode == 'move' else '已输出'}: {dst}", "info")
             return dst, f"输出目录：{dst}"
@@ -1709,6 +2696,265 @@ class Zitifenlei(_PluginBase):
             if self._db is not None:
                 self._db.add_log(f"子集化成品同步输出目录失败: {err}", "warning")
             return None, f"同步失败: {err}"
+
+    # 子集化工作进程超时：60 秒基础 + 每字体 10 秒，上限 300 秒
+    _SUBSET_WORKER_TIMEOUT_BASE = 60.0
+    _SUBSET_WORKER_TIMEOUT_PER_FONT = 10.0
+    _SUBSET_WORKER_TIMEOUT_MAX = 300.0
+    # 每周差异核对时对「stat 未变」文件额外做哈希抽检的条数（发现同大小同时间戳的内容替换）
+    _WEEKLY_HASH_SAMPLE = 50
+
+    def _subset_with_hb(self, src: Path, out_path: Path) -> Dict[str, Any]:
+        """用 HarfBuzz 引擎子集化一份字幕，返回与其他子集化引擎同构的字典。
+
+        任一字体完全缺失 → status=missing（不产出半成品）；仅部分字符未覆盖 →
+        success + warning（已覆盖字符正常内嵌）。默认在独立工作进程中执行，
+        uharfbuzz 段错误/病态字体只影响当前字幕；隔离开启时工作进程无法启动直接
+        报错（不允许回退主进程执行），只有显式关闭隔离开关才走进程内模式
+        （两条路径共用 subset_ass_with_plan，结果口径一致）。
+        """
+        try:
+            raw = src.read_bytes()
+            usage, _warnings = parse_ass_usage(raw)
+            usage_map = {item.name: set(item.codepoints) for item in usage.values()}
+            # 预检整字体缺失：引擎在"部分字体缺失"时仍会写出只含其余字体的半成品，
+            # 直接调用会覆盖上一版可用成品。这里先按 @合并口径解析字体，
+            # 只要任一字体完全无法覆盖 → 不调用引擎，旧成品保持不动。
+            merged: Dict[str, set] = {}
+            for raw_name, chars in usage_map.items():
+                name = raw_name[1:] if raw_name.startswith("@") else raw_name
+                merged.setdefault(name, set()).update(chars)
+            missing_pre: List[str] = []
+            plan: List[Dict[str, Any]] = []
+            plan_warnings: List[str] = []
+            for name, chars in merged.items():
+                if not chars:
+                    continue
+                try:
+                    refs = self._lookup_face_refs(name) or []
+                except Exception:
+                    refs = []
+                ref = hb_choose_face(refs, chars) if refs else None
+                covered = (chars & set(ref.codepoints)) if ref is not None else set()
+                if not covered:
+                    missing_pre.append(name)
+                    continue
+                if len(covered) < len(chars):
+                    plan_warnings.append(
+                        f"字体「{name}」只覆盖 {len(covered)}/{len(chars)} 个字符，缺失字符沿用播放器回退"
+                    )
+                plan.append(
+                    {
+                        "font_name": name,
+                        "file_path": ref.file_path,
+                        "face_index": ref.face_index,
+                        "codepoints": sorted(covered),
+                    }
+                )
+            if missing_pre:
+                return {
+                    "status": "missing",
+                    "out": "",
+                    "reason": "缺字体: " + "、".join(missing_pre),
+                    "missing_fonts": missing_pre,
+                }
+            result: Optional[SubsetResult] = None
+            if self.get_resource_or_config("subset_process_isolation"):
+                result = self._subset_via_worker(src, out_path, plan, plan_warnings)
+                if result is None:
+                    # P2-15：隔离开启时禁止回退主进程执行——最需要隔离的正是
+                    # worker 起不来的环境（依赖/路径问题），此时回到主进程跑
+                    # uharfbuzz 等于把段错误风险重新引回 MoviePilot 宿主。
+                    return {
+                        "status": "error",
+                        "out": "",
+                        "reason": "子集化进程隔离已开启，但工作进程无法启动"
+                        "（请检查插件目录下的 subset_worker.py 与 Python 解释器/uharfbuzz 依赖）；"
+                        "已拒绝在主进程内执行。如需进程内模式请在设置中关闭「子集化进程隔离」",
+                        "missing_fonts": [],
+                    }
+            else:
+                # 用户显式关闭隔离：进程内执行（与旧版本行为一致）
+                result = hb_subset_ass_file(src, out_path, usage_map, self._lookup_face_refs)
+        except Exception as err:
+            return {"status": "error", "out": "", "reason": f"HarfBuzz 子集化异常: {err}", "missing_fonts": []}
+        if result.missing_fonts:
+            # 缺字体时引擎在写盘前就返回，本轮没有产出任何文件；
+            # 不要删 out_path —— 那可能是上一轮成功生成、播放器正在用的成品。
+            return {
+                "status": "missing",
+                "out": "",
+                "reason": "缺字体: " + "、".join(result.missing_fonts),
+                "missing_fonts": list(result.missing_fonts),
+            }
+        if not result.success:
+            return {
+                "status": "error",
+                "out": "",
+                "reason": "；".join(result.errors)[:300] or "子集化失败",
+                "missing_fonts": [],
+            }
+        notes = list(result.warnings)
+        if self._db is not None and result.embedded:
+            try:
+                self._db.add_log(
+                    f"HarfBuzz 子集化: {src.name} 内嵌 {len(result.embedded)} 个字体、"
+                    f"{sum(item.encoded_size for item in result.embedded)} 字节",
+                    "info",
+                )
+            except Exception:
+                pass
+        return {
+            "status": "success",
+            "out": result.out_path,
+            "reason": "；".join(notes),
+            "missing_fonts": [],
+        }
+
+    def _subset_via_worker(
+        self,
+        src: Path,
+        out_path: Path,
+        plan: List[Dict[str, Any]],
+        warnings: Optional[List[str]] = None,
+    ) -> Optional[SubsetResult]:
+        """在常驻工作进程中执行子集化。
+
+        返回 None 表示工作进程无法启动（脚本缺失/解释器不可用），调用方回退进程内；
+        崩溃、超时、协议异常返回带 errors 的 SubsetResult（已隔离，不影响宿主进程）。
+        进程崩溃/超时后客户端会杀掉当前进程，下一次请求自动重启。
+        """
+        client = self._get_subset_worker()
+        if client is None:
+            return None
+        payload = {
+            "v": 1,
+            "task": "subset_ass",
+            "ass_path": str(src),
+            "out_path": str(out_path),
+            "plan": plan,
+            "warnings": list(warnings or []),
+        }
+        timeout = min(
+            self._SUBSET_WORKER_TIMEOUT_MAX,
+            self._SUBSET_WORKER_TIMEOUT_BASE
+            + self._SUBSET_WORKER_TIMEOUT_PER_FONT * max(1, len(plan)),
+        )
+        started = time.time()
+        try:
+            data = client.request(payload, timeout=timeout)
+        except SubsetWorkerTimeout:
+            self._cleanup_subset_temp(out_path, since=started)
+            return SubsetResult(
+                errors=[f"子集化超时（{int(timeout)} 秒），工作进程已终止（已隔离）"]
+            )
+        except SubsetWorkerStartError as err:
+            # 启动失败：交给调用方回退进程内，避免插件功能不可用
+            _logger.warning("子集化工作进程启动失败，回退进程内执行: %s", err)
+            return None
+        except SubsetWorkerCrashed as err:
+            self._cleanup_subset_temp(out_path, since=started)
+            return SubsetResult(errors=[f"子集化引擎崩溃（{err}，已隔离）"])
+        except Exception as err:
+            self._cleanup_subset_temp(out_path, since=started)
+            return SubsetResult(errors=[f"子集化引擎异常（{err}，已隔离）"])
+        result = self._subset_result_from_worker(data)
+        if not result.warnings and warnings:
+            result.warnings = list(warnings)
+        if result.success and (not result.out_path or not Path(result.out_path).is_file()):
+            result.success = False
+            result.errors.append("工作进程报告成功，但产物文件不存在")
+        return result
+
+    def _get_subset_worker(self) -> Optional[SubsetWorkerClient]:
+        """懒启动常驻工作进程；脚本缺失返回 None（调用方回退进程内执行）。"""
+        worker = Path(__file__).resolve().parent / "subset_worker.py"
+        if not worker.is_file():
+            _logger.warning("子集化工作进程不存在，回退进程内执行: %s", worker)
+            return None
+        client = self._subset_worker
+        if client is None:
+            client = SubsetWorkerClient(worker)
+            self._subset_worker = client
+        return client
+
+    def _close_subset_worker(self) -> None:
+        """关闭常驻工作进程（停插件/重载配置/进程退出前）：立即中止，不等在途请求。"""
+        client = self._subset_worker
+        self._subset_worker = None
+        if client is not None:
+            try:
+                client.abort()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _subset_result_from_worker(data: Dict[str, Any]) -> SubsetResult:
+        """工作进程 JSON → SubsetResult（字段缺失时按失败/空值处理）。"""
+        result = SubsetResult()
+        result.success = bool(data.get("success"))
+        result.out_path = str(data.get("out_path") or "")
+        result.missing_fonts = [str(item) for item in (data.get("missing_fonts") or [])]
+        result.errors = [str(item) for item in (data.get("errors") or [])]
+        result.warnings = [str(item) for item in (data.get("warnings") or [])]
+        for item in data.get("embedded") or []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                result.embedded.append(
+                    SubsetEmbed(
+                        font_name=str(item.get("font_name") or ""),
+                        file_path=str(item.get("file_path") or ""),
+                        face_index=int(item.get("face_index") or 0),
+                        required=int(item.get("required") or 0),
+                        encoded_size=int(item.get("encoded_size") or 0),
+                    )
+                )
+            except Exception:
+                continue
+        return result
+
+    @staticmethod
+    def _cleanup_subset_temp(out_path: Path, since: float = 0.0) -> None:
+        """清理被杀工作进程留下的临时文件（引擎用 .<out.name>.xxxx.tmp 落盘）。"""
+        try:
+            parent = Path(out_path).parent
+            if not parent.is_dir():
+                return
+            prefix = f".{Path(out_path).name}."
+            for item in parent.iterdir():
+                try:
+                    # 只认引擎本轮的临时命名，避免误删同目录其他文件
+                    if not item.name.startswith(prefix) or not item.name.endswith(".tmp"):
+                        continue
+                    if item.is_file() and item.stat().st_mtime >= since - 1:
+                        item.unlink(missing_ok=True)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    def _subset_source_kind(self, f: Path, source: str) -> str:
+        """判定字幕的子集化来源身份：manual（上传临时目录）/ watch（字幕监控目录）/ inbound（媒体库）。
+
+        retry 无独立身份，按源字幕实际所在区域继承；判定失败按 inbound 处理。
+        """
+        if source != "retry":
+            return source
+        try:
+            if self._tmp_dir and _path_within(f, Path(self._tmp_dir)):
+                return "manual"
+            if any(
+                w and _path_within(f, Path(w))
+                for w in (
+                    str(self.get_resource_or_config("ass_dir") or ""),
+                    str(self.get_resource_or_config("subset_dir") or ""),
+                )
+            ):
+                return "watch"
+        except Exception:
+            pass
+        return "inbound"
 
     def _run_subset_batch(self, files: List[Path], source: str = "manual") -> Dict[str, Any]:
         """对一批 ass 字幕执行子集化：跳过已子集化/缺字体的记录原因，写 subset_records。
@@ -1718,17 +2964,18 @@ class Zitifenlei(_PluginBase):
         stats: Dict[str, Any] = {"success": 0, "skipped": 0, "missing": 0, "error": 0, "missing_fonts": [], "file_status": {}, "out_files": []}
         if not files:
             return stats
-        if self._db is None or self._assfonts_idx is None:
+        if self._db is None:
             return stats
-        binary = self._subset_binary()
-        if not binary:
-            self._db.add_log("子集化未执行：bin/assfonts 不存在或不可执行", "warning")
+        # 引擎：内置 HarfBuzz（fontTools 增量索引 + uharfbuzz 子集化）
+        hb_ok, hb_info = self._hb_status()
+        if not hb_ok:
+            self._db.add_log(f"子集化未执行：{hb_info}", "warning")
             return stats
-        if not self._ensure_subset_index():
-            self._db.add_log("子集化未执行：字体索引不可用（请确认字体库目录已配置）", "warning")
+        if not self._ensure_font_index():
+            self._db.add_log("子集化未执行：字体索引不可用（请确认字体库目录已配置并完成重建）", "warning")
             return stats
-        rename = self.get_resource_or_config("subset_rename") is not False
-        overwrite = bool(self.get_resource_or_config("subset_overwrite"))
+        overwrite_all = bool(self.get_resource_or_config("subset_overwrite"))
+        inbound_overwrite = bool(self.get_resource_or_config("inbound_subset_overwrite"))
         for f in files:
             try:
                 # 优雅停止：停插件时当前条子集化处理完（含写结果记录）就不再继续
@@ -1737,14 +2984,15 @@ class Zitifenlei(_PluginBase):
                 f = Path(f)
                 if not f.is_file() or not is_ass_file(f.name):
                     continue
-                # 上传临时目录的缓存源字幕不受「输出覆盖原文件」影响：上传→子集化→生成新成品
-                # （原名.assfonts.ass）供下载，从不覆盖上传的源字幕；覆盖模式只作用于媒体库/监控
-                # 目录里的源字幕。上传源缓存子集化后即清理。
-                try:
-                    if self._tmp_dir and str(f.resolve()).startswith(str(Path(self._tmp_dir).resolve())):
-                        overwrite = False
-                except Exception:
-                    pass
+                src_kind = self._subset_source_kind(f, source)
+                overwrite = overwrite_all
+                # 上传临时目录（manual）：永远不覆盖源文件，成品留临时目录供下载
+                if src_kind == "manual":
+                    overwrite = False
+                # 媒体库（inbound）：独立开关控制，默认 off 保留原字幕
+                elif src_kind == "inbound":
+                    overwrite = inbound_overwrite
+                # watch（监控目录）：走全局 subset_overwrite，不单独隔离
                 # 原始字幕名（去掉上传临时目录的 subset_<uuid> 前缀），全部状态记录统一用它
                 orig = self._original_subset_name(f)
                 # 已内嵌（子集化）字幕跳过，不重复处理
@@ -1757,19 +3005,22 @@ class Zitifenlei(_PluginBase):
                                 "status": "skipped",
                                 "reason": "已子集化（自带内嵌字体）",
                                 "out_file": "",
+                                "source": src_kind,
                             }
                         )
                         stats["skipped"] += 1
                         continue
                 except Exception:
                     pass
-                res = af.subset_ass_file(binary, f, self._assfonts_idx, rename=rename)
+                hb_out = hb_output_path(f)
+                res = self._subset_with_hb(f, hb_out)
+                # 失败/缺字体时不要删除 hb_out：引擎只在成功后原子替换目标，
+                # 失败时本轮没有写文件，路径上的内容是上一轮可用成品，必须保留。
                 status = res.get("status", "error")
                 if status == "success":
                     out = Path(res.get("out") or "")
                     # 成品输出名：以「原始字幕名」为准（去掉上传临时目录的 uuid 前缀），
-                    # 后缀（assfonts 的 -r 重命名）默认开启（subset_rename 缺省 True），
-                    # 控制成品是否保留 .assfonts 后缀；「输出覆盖原文件」开启时后缀被覆盖逻辑吞掉
+                    # 后缀固定 .ziti.ass；「输出覆盖原文件」开启时直接替换原字幕
                     orig = self._original_subset_name(f)
                     base = orig[:-4] if orig.lower().endswith(".ass") else orig
                     if overwrite:
@@ -1792,15 +3043,9 @@ class Zitifenlei(_PluginBase):
                     else:
                         final_out = out
                         try:
-                            target = Path(f.parent) / (f"{base}.assfonts.ass" if rename else f"{base}.ass")
-                            if str(target.resolve()).lower() == str(f.resolve()).lower():
-                                # 不加后缀时目标即原字幕文件 → 等同覆盖原文件，直接替换避免误删源
-                                try:
-                                    out.replace(f)
-                                    final_out = f
-                                except Exception:
-                                    final_out = out
-                            elif str(target.resolve()).lower() != str(out.resolve()).lower():
+                            # 成品固定后缀 .ziti.ass（原字幕保留不动）
+                            target = Path(f.parent) / f"{base}.ziti.ass"
+                            if str(target.resolve()).lower() != str(out.resolve()).lower():
                                 if target.exists():
                                     try:
                                         target.unlink()
@@ -1816,79 +3061,36 @@ class Zitifenlei(_PluginBase):
                     # HDR 字幕亮度：完成子集化后按档位压暗主色/描边/阴影（就地改写成品）
                     hdr_msg = ""
                     hdr_level = self.get_resource_or_config("hdr_brightness_level") or ""
-                    if final_out.is_file() and hdr_level:
-                        hdr_msg = af.apply_hdr_brightness(final_out, str(hdr_level)) or ""
+                    # 后端同时判断开关：只配档位（配置/API 直写）不应绕过 UI 的关闭语义
+                    if (
+                        final_out.is_file()
+                        and self.get_resource_or_config("hdr_brightness")
+                        and hdr_level
+                    ):
+                        hdr_msg = apply_hdr_brightness(final_out, str(hdr_level)) or ""
                         if hdr_msg:
                             self._db.add_log(f"HDR 亮度应用: {final_out.name}（{hdr_msg}）", "info")
-                    # ── 成品落位判定（来源身份）：
-                    #   inbound（MP入库）：成品只落媒体库，不同步输出目录；_subsetted 受开关控制
-                    #   watch（目录监控）：成品按「监控目录输出方式」同步到输出目录并按剧名分子文件夹；
-                    #                     _subsetted 受开关控制
-                    #   manual（手动上传）：成品只留上传临时目录，不同步输出目录；_subsetted 始终不保留
-                    #   retry：按源字幕所在区域继承身份——上传临时目录→manual；ASS/子集监控目录→watch；
-                    #          媒体库→inbound
-                    src_kind = source
-                    if source == "retry":
-                        try:
-                            p_f = Path(f)
-                            if _path_within(p_f, Path(self._tmp_dir)):
-                                src_kind = "manual"
-                            elif any(
-                                w and _path_within(p_f, Path(w))
-                                for w in (
-                                    str(self.get_resource_or_config("ass_dir") or ""),
-                                    str(self.get_resource_or_config("subset_dir") or ""),
-                                )
-                            ):
-                                src_kind = "watch"
-                            else:
-                                src_kind = "inbound"
-                        except Exception:
-                            src_kind = "inbound"
-                    keep_subdir = bool(self.get_resource_or_config("subset_sync_subdir"))
-                    sync_output = False
-                    show_folder = ""
-                    if src_kind == "watch":
-                        sync_output = True
-                        show_folder = self._extract_show_name(str(final_out))
-                    elif src_kind == "manual":
-                        keep_subdir = False  # 手动上传始终不保留子集字体夹
-                    if not sync_output:
+                    # ── 成品落位判定（来源身份，循环开头已算好 src_kind）：
+                    #   inbound（MP入库）：成品只落媒体库，不同步输出目录
+                    #   watch（目录监控）：成品按「监控目录输出方式」同步到输出目录并按剧名分子文件夹
+                    #   manual（手动上传）：成品只留上传临时目录，不同步输出目录
+                    if src_kind != "watch":
                         synced, sync_msg = "", ""
                     else:
                         synced, sync_msg = self._sync_subset_output(
-                            final_out, Path(res.get("subdir") or ""), show_folder
+                            final_out, self._extract_show_name(str(final_out))
                         )
-                    # 「是否在输出端保留子集化字体文件夹」关闭时，自动清理源字幕目录里的 *_subsetted
-                    # 备份夹（手动上传一律清理；入库/监控受开关控制。move 同步已把夹子移走时自然跳过）
-                    if not keep_subdir:
-                        try:
-                            sub = Path(res.get("subdir") or "")
-                            if sub.is_dir():
-                                shutil.rmtree(sub, ignore_errors=True)
-                        except Exception:
-                            pass
-                    # assfonts「-r」机制遗留的中间副本清理：它先复制输入为 <stem>.rename.ass 再内嵌，
-                    # 处理完不删；该副本与源字幕内容相同，纯属冗余，入库/监控/上传三条来源统一在此清除
-                    if rename:
-                        try:
-                            _junk = f.with_name(f"{f.stem}.rename{f.suffix}")
-                            if (
-                                _junk.is_file()
-                                and _junk.resolve() != f.resolve()
-                                and _junk.resolve() != final_out.resolve()
-                            ):
-                                _junk.unlink(missing_ok=True)
-                        except Exception:
-                            pass
                     record_out = str(synced) if synced else (str(final_out) if final_out.is_file() else "")
                     self._db.add_subset_record(
                         {
                             "file_name": orig,
                             "file_path": str(f),
                             "status": "success",
-                            "reason": "；".join([m for m in (sync_msg, hdr_msg) if m]) or "",
+                            "reason": "；".join(
+                                [m for m in (sync_msg, hdr_msg, str(res.get("reason") or "")) if m]
+                            ) or "",
                             "out_file": record_out,
+                            "source": src_kind,
                         }
                     )
                     stats["success"] += 1
@@ -1901,7 +3103,7 @@ class Zitifenlei(_PluginBase):
                     self._db.add_log(f"子集化成功: {f.name} → {Path(record_out or final_out).name}", "info")
                 elif status == "missing":
                     reason = str(res.get("reason") or "")
-                    # 结构化缺失清单（assfonts 输出解析所得），不再对 reason 字符串做往返拆分
+                    # 结构化缺失清单（引擎输出解析所得），不再对 reason 字符串做往返拆分
                     fonts = [x.strip() for x in (res.get("missing_fonts") or []) if str(x or "").strip()]
                     for x in fonts:
                         if x and x not in stats["missing_fonts"]:
@@ -1913,6 +3115,7 @@ class Zitifenlei(_PluginBase):
                             "status": "missing",
                             "reason": reason,
                             "out_file": "",
+                            "source": src_kind,
                         }
                     )
                     stats["missing"] += 1
@@ -1926,6 +3129,7 @@ class Zitifenlei(_PluginBase):
                             "status": "error",
                             "reason": str(res.get("reason") or "")[:300],
                             "out_file": "",
+                            "source": src_kind,
                         }
                     )
                     stats["error"] += 1
@@ -1941,6 +3145,7 @@ class Zitifenlei(_PluginBase):
                             "status": "error",
                             "reason": str(err)[:300],
                             "out_file": "",
+                            "source": src_kind if 'src_kind' in locals() else "",
                         }
                     )
                     stats["file_status"][str(Path(f).resolve() if f else "")] = "keep"
@@ -1967,7 +3172,7 @@ class Zitifenlei(_PluginBase):
                 lines.append(
                     f"❌ 缺字体 {stats['missing']} 个字幕：{shown}"
                     + (f" 等 {more} 种" if more > 0 else "")
-                    + "（可先上传缺失字体入库、重建索引后重试）"
+                    + "（可先上传缺失字体入库后重试）"
                 )
             if stats["error"]:
                 lines.append(f"⚠ 失败 {stats['error']} 个（见子集化记录）")
@@ -1977,16 +3182,17 @@ class Zitifenlei(_PluginBase):
             pass
 
     def _run_show_subset(self, files: List[Path], show: str = "", source: str = "inbound") -> None:
-        """后台自动子集化（入库监控共用，后台线程）：与页面全量互斥，缺二进制/索引时仅写日志。
+        """后台自动子集化（入库监控共用，后台线程）：与页面全量互斥，引擎/索引不可用时仅写日志。
 
         source 决定成品落位身份：
-        - inbound（MP 入库）→ 成品只落媒体库，不同步输出目录，_subsetted 受开关控制；
+        - inbound（MP 入库）→ 成品只落媒体库，不同步输出目录；
         - watch（目录监控）→ 按「监控目录输出方式」同步到输出目录并按剧名分子文件夹。
         """
         if self._db is None:
             return
-        if not self._subset_binary():
-            self._db.add_log("自动子集化跳过：bin/assfonts 未就绪（设置 → 子集化）", "warning")
+        ready, why = self._subset_engine_ready()
+        if not ready:
+            self._db.add_log(f"自动子集化跳过：{why}（设置 → 子集化）", "warning")
             return
         if not self._scan_lock.acquire(blocking=False):
             self._db.add_log(f"自动子集化（{show or '字幕'}）跳过：全量子集化正在运行", "warning")
@@ -2103,8 +3309,7 @@ class Zitifenlei(_PluginBase):
                 more = len(missing_map) - 5
                 text = "、".join(names) + (f" 等 {more} 种" if more > 0 else "")
                 lines = [
-                    f"❌ 《{show}》字幕检查完成",
-                    f"共 {total} 个字幕" + (f"，其中 {embedded} 个已内嵌字体" if embedded else ""),
+                    f"❌ 共 {total} 个字幕" + (f"，其中 {embedded} 个已内嵌字体" if embedded else ""),
                     f"缺失 {len(missing_map)} 种字体：{text}",
                     "可在检查页上传缺失字体入库消除标记",
                 ]
@@ -2112,8 +3317,7 @@ class Zitifenlei(_PluginBase):
                 # 全部字幕已内嵌（子集化）：不再说「字体齐全」（观众根本看不出有没有子集化），明确告知
                 all_embedded = embedded > 0 and embedded == total
                 lines = [
-                    f"✅ 《{show}》字幕检查完成",
-                    f"共 {total} 个字幕" + (f"，其中 {embedded} 个已内嵌字体" if embedded else ""),
+                    f"✅ 共 {total} 个字幕" + (f"，其中 {embedded} 个已内嵌字体" if embedded else ""),
                     "全部字幕已子集化（自带内嵌字体）" if all_embedded else "字幕字体齐全",
                 ]
             self._notify(f"《{show}》字幕检查完成", "\n".join(lines))
@@ -2200,7 +3404,7 @@ class Zitifenlei(_PluginBase):
         tmdbid/title 位于 mediainfo（tmdb_id / title），meta 只是文件名解析元数据（无 tmdbid）；
         两个开关相互独立：
         - 「入库自动检查字幕」（auto_inbound）开 → 写 ass_files 记录并发检查通知；
-        - 「入库后自动子集化」（auto_subset）开 → 对新增字幕做 assfonts 子集化；
+        - 「入库后自动子集化」（auto_subset）开 → 对新增字幕做子集化；
         两者都关时才完全不处理。
         """
         try:
@@ -2327,6 +3531,17 @@ class Zitifenlei(_PluginBase):
                 "impact": "未安装时仅靠 6 小时定时任务兜底，实时性下降",
             }
         )
+        # uharfbuzz：子集化引擎（逐字符子集化 + [Fonts] 内嵌）
+        hb_ok, hb_info = self._hb_status()
+        items.append(
+            {
+                "key": "uharfbuzz",
+                "name": "uharfbuzz（子集化引擎）",
+                "ok": hb_ok,
+                "detail": f"HarfBuzz 子集化引擎（{hb_info}）",
+                "impact": "未安装时无法执行子集化（可点「重新安装」并用 pip 安装）",
+            }
+        )
         # sqlite3：宿主 Python 自带
         try:
             import sqlite3  # noqa: F401
@@ -2348,6 +3563,83 @@ class Zitifenlei(_PluginBase):
             {"items": items, "ok_count": ok_count, "total": len(items)},
             "依赖检测完成",
         )
+
+    async def api_deps_install(self, request: Request) -> Dict[str, Any]:
+        """重新安装白名单运行依赖（pip 安装到当前运行环境，成功后热刷新探测）。"""
+        if not self._enabled:
+            return self._err("插件已停用，请先在设置中启用")
+        package = ""
+        try:
+            package = str(request.query_params.get("package") or "")
+        except Exception:
+            pass
+        if not package:
+            try:
+                body = await request.json() if hasattr(request, "json") else {}
+                if isinstance(body, dict):
+                    package = str(body.get("package") or "")
+            except Exception:
+                pass
+        allow = {
+            "uharfbuzz": "uharfbuzz",
+            "fonttools": "fonttools",
+            "watchdog": "watchdog",
+        }
+        key = str(package or "").strip().lower()
+        if key not in allow:
+            return self._err(f"不支持的依赖：{package or '（空）'}")
+        pkg = allow[key]
+        try:
+            import sys
+
+            # 异步子进程 + 超时：pip 安装最长 5 分钟，绝不能用同步 subprocess.run
+            # 占住事件循环（否则安装期间整个 MoviePilot 的 HTTP 请求全部挂起）
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--no-cache-dir",
+                "--upgrade",
+                pkg,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            try:
+                out_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=300)
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                try:
+                    await proc.wait()
+                except Exception:
+                    pass
+                return self._err(f"安装 {pkg} 超时（300 秒），已终止")
+        except Exception as err:
+            return self._err(f"安装 {pkg} 失败: {err}")
+        returncode = int(proc.returncode or 0)
+        ok = returncode == 0
+        output = (out_bytes or b"").decode("utf-8", errors="replace").strip()[-1500:]
+        # 热刷新探测缓存：uharfbuzz 安装后无需重启进程即可用于子集化
+        self._hb_probe = None
+        try:
+            if pkg == "uharfbuzz":
+                hb_refresh_backend()
+        except Exception:
+            pass
+        try:
+            self._db.add_log(
+                f"依赖重装 {pkg}: {'成功' if ok else '失败'}（exit={proc.returncode}）",
+                "info" if ok else "error",
+            )
+        except Exception:
+            pass
+        if not ok:
+            return self._err(f"安装 {pkg} 失败（exit={proc.returncode}）：{output[-400:]}")
+        note = "；需重启插件/容器后生效" if pkg != "uharfbuzz" else "（已热加载）"
+        return self._ok({"package": pkg, "output": output}, f"{pkg} 安装完成{note}")
 
     # ─── API：统计 ──────────────────────────────────────
     def _input_dir_signature(self, input_dir: Path) -> str:
@@ -2484,8 +3776,8 @@ class Zitifenlei(_PluginBase):
         dirs = [
             {"label": "字体监控目录", "path": cfg.get("input_dir", ""), "exists": bool(cfg.get("input_dir")) and Path(cfg["input_dir"]).is_dir()},
             {"label": "字体库目录", "path": cfg.get("lib_dir", ""), "exists": bool(cfg.get("lib_dir")) and Path(cfg["lib_dir"]).is_dir()},
-            {"label": "ASS字幕目录监控", "path": cfg.get("ass_dir", ""), "exists": bool(cfg.get("ass_dir")) and Path(cfg["ass_dir"]).is_dir()},
-            {"label": "ASS目录监控子集", "path": cfg.get("subset_dir", ""), "exists": bool(cfg.get("subset_dir")) and Path(cfg["subset_dir"]).is_dir()},
+            {"label": "ASS 字幕检查目录", "path": cfg.get("ass_dir", ""), "exists": bool(cfg.get("ass_dir")) and Path(cfg["ass_dir"]).is_dir()},
+            {"label": "ASS 自动子集化目录", "path": cfg.get("subset_dir", ""), "exists": bool(cfg.get("subset_dir")) and Path(cfg["subset_dir"]).is_dir()},
             {"label": "子集化输出目录", "path": cfg.get("subset_out_dir", ""), "exists": bool(cfg.get("subset_out_dir")) and Path(cfg["subset_out_dir"]).is_dir()},
         ]
         result = {**cfg, "dirs": dirs}
@@ -2512,18 +3804,22 @@ class Zitifenlei(_PluginBase):
             **dict(self._config),
             **{k: v for k, v in body.items()},
         }
+        persisted = True
+        persist_error = ""
         # 1) 写入宿主原生配置（与宿主 PUT /plugin 同等的持久化路径，重启保留）
         try:
             self.update_config(new_cfg)
         except Exception as err:
+            persisted = False
+            persist_error = str(err)
             _logger.warning("宿主配置写入失败: %s", err)
         # 2) 更新运行时并热生效
         self._config = new_cfg
         if self._db:
             try:
                 self._db.save_full_config(new_cfg)
-            except Exception:
-                pass
+            except Exception as err:
+                _logger.warning("配置镜像写入数据库失败: %s", err)
         if isinstance(new_cfg.get("enabled"), bool):
             self._enabled = new_cfg["enabled"]
         else:
@@ -2539,6 +3835,22 @@ class Zitifenlei(_PluginBase):
             self._start_watcher()
         except Exception as err:
             _logger.warning("配置生效失败: %s", err)
+        if not persisted:
+            # P2-16：宿主持久化失败不能报「保存成功」——本地运行时已生效，
+            # 但重启后可能回退，必须如实告知（否则用户以为已永久保存）
+            try:
+                if self._db is not None:
+                    self._db.add_log(
+                        f"配置仅运行时生效：宿主持久化失败（{persist_error[:120]}）", "error"
+                    )
+            except Exception:
+                pass
+            result = self._err(
+                "配置已在当前会话生效，但宿主持久化失败（重启后可能丢失）："
+                f"{persist_error[:160]}"
+            )
+            result["data"] = {"persisted": False, "config": new_cfg}
+            return result
         return self._ok(new_cfg, "配置已保存")
 
     # ─── API：数据库备份与恢复 ────────────────────────────
@@ -2553,7 +3865,12 @@ class Zitifenlei(_PluginBase):
             return self._err(f"导出数据库失败: {err}")
 
     async def api_db_import(self, request: Request = None) -> Dict[str, Any]:
-        """从 JSON 备份恢复数据库（先清空业务表，再写回数据；保留日志，重载后生效）"""
+        """从 JSON 备份恢复数据库（单事务替换业务表 + 作废字体索引，随后重建）
+
+        恢复期间持维护权：watcher / 自动扫描 / 索引重建 / 子集化全部让步，
+        避免「恢复中后台仍在写库」；恢复成功后字体索引已在事务内清空并递增
+        index_version，由下一次检查/子集化的懒加载重建（或手动「全部重建」）。
+        """
         if not self._db_ok():
             return self._err("数据库未初始化")
         body: Dict[str, Any] = {}
@@ -2564,21 +3881,42 @@ class Zitifenlei(_PluginBase):
                 body = {}
         if not isinstance(body, dict) or not body:
             return self._err("无效的备份数据")
+        if not self._maintenance_begin("数据库恢复"):
+            return self._err("正在执行其他维护任务（恢复/清库/删除/重建），请稍后重试")
         try:
             counts = self._db.import_all(body)
-            return self._ok(counts, "数据库恢复成功，请刷新页面")
+            # 恢复后的索引已作废：立刻在此刻把运行时缓存清掉，避免旧聚合结果短暂命中
+            self._invalidate_missing_agg()
+            self._db.add_log(
+                "数据库恢复完成：字体索引已作废，将在下次检查/子集化时自动重建"
+                f"（恢复 {len(counts)} 张表）",
+                "warning",
+            )
+            return self._ok(
+                counts,
+                "数据库恢复成功（字体索引将自动重建），请刷新页面",
+            )
         except Exception as err:
-            return self._err(f"导入数据库失败: {err}")
+            return self._err(f"导入数据库失败（已回滚，原数据未变）: {err}")
+        finally:
+            self._maintenance_end("数据库恢复")
 
     def api_db_clear(self) -> Dict[str, Any]:
         """清空数据库业务表（字体库、待确认、ASS 检查记录）；保留插件设置与镜像"""
         if not self._db_ok():
             return self._err("数据库未初始化")
+        if not self._maintenance_begin("清空数据库"):
+            return self._err("正在执行其他维护任务（恢复/清库/删除/重建），请稍后重试")
         try:
             counts = self._db.clear_all()
+            # 索引状态已在 clear_all 内复位（last_rebuild/engine/lib_dir 清空 + index_version 递增）
+            self._invalidate_missing_agg()
+            self._db.add_log("数据库已清空：字体索引状态同步复位", "warning")
             return self._ok(counts, "数据库已清空")
         except Exception as err:
             return self._err(f"清空数据库失败: {err}")
+        finally:
+            self._maintenance_end("清空数据库")
 
     # ─── API：字体库 ────────────────────────────────────
     def api_fonts(self, page: int = 1, limit: int = 50, search: str = "", vendor: str = "") -> Dict[str, Any]:
@@ -2629,42 +3967,80 @@ class Zitifenlei(_PluginBase):
             return self._err(f"读取字体库签名失败: {err}")
 
     def api_font_delete(self, id: int = 0) -> Dict[str, Any]:
-        """删除字体：删除数据库记录 + 磁盘上的字体文件（含清理空目录）"""
+        """删除字体：删除数据库记录 + 磁盘上的字体文件（含清理空目录）
+
+        级联（P1-7）：删除前收集该文件贡献的字体名/别名，删除成功并提交索引后
+        统一失效缺失聚合缓存，并重检受影响的字幕——只由这份字体覆盖的字符会
+        立刻回到 missing/partial，不再等到 TTL 到期或手动重检。
+        """
         if not self._enabled:
             return self._err("插件已停用，请先在设置中启用")
         if not self._db_ok():
             return self._err("数据库未初始化")
         if not id:
             return self._err("缺少字体ID")
+        if not self._maintenance_begin("删除字体"):
+            return self._err("正在执行其他维护任务（恢复/清库/删除），请稍后重试")
         try:
             row = self._db.get_font(id)
             if not row:
                 return self._err("字体不存在")
             file_path = row.get("file_path", "") or ""
+            # 删除前收集索引贡献的别名（face/alias）：删除后 alias 行会一并消失，必须先取
+            affected_keys: List[str] = []
+            if file_path:
+                try:
+                    for r in self._db.query(
+                        "SELECT DISTINCT a.alias AS alias FROM font_aliases a "
+                        "JOIN font_faces fa ON fa.id = a.face_id "
+                        "JOIN font_files ff ON ff.id = fa.file_id WHERE ff.path = ?",
+                        (str(file_path),),
+                    ):
+                        alias = str(r.get("alias") or "")
+                        if alias:
+                            affected_keys.append(alias)
+                except Exception:
+                    affected_keys = []
             file_deleted = False
+            lib_dir = self.get_resource_or_config("lib_dir") or ""
             if file_path:
                 p = Path(file_path)
-                try:
-                    if p.is_file():
-                        p.unlink()
-                        file_deleted = True
-                    # 若父目录位于字体库内且已为空，则一并清理
-                    lib_dir = self.get_resource_or_config("lib_dir") or ""
-                    if lib_dir and _path_within(p.parent, Path(lib_dir)):
-                        try:
-                            p.parent.rmdir()
-                        except Exception:
-                            pass
-                except Exception as err:
-                    return self._err(f"删除字体文件失败: {err}")
+                if p.is_file():
+                    # 删除边界：只允许删字体库目录内的字体文件；越界（db 导入注入/改配置后的旧记录）拒绝
+                    if not arch.safe_unlink(p, lib_dir, exts=FONT_EXTENSIONS):
+                        return self._err("拒绝删除：文件不在字体库目录内或不是字体文件")
+                    file_deleted = True
+                # 若父目录位于字体库内且已为空，则一并清理
+                if lib_dir and _path_within(p.parent, Path(lib_dir)):
+                    try:
+                        p.parent.rmdir()
+                    except Exception:
+                        pass
             self._db.delete_font(id)
+            self._remove_font_from_index(file_path)
             self._db.add_log(
                 f"删除字体: {row.get('file_name', '')} ({'已删除文件' if file_deleted else '文件不存在，仅删记录'})",
                 "warning",
             )
-            return self._ok({"id": id, "file_deleted": file_deleted}, "字体已删除")
+            # 级联失效：缺失聚合按新库重算，受影响字幕（源文件仍在时）安全重检
+            try:
+                self._invalidate_missing_agg()
+            except Exception:
+                pass
+            recheck = {"checked": 0, "ok": 0, "missing": 0, "failed": 0}
+            if affected_keys:
+                try:
+                    recheck = self._recheck_affected_ass(affected_keys, reason="字体删除")
+                except Exception as err:
+                    _logger.warning("字体删除后重检受影响字幕失败: %s", err)
+            return self._ok(
+                {"id": id, "file_deleted": file_deleted, "recheck": recheck},
+                "字体已删除" + (f"，已重检 {recheck['checked']} 个字幕" if recheck["checked"] else ""),
+            )
         except Exception as err:
             return self._err(f"删除失败: {err}")
+        finally:
+            self._maintenance_end("删除字体")
 
     def api_recalc_vendor(self, id: int = 0) -> Dict[str, Any]:
         """重新识别厂商：按新规则（内部制造商名/目录名/文件名）重新解析字体库内字体的厂商。
@@ -2672,7 +4048,7 @@ class Zitifenlei(_PluginBase):
         文件已不存在（外部删除/移动）的记录会一并清除，保证厂商分布/字体库统计与磁盘一致。"""
         if not self._db_ok():
             return self._err("数据库未初始化")
-        scan_mode = self.get_resource_or_config("scan_mode") or "internal"
+        scan_mode = "internal"  # fontTools 为唯一权威解析口径
         changed = 0
         scanned = 0
         removed = 0
@@ -2689,6 +4065,7 @@ class Zitifenlei(_PluginBase):
                 if not file_path or not Path(file_path).is_file():
                     # 文件已不存在：清除数据库记录，避免厂商分布/字体库统计残留
                     self._db.delete_font(row["id"])
+                    self._remove_font_from_index(file_path)
                     removed += 1
                     continue
                 scanned += 1
@@ -2952,7 +4329,8 @@ class Zitifenlei(_PluginBase):
             try:
                 num = 0
                 if raw[:4] == b"ttcf" and len(raw) >= 16:
-                    num = struct.unpack(">I", raw[8:12])[0]
+                    # 防御畸形 TTC：numFonts 最大 42 亿，必须封顶，否则逐 face 解析会长时间卡死线程
+                    num = min(struct.unpack(">I", raw[8:12])[0], 64)
                 for idx in range(max(num, 1)):
                     try:
                         face = TTFont(file_path, fontNumber=idx, lazy=False)
@@ -2970,7 +4348,9 @@ class Zitifenlei(_PluginBase):
             # ② 回退：按 TTC 头部 offset 表切片后，再经 fontTools 解析重存校验
             try:
                 if raw[:4] == b"ttcf" and len(raw) >= 16:
-                    num = struct.unpack(">I", raw[8:12])[0]
+                    num = min(struct.unpack(">I", raw[8:12])[0], 64)
+                    if 12 + 4 * num > len(raw):
+                        return raw  # 头部 offset 表不完整：畸形文件，别按越界数据切片
                     offs = struct.unpack(f">{num}I", raw[12:12 + 4 * num])
                     for i in range(num):
                         start, end = offs[i], (offs[i + 1] if i + 1 < num else len(raw))
@@ -2997,6 +4377,15 @@ class Zitifenlei(_PluginBase):
         try:
             if not file_path or not Path(file_path).is_file():
                 return self._err("字体文件不存在或无法读取")
+            try:
+                font_size = Path(file_path).stat().st_size
+            except OSError as err:
+                return self._err(f"读取字体文件失败: {err}")
+            if font_size > MAX_FONT_FILE_BYTES:
+                return self._err(
+                    f"字体文件过大（{font_size // (1024 * 1024)}MB），超过预览上限 "
+                    f"{MAX_FONT_FILE_BYTES // (1024 * 1024)}MB"
+                )
             raw = Path(file_path).read_bytes()
             # TTC（TrueType Collection）拆单 face 再预览：浏览器 FontFace 不认 ttcf 容器
             # （会抛 Invalid font data in ArrayBuffer）。_split_ttc_face 逐 face 用 fontTools
@@ -3005,7 +4394,30 @@ class Zitifenlei(_PluginBase):
             if raw[:4] == b"ttcf":
                 raw = self._split_ttc_face(raw, file_path)
             data = base64.b64encode(raw).decode("ascii")
-            return self._ok({"id": 0, "name": name, "family": family, "data": data})
+            # 字体信息（字符数 / face 数 / 名称兜底）：fontTools 权威口径
+            char_count = 0
+            face_count = 0
+            try:
+                inspection = inspect_font(file_path, with_hash=False)
+                face_count = inspection.face_count or len(inspection.faces)
+                valid = [f for f in inspection.faces if f.status in ("ok", "no_cmap")]
+                char_count = max((f.char_count for f in valid), default=0)
+                first = valid[0] if valid else None
+                if first is not None:
+                    name = name or first.display_name()
+                    family = family or first.family
+            except Exception:
+                pass
+            return self._ok(
+                {
+                    "id": 0,
+                    "name": name,
+                    "family": family,
+                    "data": data,
+                    "char_count": char_count,
+                    "face_count": face_count,
+                }
+            )
         except Exception as err:
             return self._err(f"读取字体文件失败: {err}")
 
@@ -3044,6 +4456,155 @@ class Zitifenlei(_PluginBase):
         except Exception:
             pass
 
+    async def _write_upload_limited(self, upload: Any, dest: Path, max_bytes: int) -> Tuple[int, bool]:
+        """分块流式写盘（不把整文件读入内存），超过上限立即中止并删除半成品。
+
+        返回 (写入字节数, 是否超限)。读取异常会清理半成品后向上抛出。
+        """
+        written = 0
+        too_large = False
+        try:
+            with dest.open("wb") as fh:
+                while True:
+                    chunk = await upload.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if written > max_bytes:
+                        too_large = True
+                        break
+                    fh.write(chunk)
+        except Exception:
+            try:
+                dest.unlink(missing_ok=True)
+            except Exception:
+                pass
+            raise
+        if too_large or written <= 0:
+            try:
+                dest.unlink(missing_ok=True)
+            except Exception:
+                pass
+        return written, too_large
+
+    async def _receive_uploads(
+        self,
+        upload_files: List[Any],
+        allowed_exts: Tuple[str, ...],
+        prefix: str = "up",
+    ) -> Tuple[List[Dict[str, Any]], List[str]]:
+        """把上传文件（含 .zip 压缩包）落到临时目录，返回可处理的文件清单。
+
+        - 普通文件：后缀在 allowed_exts 内才接收，写 tmp/<prefix>_<uuid>_<name>
+        - .zip：安全解压到 tmp/_unzip_<uuid>/，只取 allowed_exts 内的文件（只解一层）
+        - 安全上限：单请求文件数、单文件字节数、总字节数，流式写盘不在内存里囤整包
+        - 返回 (files, notes)：files 每项 file_name/path/size/from_archive；
+          notes 为压缩包跳过/拒绝的说明，供接口回显
+        """
+        files: List[Dict[str, Any]] = []
+        notes: List[str] = []
+        if not self._tmp_dir:
+            return files, ["临时目录未初始化"]
+        base = Path(self._tmp_dir)
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+        except Exception as err:
+            return files, [f"临时目录不可用: {err}"]
+        exts = tuple(str(e).lower() for e in allowed_exts)
+        # 单文件上限按用途区分：字体 128MB / 字幕 16MB
+        extset = set(exts)
+        is_font_upload = bool(extset & {e.lower() for e in FONT_EXTENSIONS})
+        member_limit = MAX_FONT_FILE_BYTES if is_font_upload else MAX_ASS_FILE_BYTES
+        uploads = list(upload_files)
+        if len(uploads) > MAX_UPLOAD_FILES:
+            notes.append(
+                f"一次最多上传 {MAX_UPLOAD_FILES} 个文件，已忽略多余的 {len(uploads) - MAX_UPLOAD_FILES} 个"
+            )
+            uploads = uploads[:MAX_UPLOAD_FILES]
+        total_bytes = 0
+        for upload in uploads:
+            file_name = getattr(upload, "filename", "") or ""
+            safe_name = Path(file_name).name
+            if not safe_name:
+                continue
+            if arch.is_archive(safe_name):
+                zip_path = base / f"{prefix}_{uuid.uuid4().hex}_{safe_name}"
+                try:
+                    written, too_large = await self._write_upload_limited(
+                        upload, zip_path, MAX_UPLOAD_TOTAL_BYTES
+                    )
+                except Exception as err:
+                    notes.append(f"{safe_name}: 读取失败 {err}")
+                    continue
+                if too_large:
+                    notes.append(
+                        f"{safe_name}: 压缩包超过单次上传总量上限（{MAX_UPLOAD_TOTAL_BYTES // (1024 * 1024)}MB）"
+                    )
+                    continue
+                if not written:
+                    continue
+                dest = base / f"_unzip_{uuid.uuid4().hex}"
+                result = arch.extract_zip(
+                    zip_path,
+                    dest,
+                    exts,
+                    max_members=500,
+                    max_total_bytes=MAX_UPLOAD_TOTAL_BYTES,
+                    max_member_bytes=member_limit,
+                )
+                try:
+                    zip_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                for item in result.files:
+                    if len(files) >= MAX_UPLOAD_FILES:
+                        notes.append(f"{safe_name}: 单次最多处理 {MAX_UPLOAD_FILES} 个文件，其余已忽略")
+                        break
+                    if total_bytes + item.size > MAX_UPLOAD_TOTAL_BYTES:
+                        notes.append(f"{safe_name}: 解压后总大小超过单次上传上限，其余已忽略")
+                        break
+                    total_bytes += item.size
+                    files.append(
+                        {
+                            "file_name": Path(item.path).name,
+                            "path": str(item.path),
+                            "size": item.size,
+                            "from_archive": safe_name,
+                        }
+                    )
+                for member, reason in (result.skipped + result.errors)[:20]:
+                    notes.append(f"{safe_name}/{member}: {reason}")
+                if not result.files and not result.skipped and not result.errors:
+                    notes.append(f"{safe_name}: 压缩包内没有可处理的文件")
+                continue
+            if Path(safe_name).suffix.lower() not in exts:
+                continue
+            if len(files) >= MAX_UPLOAD_FILES:
+                notes.append(f"单次最多处理 {MAX_UPLOAD_FILES} 个文件，其余已忽略")
+                break
+            tmp_path = base / f"{prefix}_{uuid.uuid4().hex}_{safe_name}"
+            try:
+                written, too_large = await self._write_upload_limited(upload, tmp_path, member_limit)
+            except Exception as err:
+                notes.append(f"{safe_name}: 读取失败 {err}")
+                continue
+            if too_large:
+                notes.append(
+                    f"{safe_name}: 超过单文件上限（{member_limit // (1024 * 1024)}MB）"
+                )
+                continue
+            if not written:
+                continue
+            if total_bytes + written > MAX_UPLOAD_TOTAL_BYTES:
+                arch.safe_unlink(tmp_path, base, exts=exts)
+                notes.append(f"{safe_name}: 超过单次上传总量上限，其余已忽略")
+                break
+            total_bytes += written
+            files.append(
+                {"file_name": safe_name, "path": str(tmp_path), "size": written, "from_archive": ""}
+            )
+        return files, notes
+
     def api_pending_list(self) -> Dict[str, Any]:
         """待确认上传列表"""
         if not self._db_ok():
@@ -3073,48 +4634,53 @@ class Zitifenlei(_PluginBase):
             pass
         if not upload_files:
             return self._err("请选择要上传的字体文件")
-        scan_mode = self.get_resource_or_config("scan_mode") or "internal"
-        done: List[Dict[str, Any]] = []
-        for upload in upload_files:
-            file_name = getattr(upload, "filename", "") or ""
-            if not is_font_file(file_name):
-                continue
-            try:
-                raw = await upload.read()
-            except Exception:
-                continue
-            if not raw:
-                continue
-            safe_name = Path(file_name).name
-            tmp_path = Path(self._tmp_dir) / f"{uuid.uuid4().hex}_{safe_name}"
-            try:
-                tmp_path.write_bytes(raw)
-            except Exception:
-                continue
-            meta = parse_font_metadata(tmp_path, scan_mode=scan_mode, filename_hint=Path(file_name).stem)
-            item: Dict[str, Any] = {
-                "file_name": safe_name,
-                "file_path": str(tmp_path),
-                "name": meta["name"],
-                "family": meta["family"],
-                "vendor": meta["vendor"],
-                "designer": meta["designer"],
-                "file_size": len(raw),
-            }
-            try:
-                self._db.add_pending(item)
-                row = self._db.query_one(
-                    "SELECT * FROM pending_fonts WHERE file_path = ? ORDER BY id DESC LIMIT 1",
-                    (str(tmp_path),),
+        scan_mode = "internal"  # fontTools 为唯一权威解析口径
+        files, notes = await self._receive_uploads(upload_files, FONT_EXTENSIONS, prefix="up")
+
+        def _preview_sync() -> List[Dict[str, Any]]:
+            """fontTools 解析是同步重活：放到线程池，避免阻塞事件循环拖住全站请求。"""
+            done: List[Dict[str, Any]] = []
+            for entry in files:
+                safe_name = entry["file_name"]
+                tmp_path = Path(entry["path"])
+                if not tmp_path.is_file():
+                    continue
+                meta = parse_font_metadata(
+                    tmp_path, scan_mode=scan_mode, filename_hint=Path(safe_name).stem
                 )
-                item["id"] = row["id"] if row else 0
-                self._db.add_log(f"上传字体: {safe_name}", "info")
-            except Exception:
-                continue
-            done.append(item)
+                item: Dict[str, Any] = {
+                    "file_name": safe_name,
+                    "file_path": str(tmp_path),
+                    "name": meta["name"],
+                    "family": meta["family"],
+                    "vendor": meta["vendor"],
+                    "designer": meta["designer"],
+                    "file_size": entry.get("size", 0),
+                }
+                try:
+                    self._db.add_pending(item)
+                    row = self._db.query_one(
+                        "SELECT * FROM pending_fonts WHERE file_path = ? ORDER BY id DESC LIMIT 1",
+                        (str(tmp_path),),
+                    )
+                    item["id"] = row["id"] if row else 0
+                    self._db.add_log(f"上传字体: {safe_name}", "info")
+                except Exception:
+                    continue
+                done.append(item)
+            return done
+
+        done = await asyncio.to_thread(_preview_sync)
         if not done:
-            return self._err("没有可上传的有效字体文件（需字体后缀且内容非空）")
-        return self._ok({"count": len(done), "items": done}, f"已加入待确认列表 {len(done)} 个字体")
+            msg = "没有可上传的有效字体文件（需字体后缀或 .zip 压缩包，且内容非空）"
+            if notes:
+                msg += "；" + "；".join(notes[:3])
+            return self._err(msg)
+        tail = f"，压缩包内 {len(done)} 个文件已展开" if any(e.get("from_archive") for e in files) else ""
+        return self._ok(
+            {"count": len(done), "items": done, "notes": notes},
+            f"已加入待确认列表 {len(done)} 个字体{tail}" + (f"（{len(notes)} 条跳过提示）" if notes else ""),
+        )
 
     def api_pending_delete(self, id: int = 0) -> Dict[str, Any]:
         """删除单个待确认项"""
@@ -3127,10 +4693,8 @@ class Zitifenlei(_PluginBase):
         try:
             row = self._db.query_one("SELECT * FROM pending_fonts WHERE id = ?", (id,))
             if row and row.get("file_path"):
-                try:
-                    Path(row["file_path"]).unlink(missing_ok=True)
-                except Exception:
-                    pass
+                # 只删插件临时目录内的上传缓存；监控目录里用户自己的源文件绝不动
+                arch.safe_unlink(row["file_path"], self._tmp_dir, exts=FONT_EXTENSIONS)
             self._db.delete_pending(id)
             return self._ok({}, "已删除")
         except Exception as err:
@@ -3161,7 +4725,9 @@ class Zitifenlei(_PluginBase):
                 if not src.is_file():
                     self._db.delete_pending(item["id"])
                     continue
-                dest_dir = Path(lib_dir) / item.get("vendor", "未知厂商")
+                dest_dir = Path(lib_dir) / safe_filename_component(
+                    str(item.get("vendor") or "未知厂商"), "未知厂商"
+                )
                 dest_dir.mkdir(parents=True, exist_ok=True)
                 base_name = str(item.get("name", item.get("file_name", "font")))
                 # 「利用字体内部名称命名」开启时：用字体内部 PostScript 名，读不到回退原名
@@ -3172,11 +4738,13 @@ class Zitifenlei(_PluginBase):
                             base_name = internal_name
                     except Exception:
                         pass
+                # 内部名不可信：清洗后方可拼路径
+                base_name = safe_filename_component(base_name)
                 # 按格式分子文件夹归档：字体库/厂商/格式/基础名.后缀
                 fmt_dir = dest_dir / _font_subdir_name(src.suffix)
                 existing = _dest_exists_recursive(dest_dir, base_name, src.suffix)
-                if existing:
-                    # 字体库已存在同名同后缀字体（含旧平铺布局与格式子文件夹）：跳过
+                if existing and _files_identical(src, existing):
+                    # 字体库已存在「内容完全相同」的同名同后缀字体：跳过
                     self._db.add_log(f"整理跳过 {src.name}：字体库已存在 {existing.name}", "info")
                     # 「移动原文件」模式 + 开关开启：删除判重跳过的残留源文件，不留重复
                     if archive_mode == "move" and self.get_resource_or_config("move_delete_duplicate"):
@@ -3191,17 +4759,44 @@ class Zitifenlei(_PluginBase):
                             self._db.add_log(f"删除重复源文件失败 {src.name}: {err}", "warning")
                     self._db.delete_pending(item["id"])
                     continue
+                if existing:
+                    # 同名但内容不同：改名 -2/-3 另存，不覆盖旧版，更不能删源文件
+                    index = self._dest_names_for(dest_dir)
+                    base_name = _unique_archive_base(index, base_name, src.suffix)
+                    self._db.add_log(
+                        f"{src.name} 与库内 {existing.name} 同名但内容不同，另存为 {base_name}{src.suffix}",
+                        "warning",
+                    )
                 try:
                     fmt_dir.mkdir(parents=True, exist_ok=True)
                 except Exception:
                     pass
                 dest = fmt_dir / f"{base_name}{src.suffix}"
+                if not _path_within(dest, Path(lib_dir)):
+                    raise ValueError(f"目标越界，拒绝归档: {dest}")
+                # 原子落盘 + 大小校验：失败只留临时文件，不会出现半截正名文件
+                src_size = src.stat().st_size
+                tmp_dest = fmt_dir / f".{dest.name}.tmp-{uuid.uuid4().hex[:8]}"
+                try:
+                    shutil.copy2(str(src), str(tmp_dest))
+                    written = tmp_dest.stat().st_size
+                    if written != src_size:
+                        raise RuntimeError(f"写入大小不一致（源 {src_size}，目标 {written}）")
+                    os.replace(str(tmp_dest), str(dest))
+                except Exception:
+                    try:
+                        tmp_dest.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    raise
                 if archive_mode == "move":
-                    shutil.move(str(src), str(dest))
+                    try:
+                        src.unlink()
+                    except Exception as err:
+                        self._db.add_log(f"已归档 {dest.name}，但删除源文件失败: {err}", "warning")
                 else:
-                    shutil.copy2(str(src), str(dest))
-                    # 复制模式：临时目录里的上传源文件不再被 task 引用，立即删除避免残留
-                    if self._tmp_dir and str(src.resolve()).startswith(str(Path(self._tmp_dir).resolve())):
+                    # 复制模式：只清理上传临时目录里的缓存，监控目录源文件保持不动
+                    if self._tmp_dir and _path_within(src, Path(self._tmp_dir)):
                         try:
                             src.unlink(missing_ok=True)
                         except Exception:
@@ -3219,27 +4814,31 @@ class Zitifenlei(_PluginBase):
                         "file_path": str(dest),
                     }
                 )
+                self._index_font_path(dest)
                 self._db.delete_pending(item["id"])
                 processed += 1
             except Exception as err:
                 failed.append({"name": item.get("file_name", ""), "reason": str(err)})
         self._db.add_log(f"一键整理：归档 {processed} 个字体", "info")
         idx_ok, idx_msg = ("", "")
+        recheck = {"checked": 0, "ok": 0, "missing": 0, "failed": 0}
         if processed:
             try:
                 idx_ok, idx_msg = self._rebuild_subset_index_silent()
             except Exception:
                 idx_ok, idx_msg = False, "索引重建异常"
             if idx_ok:
-                self._db.add_log("assfonts 字体索引已自动重建（一键整理后）", "info")
+                self._db.add_log("字体索引已自动重建（一键整理后）", "info")
             else:
-                self._db.add_log(f"assfonts 索引自动重建失败: {idx_msg}", "warning")
+                self._db.add_log(f"字体索引自动重建失败: {idx_msg}", "warning")
+            # 字体库这边归档补齐后：重检受影响字幕，缺失页/检查页立即消除已解决项
+            recheck = self._recheck_missing_after_library_change("字体库归档")
         if failed:
             self._db.add_log(f"整理失败 {len(failed)} 个", "error")
         # 一键整理为同页面手动操作，结果直接反映在前端提示，不再额外发送通知
         return self._ok(
-            {"processed": processed, "failed": failed, "index_ok": idx_ok},
-            f"已归档 {processed} 个字体" + ("" if not idx_ok else "，assfonts 索引已自动重建"),
+            {"processed": processed, "failed": failed, "index_ok": idx_ok, "recheck": recheck},
+            f"已归档 {processed} 个字体" + ("" if not idx_ok else "，字体索引已自动重建"),
         )
 
     def api_discard_upload(self) -> Dict[str, Any]:
@@ -3251,11 +4850,9 @@ class Zitifenlei(_PluginBase):
         try:
             pending = self._db.list_pending()
             for item in pending:
-                try:
-                    if item.get("file_path"):
-                        Path(item["file_path"]).unlink(missing_ok=True)
-                except Exception:
-                    pass
+                if item.get("file_path"):
+                    # 只清上传缓存；监控目录用户源文件保留
+                    arch.safe_unlink(item["file_path"], self._tmp_dir, exts=FONT_EXTENSIONS)
                 self._db.delete_pending(item["id"])
             self._db.add_log(f"丢弃 {len(pending)} 个待确认字体", "warning")
             return self._ok({}, f"已丢弃 {len(pending)} 个待确认字体")
@@ -3307,24 +4904,27 @@ class Zitifenlei(_PluginBase):
                     "info",
                 )
                 if idx_ok:
-                    self._db.add_log("assfonts 字体索引已自动重建（全量检查归档后）", "info")
+                    self._db.add_log("字体索引已自动重建（全量检查归档后）", "info")
                 elif added:
                     # 归档成功但索引重建失败：提示但不阻塞归档结果
-                    self._db.add_log(f"assfonts 索引自动重建失败: {idx_msg}", "warning")
+                    self._db.add_log(f"字体索引自动重建失败: {idx_msg}", "warning")
+                if added:
+                    # 归档补齐字体后重检受影响字幕，缺失页/检查页立即消除已解决项
+                    self._recheck_missing_after_library_change("全量检查归档")
                 self._db.set_last_scan_time()  # 记录「上次全量检查」时间（仪表盘展示）
                 # 全量检查通知：与自动归档统一模板（新增/跳过/失败分项 + 明确模式）
                 self._archive_notify(
                     stats,
                     source_label="扫描",
                     title_prefix="全量检查完成",
-                    extra=("⚠ assfonts 索引重建失败（详见插件日志）" if (added and not idx_ok) else ""),
+                    extra=("⚠ 字体索引重建失败（详见插件日志）" if (added and not idx_ok) else ""),
                 )
                 return self._ok(
                     {"added": added, "index_ok": idx_ok},
-                    f"已归档 {added} 个字体" + ("，assfonts 索引已自动重建" if idx_ok else ""),
+                    f"已归档 {added} 个字体" + ("，字体索引已自动重建" if idx_ok else ""),
                 )
             # 「目录自动收集」关闭：加入待确认列表等待一键整理
-            scan_mode = self.get_resource_or_config("scan_mode") or "internal"
+            scan_mode = "internal"  # fontTools 为唯一权威解析口径
             lib_dir = self.get_resource_or_config("lib_dir") or ""
             added = 0
             skipped = 0
@@ -3419,6 +5019,10 @@ class Zitifenlei(_PluginBase):
                 f"全量扫描：归档 {added} 个字体，跳过已存在 {len(stats['skipped'])} 个，失败 {stats['failed']} 个",
                 "info",
             )
+            if added:
+                # 补齐字体后重建/增量更新索引，并重检受影响字幕（缺失页/检查页即时消除）
+                self._rebuild_subset_index_silent()
+                self._recheck_missing_after_library_change("全量扫描归档")
             # 全量扫描通知：与自动归档统一模板（新增/跳过/失败分项 + 明确模式）
             self._archive_notify(stats, source_label="扫描", title_prefix="全量扫描完成")
             return self._ok({"added": added}, f"全量扫描完成，已处理 {added} 个字体")
@@ -3492,10 +5096,20 @@ class Zitifenlei(_PluginBase):
         try:
             data = self._db.query_ass(keyword=(search or "").strip(), page=page, limit=limit)
             families, match_source = self._lib_font_keys()
+            # 字形快照按 ass_id 分组（一次查询），列表状态与缺失页同口径：按当前字体库实时扣除
+            snap_by_ass: Dict[Any, Dict[str, Dict[str, Any]]] = {}
+            try:
+                for snap in self._latest_missing_snapshots():
+                    snap_by_ass.setdefault(snap.get("ass_id"), {})[
+                        normalize_font_key(snap.get("font_name") or "")
+                    ] = snap
+            except Exception:
+                snap_by_ass = {}
+            coverage: Dict[str, set] = {}
             # 匹配来源提升到顶层：列表为空（无记录）时前端也能显示「匹配基准」提示
             data["match_source"] = match_source
             for r in data.get("list", []):
-                # 匹配来源透传（index=assfonts 子集索引 / db=字体库记录，索引未构建时回退）
+                # 匹配来源透传（index=fontTools 字体索引 / db=字体库记录，索引未构建时回退）
                 r["match_source"] = match_source
                 # 子集化/缺失结果以「检查」为准：待检查（pending）状态不预判，
                 # 只有手动点检查或开启自动监控（auto_check）检查后才展示
@@ -3511,6 +5125,7 @@ class Zitifenlei(_PluginBase):
                     # Q2 修复：subsetted 判定走 (mtime_ns, size) 签名缓存，
                     # 文件未变化仅 stat 一次，不再每行 read_bytes 整个 ASS 文件
                     subsetted = self._ass_is_subsetted(fp)
+                    snaps = snap_by_ass.get(r["id"]) or {}
                     missing_live: List[str] = []
                     seen_k: set = set()
                     for f in all_fonts:
@@ -3518,7 +5133,14 @@ class Zitifenlei(_PluginBase):
                         if not k or k in seen_k:
                             continue
                         seen_k.add(k)
-                        if k not in families:
+                        snap = snaps.get(k)
+                        if snap is not None:
+                            # 字形级：字符已被当前字体库覆盖则不再算缺失
+                            cps, remain, _chars = self._snapshot_remaining(snap, coverage)
+                            if cps and not remain:
+                                continue
+                            missing_live.append(f)
+                        elif k not in families:
                             missing_live.append(f)
                     # 已内嵌（子集化）字幕：即使字体库删减也不报缺失
                     if subsetted:
@@ -3551,23 +5173,12 @@ class Zitifenlei(_PluginBase):
             pass
         if not upload_files:
             return self._err("请选择要上传的 ASS 文件")
+        files, notes = await self._receive_uploads(upload_files, ASS_EXTENSIONS, prefix="ass")
         done: List[Dict[str, Any]] = []
-        for upload in upload_files:
-            file_name = getattr(upload, "filename", "") or ""
-            if not is_ass_file(file_name):
-                continue
-            try:
-                raw = await upload.read()
-            except Exception:
-                continue
-            if not raw:
-                continue
-            # 保存字幕内容到临时目录，供后续手动检查
-            safe_name = Path(file_name).name
-            tmp_path = Path(self._tmp_dir) / f"{uuid.uuid4().hex}_{safe_name}"
-            try:
-                tmp_path.write_bytes(raw)
-            except Exception:
+        for entry in files:
+            safe_name = entry["file_name"]
+            tmp_path = Path(entry["path"])
+            if not tmp_path.is_file():
                 continue
             # 双轨制：手动上传不自动检查，仅登记待检查记录
             self._db.add_ass(
@@ -3592,8 +5203,14 @@ class Zitifenlei(_PluginBase):
                 }
             )
         if not done:
-            return self._err("没有可上传的有效 ASS 文件（需 .ass 后缀且内容非空）")
-        return self._ok({"count": len(done), "items": done}, f"已上传 {len(done)} 个字幕，请在列表中手动检查")
+            msg = "没有可上传的有效 ASS 文件（需 .ass 后缀或 .zip 压缩包，且内容非空）"
+            if notes:
+                msg += "；" + "；".join(notes[:3])
+            return self._err(msg)
+        return self._ok(
+            {"count": len(done), "items": done, "notes": notes},
+            f"已上传 {len(done)} 个字幕，请在列表中手动检查",
+        )
 
     async def api_ass_check(self, request: Request) -> Dict[str, Any]:
         """手动检查：按记录 id 重新解析字幕文件并与字体库对比"""
@@ -3615,29 +5232,39 @@ class Zitifenlei(_PluginBase):
             src_path = row.get("file_path") or ""
             if not src_path or not Path(src_path).is_file():
                 return self._err("字幕文件不存在，可能已被清理，请重新上传")
-            raw = Path(src_path).read_bytes()
-            all_fonts = parse_ass_fonts(raw)
-            subsetted = has_embedded_fonts(raw)
-            families, match_source = self._lib_font_keys()
-            missing = [f for f in all_fonts if normalize_font_key(f) not in families]
-            # 已内嵌（子集化）字幕自带字体：播放不依赖字体库，不再报缺失
-            if subsetted and missing:
-                missing = []
-            status = "ok" if not missing else "missing"
-            self._db.update_ass(int(ass_id), status, missing, all_fonts)
-            text = "缺 " + str(len(missing)) + " 个字体" if missing else "字体完整"
-            self._db.add_log(f"手动检查: {row['file_name']} → {text}", "warning" if missing else "info")
+            # 读盘 + 字形解析 + 索引比对都是同步重活：放线程池，别占住事件循环
+            raw = await asyncio.to_thread(Path(src_path).read_bytes)
+            # 走统一检查口径（字形级优先，索引不可用时回退名称级）
+            result = await asyncio.to_thread(
+                self._check_ass_content,
+                row.get("file_name") or Path(src_path).name,
+                raw,
+                row.get("source") or "manual",
+                src_path,
+            )
+            # 记录 id 可能因并发新增而变化，以本次检查结果为准
+            ass_id = result.get("id") or int(ass_id)
+            self._db.add_log(
+                f"手动检查: {row['file_name']} → {result.get('status_text')}",
+                "warning" if result.get("missing_count") else "info",
+            )
+            self._invalidate_missing_agg()
+            families, _fmatch = await asyncio.to_thread(self._lib_font_keys)
             return self._ok(
                 {
-                    "id": int(ass_id),
+                    "id": ass_id,
                     "file_name": row["file_name"],
-                    "status": status,
-                    "status_text": text,
-                    "missing_count": len(missing),
-                    "all_fonts": [{"name": f, "in_lib": normalize_font_key(f) in families} for f in all_fonts],
-                    "missing_fonts": missing,
-                    "subsetted": subsetted,
-                    "match_source": match_source,
+                    "status": result.get("status"),
+                    "status_text": result.get("status_text"),
+                    "missing_count": result.get("missing_count", 0),
+                    "all_fonts": [
+                        {"name": f, "in_lib": normalize_font_key(f) in families}
+                        for f in (result.get("all_fonts") or [])
+                    ],
+                    "missing_fonts": result.get("missing_fonts") or [],
+                    "missing_details": result.get("missing_details") or [],
+                    "total_missing_chars": result.get("total_missing_chars", 0),
+                    "subsetted": result.get("subsetted", False),
                 },
                 "检查完成",
             )
@@ -3667,38 +5294,112 @@ class Zitifenlei(_PluginBase):
                     except Exception:
                         pass
             families, match_source = self._lib_font_keys()
+            snapshots: Dict[str, Dict[str, Any]] = {}
+            try:
+                for snap in self._db.latest_missing_glyphs(int(id)):
+                    key = normalize_font_key(snap.get("font_name") or "")
+                    if key:
+                        snapshots[key] = snap
+            except Exception:
+                snapshots = {}
             if stored_all:
                 # 缺失清单按归一化 key 去重（@竖排变体与本体同 key 只算一次）
                 seen_k: set = set()
                 missing_live: List[str] = []
+                details: List[Dict[str, Any]] = []
+                coverage: Dict[str, set] = {}
                 for f in stored_all:
                     k = normalize_font_key(f)
                     if not k or k in seen_k:
                         continue
                     seen_k.add(k)
-                    if k not in families:
-                        missing_live.append(f)
+                    snap = snapshots.get(k)
+                    if snap is not None:
+                        # 字形级口径 + 实时扣除：按当前字体库字符覆盖重算剩余缺失，
+                        # 字体库那边补齐字体后，本页的红色缺失标记自动消失
+                        cps_all, remain, remain_chars = self._snapshot_remaining(snap, coverage)
+                        status = snap.get("status") or "ok"
+                        if cps_all and not remain:
+                            status = "ok"
+                        elif status == "missing" and cps_all and remain != cps_all:
+                            status = "partial"
+                        faces: List[Any] = []
+                        try:
+                            faces = json.loads(snap.get("faces") or "[]")
+                        except Exception:
+                            pass
+                        detail = {
+                            "name": f,
+                            "status": status,
+                            "used_count": int(snap.get("used_count") or 0),
+                            "missing_count": len(remain) if cps_all else int(snap.get("missing_count") or 0),
+                            "missing_codepoints": sorted(remain) if cps_all else [],
+                            "missing_chars": remain_chars if cps_all else (snap.get("missing_chars") or ""),
+                            "faces": faces,
+                        }
+                        if status in ("missing", "partial"):
+                            missing_live.append(f)
+                    else:
+                        # 无字形快照（历史记录）：回退名称级判定
+                        in_lib = k in families
+                        if not in_lib:
+                            missing_live.append(f)
+                        detail = {
+                            "name": f,
+                            "status": "ok" if in_lib else "missing",
+                            "used_count": 0,
+                            "missing_count": 0,
+                            "missing_codepoints": [],
+                            "missing_chars": "",
+                            "faces": [],
+                        }
+                    details.append(detail)
                 # 已内嵌（子集化）字幕：即使字体库删减也不报缺失
                 if subsetted:
                     missing_live = []
+                    details = []
                     row["status"] = "ok"
+                elif missing_live:
+                    row["status"] = "missing"
+                elif row.get("status") == "partial_check":
+                    # 原检查未完成字形级验证（名称存在但未验证字符覆盖）：
+                    # 详情页不能因为「当前库里名字都在」就改口显示「字体完整」
+                    row["status"] = "partial_check"
                 else:
-                    row["status"] = "missing" if missing_live else "ok"
+                    row["status"] = "ok"
                 row["all_fonts"] = [{"name": f, "in_lib": normalize_font_key(f) in families} for f in stored_all]
                 row["missing_fonts"] = missing_live
                 row["missing_count"] = len(missing_live)
+                row["missing_details"] = details
             else:
                 row["all_fonts"] = []
                 row["missing_fonts"] = []
                 row["missing_count"] = 0
+                row["missing_details"] = []
             row["match_source"] = match_source
             row["subsetted"] = subsetted
             return self._ok(row)
         except Exception as err:
             return self._err(f"读取详情失败: {err}")
 
+    def _owns_ass_copy(self, file_path: str) -> bool:
+        """插件拥有该字幕副本：真实路径位于插件临时目录内且后缀为 ASS。
+
+        P0 数据安全：删除检查记录只允许清理插件自己落盘的临时副本；
+        监控目录/媒体库里的原始字幕（source=auto/manual/inbound 等）一律
+        只删记录、绝不按 source 字符串推断磁盘文件可删。
+        """
+        if not file_path or self._tmp_dir is None:
+            return False
+        try:
+            if Path(file_path).suffix.lower() not in {s.lower() for s in ASS_EXTENSIONS}:
+                return False
+        except Exception:
+            return False
+        return _path_within(Path(file_path), Path(self._tmp_dir))
+
     def api_ass_delete(self, id: int = 0) -> Dict[str, Any]:
-        """删除单条检查记录"""
+        """删除单条检查记录（仅清理插件临时目录内的副本，不动原始字幕）"""
         if not self._enabled:
             return self._err("插件已停用，请先在设置中启用")
         if not self._db_ok():
@@ -3708,118 +5409,131 @@ class Zitifenlei(_PluginBase):
         try:
             row = self._db.get_ass(id)
             self._db.delete_ass(id)
-            # MP 入库（inbound）记录的 ass 属于媒体库文件：只删记录不删文件；
-            # 目录监控/手动上传的记录连同文件一起删
-            if row and row.get("file_path") and row.get("source") != "inbound":
-                try:
-                    Path(row["file_path"]).unlink(missing_ok=True)
-                except Exception:
-                    pass
-            return self._ok({}, "已删除")
+            # 只清理插件临时目录内的字幕副本（手动上传落盘的临时文件）；
+            # 监控目录/媒体库的原始字幕只删记录，避免误删用户原件
+            file_removed = False
+            if row and self._owns_ass_copy(row.get("file_path") or ""):
+                file_removed = arch.safe_unlink(row["file_path"], self._tmp_dir, exts=ASS_EXTENSIONS)
+            return self._ok({"file_removed": file_removed}, "已删除")
         except Exception as err:
             return self._err(f"删除失败: {err}")
 
     def api_ass_clear(self) -> Dict[str, Any]:
-        """清空全部检查记录（同时删除记录对应的临时字幕文件）"""
+        """清空全部检查记录（仅清理插件临时目录内的副本，不动原始字幕）"""
         if not self._enabled:
             return self._err("插件已停用，请先在设置中启用")
         if not self._db_ok():
             return self._err("数据库未初始化")
+        if not self._maintenance_begin("清空检查记录"):
+            return self._err("正在执行其他维护任务（恢复/清库/删除/重建），请稍后重试")
         try:
-            for r in self._db.query(
-                "SELECT file_path FROM ass_files WHERE file_path != '' AND source != 'inbound'"
-            ):
-                if r.get("file_path"):
-                    try:
-                        Path(r["file_path"]).unlink(missing_ok=True)
-                    except Exception:
-                        pass
+            removed = 0
+            for r in self._db.query("SELECT file_path FROM ass_files WHERE file_path != ''"):
+                if self._owns_ass_copy(r.get("file_path") or ""):
+                    if arch.safe_unlink(r["file_path"], self._tmp_dir, exts=ASS_EXTENSIONS):
+                        removed += 1
             self._db.clear_ass()
-            self._db.add_log("清空全部ASS检查记录", "warning")
-            return self._ok({}, "已清空")
+            self._db.add_log(f"清空全部ASS检查记录（清理临时副本 {removed} 个，原始字幕未动）", "warning")
+            self._invalidate_missing_agg()
+            return self._ok({"file_removed": removed}, "已清空")
         except Exception as err:
             return self._err(f"清空失败: {err}")
+        finally:
+            self._maintenance_end("清空检查记录")
 
-    # ─── API：子集化（assfonts）─────────────────────────
+    # ─── API：子集化 ─────────────────────────────────────
     def api_subset_index(self) -> Dict[str, Any]:
-        """assfonts 状态：二进制是否存在 + 字体索引状态"""
+        """子集化状态：HarfBuzz 引擎 + fontTools 字体索引统计"""
         if not self._db_ok():
             return self._err("数据库未初始化")
-        binary = self._subset_binary()
         lib_dir_cfg = self.get_resource_or_config("lib_dir") or ""
-        index = af.index_info(self._assfonts_idx, lib_dir_cfg) if self._assfonts_idx else {"exists": False, "count": 0, "mtime": "", "size": 0}
+        hb_ok, hb_info = self._hb_status()
+        engine_ready, engine_name = self._subset_engine_ready()
+        try:
+            font_index = self._db.index_stats()
+        except Exception:
+            font_index = {}
         return self._ok(
             {
-                "binary_ok": binary is not None,
-                "binary_path": str(binary) if binary else "",
-                "index": index,
+                "engine": engine_name,
+                "engine_ready": engine_ready,
+                "hb_ok": hb_ok,
+                "hb_info": hb_info,
+                "font_index": font_index,
                 "lib_dir": lib_dir_cfg,
             },
-            "assfonts 状态",
+            "子集化状态",
         )
 
-    def api_subset_rebuild_index(self) -> Dict[str, Any]:
-        """重建 assfonts 字体索引（-b）：扫描字体库目录生成 fonts.json"""
+    def api_subset_rebuild_index(self, allow_incomplete: bool = False) -> Dict[str, Any]:
+        """全部重建字体库索引：暂存表原子切换（非增量，日常入库仍走增量/减量）
+
+        allow_incomplete=False（默认）：出现任何「结果不确定」的文件（权限/IO/解析
+        异常）时不提交暂存，保留旧索引并返回原因；allow_incomplete=True 才允许
+        在明确知晓的前提下提交不完整索引。
+        """
         if not self._enabled:
             return self._err("插件已停用，请先在设置中启用")
         if not self._db_ok():
             return self._err("数据库未初始化")
-        binary = self._subset_binary()
-        if not binary:
-            return self._err("bin/assfonts 不存在或不可执行（assfonts 随插件分发，请重新部署）")
         lib_dir = self.get_resource_or_config("lib_dir") or ""
         if not lib_dir:
             return self._err("请先在设置中配置字体库目录（子集化字体来源）")
-        if self._assfonts_idx is None:
-            self._assfonts_idx = Path(self.get_data_path()) / "assfonts_idx"
-            Path(self._assfonts_idx).mkdir(parents=True, exist_ok=True)
         if not self._scan_lock.acquire(blocking=False):
             return self._err("正在处理中，请等待当前任务完成")
+        if not self._maintenance_begin("全部重建索引"):
+            self._scan_lock.release()
+            return self._err("正在执行其他维护任务（恢复/清库/删除/重建），请稍后重试")
         try:
-            ok, msg = self._rebuild_subset_index_silent()
-            if not ok:
-                return self._err(f"重建索引失败: {msg}")
-            self._db.add_log(f"assfonts 索引已重建（{lib_dir}）", "info")
-            if self.get_resource_or_config("notify_enabled"):
-                self._notify("字体分类管家：索引重建完成", "✅ assfonts 字体索引已重建，缺失字体可重新子集化")
-            return self._ok(af.index_info(self._assfonts_idx, lib_dir), "索引已重建")
+            result = self._rebuild_font_index_impl(
+                stats={
+                    "ok": False,
+                    "scanned": 0,
+                    "indexed": 0,
+                    "unchanged": 0,
+                    "invalid": 0,
+                    "failed": 0,
+                    "failed_paths": [],
+                    "removed": 0,
+                    "hash_checked": 0,
+                    "hash_mismatch": 0,
+                    "error": "",
+                },
+                full=True,
+                allow_incomplete=bool(allow_incomplete),
+            )
+            if not result.get("ok"):
+                return self._err(f"重建索引失败: {result.get('error') or '未知错误'}")
+            self._db.add_log(
+                f"字体库已全部重建：重解析 {result['indexed']} 个文件、"
+                f"跳过 {result['unchanged']}、清理 {result['removed']}（{lib_dir}）",
+                "info",
+            )
+            return self._ok(
+                {"engine": "harfbuzz", "font_index": self._db.index_stats()},
+                "字体库已全部重建（逐文件重新解析）",
+            )
         finally:
+            self._maintenance_end("全部重建索引")
             self._scan_lock.release()
 
     def _rebuild_subset_index_silent(self) -> Tuple[bool, str]:
-        """重建 assfonts 索引（尽力而为，不抛异常，失败仅返回错误信息）。
+        """重建 fontTools 增量字体索引（尽力而为，不抛异常，失败仅返回错误信息）。
 
         字体归档/全量检查后调用，让新入库字体立即可被子集化引用；
         返回 (ok, msg)。调用方需自行持有 _scan_lock（或确认无并发冲突）。
         """
         try:
-            binary = self._subset_binary()
-            if not binary:
-                return False, "bin/assfonts 不存在或不可执行"
-            lib_dir = self.get_resource_or_config("lib_dir") or ""
-            if not lib_dir or not Path(lib_dir).is_dir():
-                return False, "字体库目录未配置或不可达"
-            if self._assfonts_idx is None:
-                self._assfonts_idx = Path(self.get_data_path()) / "assfonts_idx"
-                Path(self._assfonts_idx).mkdir(parents=True, exist_ok=True)
-            try:
-                found = [
-                    f
-                    for f in Path(lib_dir).rglob("*")
-                    if f.is_file() and f.suffix.lower() in (".ttf", ".otf", ".ttc", ".woff", ".woff2")
-                ]
-                # 只报数量，不列举文件名——字体库上千个文件时逐名列出会刷屏
-                self._db.add_log(
-                    f"索引构建诊断: 字体库目录 {lib_dir} 共发现 {len(found)} 个字体文件"
-                    + ("（目录内无字体文件）" if not found else ""),
-                    "info",
-                )
-            except Exception:
-                pass
-            result = af.build_index(binary, [lib_dir], self._assfonts_idx)
-            # 索引（重）构建完成后清键集缓存，检查侧立即命中新归档字体
-            self._index_font_cache = None
-            return result
+            hb_ok, hb_info = self._hb_status()
+            if not hb_ok:
+                return False, hb_info
+            result = self._rebuild_font_index()
+            if not result.get("ok"):
+                return False, str(result.get("error") or "字体索引重建失败")
+            if int(result.get("indexed") or 0) > 0:
+                # 字体库新增/更新字体后：重检受影响的字幕，让已解决的缺失即时消失
+                self._recheck_missing_after_library_change("字体库更新")
+            return True, ""
         except Exception as err:
             return False, str(err)
 
@@ -3832,11 +5546,14 @@ class Zitifenlei(_PluginBase):
             return self._err("数据库未初始化")
         if self._tmp_dir is None:
             return self._err("插件临时目录未初始化")
-        binary = self._subset_binary()
-        if not binary:
-            return self._err("bin/assfonts 不存在或不可执行（assfonts 随插件分发，请重新部署）")
+        ready, why = self._subset_engine_ready()
+        if not ready:
+            return self._err(why)
         if not self._scan_lock.acquire(blocking=False):
             return self._err("全量子集化正在运行中，请等待本次完成后再试")
+        if self._maintenance_active():
+            self._scan_lock.release()
+            return self._err("正在执行维护任务（恢复/清库/删除/重建），请稍后重试")
         try:
             pending = self._db.list_subset_pending()
 
@@ -3874,13 +5591,10 @@ class Zitifenlei(_PluginBase):
                 except Exception:
                     pass
                 fp = Path(r.get("file_path") or "")
-                if self._tmp_dir and str(fp.resolve()).startswith(str(Path(self._tmp_dir).resolve())):
-                    try:
-                        # 覆盖模式成品==源文件路径：成品不可当临时源删（下载依赖它）
-                        if keep_map.get(str(fp.resolve())) != "keep" and str(fp.resolve()) not in out_set:
-                            fp.unlink(missing_ok=True)
-                    except Exception:
-                        pass
+                if self._tmp_dir and _path_within(fp, Path(self._tmp_dir)):
+                    # 覆盖模式成品==源文件路径：成品不可当临时源删（下载依赖它）
+                    if keep_map.get(str(fp.resolve())) != "keep" and str(fp.resolve()) not in out_set:
+                        arch.safe_unlink(fp, self._tmp_dir, exts=ASS_EXTENSIONS)
             self._db.add_log(
                 f"全量子集化: 成功 {stats['success']}, 跳过 {stats['skipped']}, "
                 f"缺字体 {stats['missing']}, 失败 {stats['error']}",
@@ -3910,7 +5624,7 @@ class Zitifenlei(_PluginBase):
         if not names:
             return False
         try:
-            # 与检查侧同一基准（assfonts 索引优先，回退字体库记录）
+            # 与检查侧同一基准（fontTools 索引优先，回退字体库记录）
             families, _src = self._lib_font_keys()
             return all(normalize_font_key(n) in families for n in names)
         except Exception:
@@ -3996,28 +5710,24 @@ class Zitifenlei(_PluginBase):
             pass
         if not upload_files:
             return self._err("请选择要上传的字幕文件")
+        files, notes = await self._receive_uploads(upload_files, ASS_EXTENSIONS, prefix="subset")
         done = []
-        for upload in upload_files:
-            file_name = getattr(upload, "filename", "") or ""
-            if not is_ass_file(file_name):
-                continue
-            try:
-                raw = await upload.read()
-            except Exception:
-                continue
-            if not raw:
-                continue
-            safe_name = Path(file_name).name
-            tmp_path = Path(self._tmp_dir) / f"subset_{uuid.uuid4().hex}_{safe_name}"
-            try:
-                tmp_path.write_bytes(raw)
-            except Exception:
+        for entry in files:
+            safe_name = entry["file_name"]
+            tmp_path = Path(entry["path"])
+            if not tmp_path.is_file():
                 continue
             pid = self._db.add_subset_pending(safe_name, str(tmp_path), source="upload")
             done.append({"id": pid, "file_name": safe_name})
         if not done:
-            return self._err("没有可上传的字幕文件（需 .ass 后缀且内容非空）")
-        return self._ok({"count": len(done), "items": done}, f"已加入待处理 {len(done)} 个字幕")
+            msg = "没有可上传的字幕文件（需 .ass 后缀或 .zip 压缩包，且内容非空）"
+            if notes:
+                msg += "；" + "；".join(notes[:3])
+            return self._err(msg)
+        return self._ok(
+            {"count": len(done), "items": done, "notes": notes},
+            f"已加入待处理 {len(done)} 个字幕",
+        )
 
     def api_subset_pending_remove(self, id: int = 0) -> Dict[str, Any]:
         """移除单条待处理（x 按钮）；临时目录的上传文件一并删除"""
@@ -4030,11 +5740,8 @@ class Zitifenlei(_PluginBase):
             if row and row.get("file_path"):
                 fp = Path(row["file_path"])
                 # 仅删除插件临时目录内的上传缓存，监控目录里的原字幕不动
-                if self._tmp_dir and str(fp.resolve()).startswith(str(Path(self._tmp_dir).resolve())):
-                    try:
-                        fp.unlink(missing_ok=True)
-                    except Exception:
-                        pass
+                if self._tmp_dir and _path_within(fp, Path(self._tmp_dir)):
+                    arch.safe_unlink(fp, self._tmp_dir, exts=ASS_EXTENSIONS)
             self._db.delete_subset_pending(int(id))
             return self._ok({}, "已移除")
         except Exception as err:
@@ -4048,37 +5755,49 @@ class Zitifenlei(_PluginBase):
             for row in self._db.list_subset_pending():
                 if row.get("file_path"):
                     fp = Path(row["file_path"])
-                    if self._tmp_dir and str(fp.resolve()).startswith(str(Path(self._tmp_dir).resolve())):
-                        try:
-                            fp.unlink(missing_ok=True)
-                        except Exception:
-                            pass
+                    if self._tmp_dir and _path_within(fp, Path(self._tmp_dir)):
+                        arch.safe_unlink(fp, self._tmp_dir, exts=ASS_EXTENSIONS)
             self._db.clear_subset_pending()
             return self._ok({}, "已清空待处理")
         except Exception as err:
             return self._err(f"清空失败: {err}")
 
-    def _subset_out_deletable(self, out_path: str) -> bool:
-        """子集化成成品文件是否可随记录删除（删除记录时同步删输出产物）：
-        输出目录 / 上传临时目录 / ASS字幕目录监控 / 子集目录监控 内的产物可删
-        ——这些是「监控/上传」来源，源字幕在监控目录或临时目录不受影响；
-        媒体库等其他外部路径是「MP 入库」来源，入库字幕已落地媒体库，即使删记录也
-        不能动媒体库里的成品文件（用户声明：入库的删记录不影响已入库字幕）。"""
+    def _subset_delete_roots(self, source: str = "") -> List[Path]:
+        """可随记录删除产物的目录白名单。
+
+        - inbound（MP 入库）：一律不允许删除（媒体库成品属于用户资产）
+        - manual（上传）：临时目录
+        - watch（监控）：临时/输出/ASS监控/子集监控目录
+        - 旧记录无 source：只认插件自有的临时/输出目录（不按监控目录猜，避免
+          用户把 subset_dir 配成媒体库根时误删媒体库字幕）
+        """
+        source = str(source or "")
+        if source == "inbound":
+            return []
+        roots: List[Path] = []
+        for value in (self._tmp_dir, self.get_resource_or_config("subset_out_dir") or ""):
+            if value:
+                roots.append(Path(value))
+        if source == "watch":
+            for key in ("ass_dir", "subset_dir"):
+                value = self.get_resource_or_config(key) or ""
+                if value:
+                    roots.append(Path(value))
+        return roots
+
+    def _subset_out_deletable(self, out_path: str, source: str = "") -> bool:
+        """子集化成成品文件是否可随记录删除：按记录来源身份判定，而不是按目录猜。
+
+        inbound（媒体库）记录即使 out_file 恰好落在监控/输出目录，也一律不删；
+        只有 manual/watch 来源（或旧记录且位于插件自有临时/输出目录）才允许删除。
+        """
         if not out_path:
             return False
         try:
             p = Path(out_path)
-            for b in (
-                self._tmp_dir,
-                self.get_resource_or_config("subset_out_dir") or "",
-                self.get_resource_or_config("ass_dir") or "",
-                self.get_resource_or_config("subset_dir") or "",
-            ):
-                if b and _path_within(p, Path(b)):
-                    return True
+            return any(_path_within(p, root) for root in self._subset_delete_roots(source))
         except Exception:
-            pass
-        return False
+            return False
 
     def _prune_empty_show_dir(self, out_path: Path) -> None:
         """输出目录按剧名单生成的子文件夹清空后删除（监控输出方式=移动、删记录清产物后常见）。"""
@@ -4100,20 +5819,22 @@ class Zitifenlei(_PluginBase):
         补删同名 <stem>_subsetted 备份夹（也在可删区域时），避免只删成品留夹子；
         输出目录按剧名的子文件夹清空后一并删除（移动模式下不留空夹）。"""
         out = str(row.get("out_file") or "")
-        if not out or not self._subset_out_deletable(out):
+        source = str(row.get("source") or "")
+        if not out or not self._subset_out_deletable(out, source):
             return
-        try:
-            Path(out).unlink(missing_ok=True)
-            # 同行 <stem>_subsetted 备份夹：仅当夹子也在可删区域（输出/临时/监控目录）时删除，
-            # assfonts 在源目录生成该夹只是备份，随记录删除产物时一并清掉
-            stem = out[:-4] if out.lower().endswith(".ass") else out
-            sub = Path(stem + "_subsetted")
-            if sub.is_dir() and self._subset_out_deletable(str(sub)):
+        roots = self._subset_delete_roots(source)
+        arch.safe_unlink(out, *roots, exts=(".ass",))
+        # 同行 <stem>_subsetted 备份夹：仅当夹子也在可删区域时删除，
+        # 子集化在源目录生成该夹只是备份，随记录删除产物时一并清掉
+        stem = out[:-4] if out.lower().endswith(".ass") else out
+        sub = Path(stem + "_subsetted")
+        if sub.is_dir() and self._subset_out_deletable(str(sub), source):
+            try:
                 shutil.rmtree(sub, ignore_errors=True)
-            # 输出目录/<剧名>/ 空文件夹清理
-            self._prune_empty_show_dir(Path(out))
-        except Exception:
-            pass
+            except Exception:
+                pass
+        # 输出目录/<剧名>/ 空文件夹清理
+        self._prune_empty_show_dir(Path(out))
 
     def api_subset_record_delete(self, id: int = 0) -> Dict[str, Any]:
         """删除单条子集化记录（监控/上传来历的记录同步删除输出产物；入库记录只删记录不动媒体库文件）"""
@@ -4156,9 +5877,9 @@ class Zitifenlei(_PluginBase):
             return self._err("插件已停用，请先在设置中启用")
         if not self._db_ok():
             return self._err("数据库未初始化")
-        binary = self._subset_binary()
-        if not binary:
-            return self._err("bin/assfonts 不存在或不可执行（assfonts 随插件分发，请重新部署）")
+        ready, why = self._subset_engine_ready()
+        if not ready:
+            return self._err(why)
         if not self._scan_lock.acquire(blocking=False):
             return self._err("正在处理中，请等待当前任务完成")
         try:
@@ -4203,7 +5924,7 @@ class Zitifenlei(_PluginBase):
         agg: Dict[str, int] = {}
         shown: Dict[str, str] = {}
         try:
-            # 与检查侧同一基准（assfonts 索引优先，回退字体库记录）：
+            # 与检查侧同一基准（fontTools 索引优先，回退字体库记录）：
             # 索引可用时字体在库即命中，避免「入库了索引没重建」被误列为缺失
             families, _src = self._lib_font_keys()
             rows = self._db.query(
@@ -4228,22 +5949,342 @@ class Zitifenlei(_PluginBase):
             for k, v in sorted(agg.items(), key=lambda kv: (-kv[1], kv[0]))
         ]
 
+    def _latest_missing_snapshots(self) -> List[Dict[str, Any]]:
+        """每个字幕「最近一次检查批次」里仍缺失（missing/partial）的字形快照行。
+
+        同一批检查的行共享 check_time；按批次取最新可避免字体已从字幕移除后
+        旧快照仍被当作缺失。
+        """
+        try:
+            rows = self._db.query(
+                "SELECT g.ass_id, g.file_path, g.font_name, g.missing_codepoints, g.missing_chars, "
+                "g.status, g.check_time FROM ass_missing_glyphs g "
+                "JOIN ass_files a ON a.id = g.ass_id ORDER BY g.id"
+            )
+        except Exception:
+            return []
+        latest_time: Dict[Any, str] = {}
+        for row in rows:
+            latest_time[row.get("ass_id")] = row.get("check_time") or ""
+        latest: Dict[Tuple[Any, str], Dict[str, Any]] = {}
+        for row in rows:
+            if (row.get("check_time") or "") != latest_time.get(row.get("ass_id")):
+                continue
+            key = normalize_font_key(row.get("font_name") or "")
+            if key:
+                latest[(row.get("ass_id"), key)] = row
+        return [
+            r for r in latest.values() if (r.get("status") or "") in ("missing", "partial")
+        ]
+
+    def _missing_glyph_targets(self) -> Dict[str, Dict[str, Any]]:
+        """归一化字体名 → 缺失目标（字形级最新快照 + 旧口径名称兜底）。
+
+        返回 {key: {"name": 展示名, "count": 受影响字幕数,
+                    "codepoints": set[int], "chars": 缺失字符（去重截断）, "glyph": bool}}
+        """
+        targets: Dict[str, Dict[str, Any]] = {}
+        coverage: Dict[str, set] = {}
+        for row in self._latest_missing_snapshots():
+            key = normalize_font_key(row.get("font_name") or "")
+            if not key:
+                continue
+            cps, remain, remain_chars = self._snapshot_remaining(row, coverage)
+            if cps and not remain:
+                continue  # 字体库已覆盖全部缺失字符 → 不再是上传目标
+            item = targets.get(key)
+            if not item:
+                item = {
+                    "name": row.get("font_name") or key,
+                    "count": 0,
+                    "codepoints": set(),
+                    "chars": "",
+                    "glyph": True,
+                }
+                targets[key] = item
+            item["count"] += 1
+            item["codepoints"] |= remain if cps else cps
+            item["chars"] += remain_chars if cps else (row.get("missing_chars") or "")
+        # 旧口径兜底：没有字形快照的历史记录只按名称匹配（无字符约束）
+        for key, value in self._ass_missing_agg_cached().items():
+            if key in targets:
+                continue
+            targets[key] = {
+                "name": value.get("name") or key,
+                "count": int(value.get("count") or 0),
+                "codepoints": set(),
+                "chars": "",
+                "glyph": False,
+            }
+        for item in targets.values():
+            item["chars"] = "".join(dict.fromkeys(item["chars"]))[:80]
+        return targets
+
+    def _evaluate_font_for_targets(
+        self,
+        path: Path,
+        targets: Dict[str, Dict[str, Any]],
+        target_hint: str = "",
+    ) -> Dict[str, Any]:
+        """严格校验上传字体：同一 face 必须同时「名称命中缺失目标」且「真实覆盖缺失字符」。
+
+        P1-4：逐 face 独立评估，绝不做「face 名称 + 另一 face 的 cmap」跨 face 拼接——
+        TTC/OTC 里 face 0 名称匹配但缺字、face 1 有字符但名称不匹配时，文件整体必须被拒绝。
+        历史记录缺少缺失码点明细（旧口径记录）时不能只凭名称放行：要求先重新检查字幕。
+
+        返回 {"ok": bool, "reason": str, "matched": 展示名, "match_kind": name|manual,
+              "matched_keys": [...], "affected_keys": [...], "covered_chars": str,
+              "required_chars": str, "glyph": bool, "name": 字体内部名, "family": "",
+              "sha256": str, "face_count": int, "face_index": int}
+        """
+        if not targets:
+            return {"ok": False, "reason": "当前没有缺失字体，请先在「检查」页生成缺失列表"}
+        try:
+            inspection = inspect_font(path)
+        except Exception as err:
+            return {"ok": False, "reason": f"字体解析失败: {err}"}
+        if not inspection.faces:
+            return {"ok": False, "reason": inspection.error or "字体文件无法解析"}
+        faces: List[Any] = []
+        display = ""
+        family = ""
+        for face in inspection.faces:
+            if face.status not in ("ok", "no_cmap"):
+                continue
+            try:
+                keys = set(face.alias_keys())
+            except Exception:
+                keys = set()
+            if not keys:
+                continue
+            faces.append((face, keys))
+            if not display:
+                display = face.display_name()
+            if not family:
+                family = face.family
+        if not faces:
+            return {"ok": False, "reason": "字体缺少可用的名称信息（name 表为空）"}
+        hint_key = normalize_font_key(target_hint) if target_hint else ""
+        if hint_key and hint_key not in targets:
+            return {"ok": False, "reason": f"人工指定的目标「{target_hint}」不在当前缺失列表中"}
+        match_kind = "manual" if hint_key else "name"
+
+        best: Optional[Tuple[Tuple[int, int], str, set, Any]] = None
+        matched_keys: List[str] = []       # 名称/别名命中的目标 key（不论是否覆盖字符）
+        uncovered_keys: List[str] = []     # 名称命中但该 face 不覆盖任何缺失字符
+        name_only_keys: List[str] = []     # 名称命中但目标无码点明细（未验证覆盖）
+        if hint_key:
+            # 人工指定目标：用户显式声明「这份字体用于补 X」，不再要求字体内部名等于 X；
+            # 但覆盖验证不放松——仍要某个单一 face 真实覆盖该目标的缺失字符，
+            # 且历史记录缺少码点明细时同样必须先重检（不能只凭人工指定放行）。
+            matched_keys.append(hint_key)
+            target = targets[hint_key]
+            required = set(target.get("codepoints") or set())
+            if not required:
+                name_only_keys.append(hint_key)
+            else:
+                for face, _keys in faces:
+                    covered = required & set(face.codepoints)
+                    if not covered:
+                        continue
+                    score = (len(covered), int(target.get("count") or 0))
+                    if best is None or score > best[0]:
+                        best = (score, hint_key, covered, face)
+                if best is None:
+                    uncovered_keys.append(hint_key)
+        else:
+            for face, keys in faces:
+                for key in keys:
+                    if key not in targets:
+                        continue
+                    if key not in matched_keys:
+                        matched_keys.append(key)
+                    target = targets[key]
+                    required = set(target.get("codepoints") or set())
+                    if not required:
+                        # 旧口径历史记录：没有缺失码点明细 → 不能视为已解决（要求先重检）
+                        if key not in name_only_keys:
+                            name_only_keys.append(key)
+                        continue
+                    covered = required & set(face.codepoints)
+                    if not covered:
+                        if key not in uncovered_keys:
+                            uncovered_keys.append(key)
+                        continue
+                    score = (len(covered), int(target.get("count") or 0))
+                    if best is None or score > best[0]:
+                        best = (score, key, covered, face)
+        if best is None:
+            if name_only_keys:
+                names = "、".join(
+                    str(targets[k].get("name") or k) for k in name_only_keys[:3]
+                )
+                return {
+                    "ok": False,
+                    "reason": f"名称命中「{names}」但历史记录缺少缺失字符明细，无法验证字形覆盖，"
+                    "请先在「检查」页重新检查相关字幕后再上传",
+                    "name": display,
+                    "family": family,
+                    "matched_keys": matched_keys,
+                }
+            if uncovered_keys:
+                key = uncovered_keys[0]
+                required_chars = targets[key].get("chars") or ""
+                return {
+                    "ok": False,
+                    "reason": "名称匹配但未覆盖任何缺失字符"
+                    + (f"（缺失字符: {required_chars}）" if required_chars else ""),
+                    "name": display,
+                    "family": family,
+                    "matched_keys": matched_keys,
+                }
+            return {
+                "ok": False,
+                "reason": "与当前缺失字体不匹配（可在页面选择目标字体后重试）",
+                "name": display,
+                "family": family,
+            }
+        _score, chosen, covered, chosen_face = best
+        target = targets[chosen]
+        covered_chars = "".join(
+            chr(cp) for cp in sorted(covered) if cp >= 0x20 and not 0x7F <= cp <= 0x9F
+        )
+        # affected_keys：所有名称命中同一目标的 key（别名口径），供归档后统一失效/重检
+        affected = set(matched_keys) | set(name_only_keys) | set(uncovered_keys)
+        return {
+            "ok": True,
+            "matched": target.get("name") or target_hint or chosen,
+            "match_kind": match_kind,
+            "matched_keys": [chosen],
+            "affected_keys": sorted(affected),
+            "covered": sorted(covered),
+            "covered_chars": covered_chars[:80],
+            "required_chars": target.get("chars") or "",
+            "glyph": bool(target.get("codepoints")),
+            "name": display,
+            "family": family,
+            "sha256": inspection.sha256,
+            "face_count": len(inspection.faces),
+            # 通过的单一 face：归档/子集化必须沿用同一 face，禁止跨 face 拼接
+            "face_index": int(getattr(chosen_face, "face_index", 0) or 0),
+        }
+
+    def _recheck_affected_ass(self, keys: Iterable[str], reason: str = "") -> Dict[str, int]:
+        """重检受某字体影响的 ASS 记录（逐字形快照 + 名称缺失 + 引用清单），返回统计。
+
+        三条来源缺一不可：
+        - 逐字形快照（ass_missing_glyphs）中 key 仍为 missing/partial；
+        - ass_files.missing_fonts 里的旧口径名称缺失；
+        - ass_files.all_fonts 里「引用过该字体」的记录——字体被删除时，之前已解决的
+          记录不会再出现在任何缺失清单里，只能靠引用清单找回来重检。
+        """
+        normalized = {normalize_font_key(k) for k in keys if k}
+        result = {"checked": 0, "ok": 0, "missing": 0, "failed": 0}
+        if not normalized:
+            return result
+        paths: set = set()
+        try:
+            latest: Dict[Tuple[Any, str], Dict[str, Any]] = {}
+            for row in self._db.query(
+                "SELECT ass_id, file_path, font_name, status FROM ass_missing_glyphs ORDER BY id"
+            ):
+                key = normalize_font_key(row.get("font_name") or "")
+                if key in normalized:
+                    latest[(row.get("ass_id"), key)] = row
+            for row in latest.values():
+                if row.get("file_path"):
+                    paths.add(str(row["file_path"]))
+            for row in self._db.query(
+                "SELECT file_path, missing_fonts, all_fonts FROM ass_files"
+            ):
+                file_path = str(row.get("file_path") or "")
+                if not file_path:
+                    continue
+                matched = False
+                for field in ("missing_fonts", "all_fonts"):
+                    try:
+                        names = json.loads(row.get(field) or "[]")
+                    except Exception:
+                        names = []
+                    if any(normalize_font_key(str(n)) in normalized for n in names or []):
+                        matched = True
+                        break
+                if matched:
+                    paths.add(file_path)
+        except Exception:
+            pass
+        for path in paths:
+            p = Path(path)
+            if not p.is_file():
+                continue
+            out = self._check_ass_file(p, source="manual")
+            result["checked"] += 1
+            if not out:
+                result["failed"] += 1
+            elif out.get("status") == "ok":
+                result["ok"] += 1
+            else:
+                result["missing"] += 1
+        if result["checked"]:
+            self._invalidate_missing_agg()
+            if reason:
+                self._db.add_log(
+                    f"已重检 {result['checked']} 个字幕（{reason}）：完整 {result['ok']}，仍缺 {result['missing']}",
+                    "info",
+                )
+        return result
+
+    def _recheck_missing_after_library_change(self, reason: str = "字体库新增字体") -> Dict[str, int]:
+        """字体库新增/更新字体后，重检所有仍被标记缺失的字幕（源文件存在时）。
+
+        与缺失字体页的归类流程同口径：补齐字体后字幕状态/逐字符快照即时更新，
+        不再需要手动重新检查。源文件已不存在的上传记录由聚合侧的实时扣除兜底。
+        """
+        try:
+            names = self._db.all_missing_font_names()
+        except Exception:
+            names = []
+        if not names:
+            self._invalidate_missing_agg()
+            return {"checked": 0, "ok": 0, "missing": 0, "failed": 0}
+        return self._recheck_affected_ass(names, reason=reason)
+
     def api_missing_summary(self) -> Dict[str, Any]:
-        """缺失字体汇总：check=检查页检测的缺失，subset=子集化因缺字体跳过的"""
+        """缺失字体汇总：check=检查页检测的缺失（含逐字符明细），subset=子集化因缺字体跳过的"""
         if not self._db_ok():
             return self._err("数据库未初始化")
         try:
-            check = [
-                {"name": v["name"], "count": v["count"]}
-                for v in sorted(self._ass_missing_agg_cached().values(), key=lambda x: -x["count"])
-            ]
+            targets = self._missing_glyph_targets()
+            agg = self._ass_missing_agg_cached()
+            check = []
+            for key, value in agg.items():
+                target = targets.get(key) or {}
+                check.append(
+                    {
+                        "name": value["name"],
+                        "count": value["count"],
+                        "key": key,
+                        "chars": target.get("chars", ""),
+                        "glyph": bool(target.get("glyph")),
+                        "codepoints_count": len(target.get("codepoints") or ()),
+                    }
+                )
+            check.sort(key=lambda x: (-x["count"], x["name"]))
             subset = self._subset_missing_agg()
+            hb_ok, hb_info = self._hb_status()
+            try:
+                index_faces = int(self._db.index_stats().get("faces") or 0)
+            except Exception:
+                index_faces = 0
             return self._ok(
                 {
                     "check": check,
                     "subset": subset,
                     "lib_dir": self.get_resource_or_config("lib_dir") or "",
-                    "binary_ok": self._subset_binary() is not None,
+                    "hb_ok": hb_ok,
+                    "hb_info": hb_info,
+                    "engine": "harfbuzz",
+                    "index_faces": index_faces,
                 },
                 "缺失字体汇总",
             )
@@ -4251,9 +6292,12 @@ class Zitifenlei(_PluginBase):
             return self._err(f"获取缺失字体汇总失败: {err}")
 
     def api_missing_uploads(self) -> Dict[str, Any]:
-        """已上传待归类的字体列表"""
+        """已上传待归类的字体列表（顺带清理超时未归类项）"""
+        self._prune_missing_uploads()
         lst = []
-        for path, item in (self._missing_uploads or {}).items():
+        with self._missing_uploads_lock:
+            items = list(self._missing_uploads.items())
+        for path, item in items:
             lst.append(
                 {
                     "path": path,
@@ -4262,12 +6306,16 @@ class Zitifenlei(_PluginBase):
                     "family": item.get("family", ""),
                     "vendor": item.get("vendor", "未知厂商"),
                     "file_size": item.get("file_size", 0),
+                    "matched": item.get("matched", ""),
+                    "match_kind": item.get("match_kind", ""),
+                    "covered_chars": item.get("covered_chars", ""),
+                    "required_chars": item.get("required_chars", ""),
                 }
             )
         return self._ok(lst)
 
     async def api_missing_upload(self, request: Request) -> Dict[str, Any]:
-        """缺失字体页上传字体（不校验匹配，归类时统一入库）"""
+        """缺失字体页上传字体：严格校验（名称/别名命中缺失目标且覆盖缺失字符）"""
         if not self._enabled:
             return self._err("插件已停用，请先在设置中启用")
         if not self._db_ok():
@@ -4285,53 +6333,186 @@ class Zitifenlei(_PluginBase):
             pass
         if not upload_files:
             return self._err("请选择要上传的字体文件")
-        scan_mode = self.get_resource_or_config("scan_mode") or "internal"
-        done = []
-        for upload in upload_files:
-            file_name = getattr(upload, "filename", "") or ""
-            if not is_font_file(file_name):
-                continue
-            try:
-                raw = await upload.read()
-            except Exception:
-                continue
-            if not raw:
-                continue
-            safe_name = Path(file_name).name
-            tmp_path = Path(self._tmp_dir) / f"missing_{uuid.uuid4().hex}_{safe_name}"
-            try:
-                tmp_path.write_bytes(raw)
-            except Exception:
-                continue
-            try:
-                meta = parse_font_metadata(tmp_path, scan_mode=scan_mode, filename_hint=Path(file_name).stem)
-            except Exception:
-                meta = {"name": Path(file_name).stem, "family": Path(file_name).stem, "vendor": "未知厂商", "designer": ""}
-            item = {
-                "path": str(tmp_path),
-                "file_name": safe_name,
-                "name": meta.get("name", "") or Path(file_name).stem,
-                "family": meta.get("family", "") or Path(file_name).stem,
-                "vendor": meta.get("vendor", "未知厂商"),
-                "designer": meta.get("designer", ""),
-                "file_size": len(raw),
-            }
-            self._missing_uploads[str(tmp_path)] = item
-            done.append(item)
+        scan_mode = "internal"  # fontTools 为唯一权威解析口径
+        target_hint = ""
+        try:
+            raw_target = form.get("target")
+            if isinstance(raw_target, str):
+                target_hint = raw_target.strip()
+        except Exception:
+            pass
+        targets = self._missing_glyph_targets()
+        files, notes = await self._receive_uploads(upload_files, FONT_EXTENSIONS, prefix="missing")
+        done: List[Dict[str, Any]] = []
+        rejected: List[Dict[str, str]] = []
+
+        def _missing_upload_sync() -> None:
+            """校验/解析字体是同步重活：放线程池，避免阻塞事件循环。"""
+            for entry in files:
+                safe_name = entry["file_name"]
+                tmp_path = Path(entry["path"])
+                if not tmp_path.is_file():
+                    continue
+                verdict = self._evaluate_font_for_targets(tmp_path, targets, target_hint)
+                if not verdict.get("ok"):
+                    arch.safe_unlink(tmp_path, self._tmp_dir, exts=FONT_EXTENSIONS)
+                    rejected.append(
+                        {"file_name": safe_name, "reason": str(verdict.get("reason") or "不匹配")}
+                    )
+                    continue
+                try:
+                    meta = parse_font_metadata(tmp_path, scan_mode=scan_mode, filename_hint=Path(safe_name).stem)
+                except Exception:
+                    meta = {
+                        "name": verdict.get("name") or Path(safe_name).stem,
+                        "family": verdict.get("family") or Path(safe_name).stem,
+                        "vendor": "未知厂商",
+                        "designer": "",
+                    }
+                item = {
+                    "path": str(tmp_path),
+                    "file_name": safe_name,
+                    "name": meta.get("name", "") or verdict.get("name") or Path(safe_name).stem,
+                    "family": meta.get("family", "") or verdict.get("family") or Path(safe_name).stem,
+                    "vendor": meta.get("vendor", "未知厂商"),
+                    "designer": meta.get("designer", ""),
+                    "file_size": entry.get("size", 0),
+                    "matched": verdict.get("matched", ""),
+                    "match_kind": verdict.get("match_kind", "name"),
+                    "matched_keys": verdict.get("affected_keys") or verdict.get("matched_keys") or [],
+                    "covered_chars": verdict.get("covered_chars", ""),
+                    "required_chars": verdict.get("required_chars", ""),
+                    "sha256": verdict.get("sha256", ""),
+                    # 严格校验通过的单一 face（P1-4）：归档/子集化沿用，不允许跨 face 拼接
+                    "face_index": int(verdict.get("face_index") or 0),
+                }
+                if item["match_kind"] == "manual":
+                    try:
+                        self._db.set_manual_font_mapping(
+                            item["name"],
+                            item["matched"],
+                            file_sha256=item["sha256"],
+                            note="上传时人工指定目标",
+                        )
+                    except Exception:
+                        pass
+                    self._db.add_log(
+                        f"人工映射: {safe_name}（{item['name']}）→ 缺失字体「{item['matched']}」",
+                        "warning",
+                    )
+                item["created_at"] = time.time()
+                with self._missing_uploads_lock:
+                    self._missing_uploads[str(tmp_path)] = item
+                try:
+                    self._db.add_missing_upload(item)
+                except Exception:
+                    pass
+                done.append(item)
+
+        await asyncio.to_thread(_missing_upload_sync)
         if not done:
-            return self._err("没有可上传的字体文件（需字体后缀且内容非空）")
-        return self._ok({"count": len(done), "items": done}, f"已上传 {len(done)} 个字体，可点击「归类」入库")
+            if rejected:
+                detail = "；".join(f"{r['file_name']}: {r['reason']}" for r in rejected[:3])
+                return self._err(f"没有字体通过缺失校验（{detail}）")
+            if not targets:
+                return self._err("当前没有缺失字体，请先在「检查」页检查字幕生成缺失列表")
+            return self._err("没有可上传的字体文件（需字体后缀或 .zip 压缩包，且内容非空）")
+        message = f"已上传 {len(done)} 个字体（已通过缺失匹配校验），可点击「归类」入库"
+        if rejected:
+            message += f"；{len(rejected)} 个未通过校验"
+        return self._ok(
+            {"count": len(done), "items": done, "rejected": rejected, "notes": notes},
+            message,
+        )
+
+    def _load_missing_uploads(self) -> int:
+        """启动/重载时恢复缺失字体上传缓冲（持久化在 missing_uploads 表）。
+
+        文件已不存在（临时目录被清/用户手动删）的记录一并清理，避免幽灵条目。
+        """
+        if self._db is None:
+            return 0
+        try:
+            rows = self._db.list_missing_uploads()
+        except Exception:
+            return 0
+        loaded = 0
+        for row in rows:
+            path = str(row.get("path") or "")
+            if not path:
+                continue
+            if not Path(path).is_file():
+                try:
+                    self._db.delete_missing_upload(path)
+                except Exception:
+                    pass
+                continue
+            try:
+                matched_keys = json.loads(row.get("matched_keys") or "[]")
+            except Exception:
+                matched_keys = []
+            item = {
+                "path": path,
+                "file_name": row.get("file_name", ""),
+                "name": row.get("name", ""),
+                "family": row.get("family", ""),
+                "vendor": row.get("vendor", "") or "未知厂商",
+                "designer": row.get("designer", ""),
+                "file_size": int(row.get("file_size") or 0),
+                "matched": row.get("matched", ""),
+                "match_kind": row.get("match_kind", ""),
+                "matched_keys": matched_keys if isinstance(matched_keys, list) else [],
+                "covered_chars": row.get("covered_chars", ""),
+                "required_chars": row.get("required_chars", ""),
+                "sha256": row.get("sha256", ""),
+                "created_at": float(row.get("created_at") or 0),
+                "face_index": int(row.get("face_index") or 0),
+            }
+            with self._missing_uploads_lock:
+                self._missing_uploads[path] = item
+            loaded += 1
+        return loaded
+
+    def _prune_missing_uploads(self) -> int:
+        """清理超时未归类的上传缓冲（文件 + 持久化记录），避免无限堆积。"""
+        now = time.time()
+        expired: List[str] = []
+        with self._missing_uploads_lock:
+            for path, item in list(self._missing_uploads.items()):
+                born = float(item.get("created_at") or 0)
+                if not born or now - born > float(self._missing_uploads_ttl):
+                    expired.append(path)
+        for path in expired:
+            self._drop_missing_upload(path)
+        return len(expired)
+
+    def _drop_missing_upload(self, path: str) -> Optional[Dict[str, Any]]:
+        """移除一条未入库上传：清缓冲、持久化记录、临时文件与对应人工映射审计记录。"""
+        with self._missing_uploads_lock:
+            item = self._missing_uploads.pop(path, None)
+        try:
+            self._db.delete_missing_upload(str(path))
+        except Exception:
+            pass
+        if item:
+            arch.safe_unlink(item.get("path") or path, self._tmp_dir, exts=FONT_EXTENSIONS)
+            if item.get("match_kind") == "manual":
+                try:
+                    self._db.delete_manual_font_mapping_pair(
+                        item.get("name", ""), item.get("matched", "")
+                    )
+                except Exception:
+                    pass
+        return item
 
     def api_missing_uploads_clear(self) -> Dict[str, Any]:
         """清除已上传未归类的字体（删除临时文件）"""
         if not self._enabled:
             return self._err("插件已停用，请先在设置中启用")
-        for path in list(self._missing_uploads.keys()):
-            try:
-                Path(path).unlink(missing_ok=True)
-            except Exception:
-                pass
-        self._missing_uploads.clear()
+        with self._missing_uploads_lock:
+            paths = list(self._missing_uploads.keys())
+        for path in paths:
+            self._drop_missing_upload(path)
         return self._ok({}, "已清除上传的字体")
 
     def api_missing_upload_remove(self, path: str = "") -> Dict[str, Any]:
@@ -4340,17 +6521,87 @@ class Zitifenlei(_PluginBase):
             return self._err("插件已停用，请先在设置中启用")
         if not path:
             return self._err("参数错误")
-        if path in self._missing_uploads:
-            try:
-                Path(path).unlink(missing_ok=True)
-            except Exception:
-                pass
-            del self._missing_uploads[path]
-            return self._ok({}, "已移除")
-        return self._err("未找到该字体记录")
+        with self._missing_uploads_lock:
+            exists = path in self._missing_uploads
+        if not exists:
+            return self._err("未找到该字体记录")
+        self._drop_missing_upload(path)
+        return self._ok({}, "已移除")
+
+    async def api_missing_remap(self, request: Request) -> Dict[str, Any]:
+        """已上传字体人工映射到指定缺失目标，并复核字符覆盖（审计入库）。"""
+        if not self._enabled:
+            return self._err("插件已停用，请先在设置中启用")
+        try:
+            body = await request.json() if hasattr(request, "json") else {}
+        except Exception:
+            body = {}
+        path = body.get("path") or ""
+        target = str(body.get("target") or "").strip()
+        item = self._missing_uploads.get(path)
+        if not item:
+            return self._err("上传记录不存在或已失效，请重新上传")
+        if not target:
+            return self._err("请选择要映射的缺失目标字体")
+        src = Path(path)
+        if not src.is_file():
+            return self._err("临时字体文件不存在，请重新上传")
+        targets = self._missing_glyph_targets()
+        verdict = await asyncio.to_thread(self._evaluate_font_for_targets, src, targets, target)
+        if not verdict.get("ok"):
+            return self._err(str(verdict.get("reason") or "映射校验失败"))
+        old_matched = str(item.get("matched") or "")
+        item.update(
+            {
+                "matched": verdict.get("matched", target),
+                "match_kind": "manual",
+                "matched_keys": verdict.get("affected_keys") or [normalize_font_key(target)],
+                "covered_chars": verdict.get("covered_chars", ""),
+                "required_chars": verdict.get("required_chars", ""),
+                "sha256": verdict.get("sha256", item.get("sha256", "")),
+            }
+        )
+        try:
+            if old_matched and old_matched != item["matched"]:
+                self._db.delete_manual_font_mapping_pair(item.get("name", ""), old_matched)
+            self._db.set_manual_font_mapping(
+                item.get("name", "") or verdict.get("name", ""),
+                item["matched"],
+                file_sha256=item.get("sha256", ""),
+                note="手动改派缺失目标",
+            )
+            self._db.add_missing_upload(item)
+        except Exception:
+            pass
+        self._db.add_log(
+            f"人工映射: {item.get('file_name', '')}（{item.get('name', '')}）→ 缺失字体「{item['matched']}」",
+            "warning",
+        )
+        return self._ok(item, f"已映射到「{item['matched']}」，覆盖字符：{item.get('covered_chars') or '（名称级）'}")
+
+    def api_missing_mappings(self) -> Dict[str, Any]:
+        """人工映射审计列表"""
+        if not self._db_ok():
+            return self._ok([])
+        try:
+            return self._ok(self._db.list_manual_font_mappings())
+        except Exception as err:
+            return self._err(f"读取人工映射失败: {err}")
+
+    def api_missing_mapping_delete(self, id: int = 0) -> Dict[str, Any]:
+        """删除一条人工映射审计记录"""
+        if not self._db_ok():
+            return self._err("数据库未初始化")
+        if not id:
+            return self._err("缺少映射ID")
+        try:
+            self._db.delete_manual_font_mapping(int(id))
+            return self._ok({}, "已删除")
+        except Exception as err:
+            return self._err(f"删除失败: {err}")
 
     def api_missing_classify(self) -> Dict[str, Any]:
-        """归类：把已上传的字体全部归档入库（同名跳过不覆盖）→ 重建 assfonts 索引 → 通知"""
+        """归类：把已上传的字体全部归档入库（同名跳过不覆盖）→ 刷新字体索引 → 通知"""
         if not self._enabled:
             return self._err("插件已停用，请先在设置中启用")
         if not self._db_ok():
@@ -4358,7 +6609,8 @@ class Zitifenlei(_PluginBase):
         lib_dir = self.get_resource_or_config("lib_dir") or ""
         if not lib_dir:
             return self._err("请先在设置中配置字体库目录（归档落点）")
-        items = list(self._missing_uploads.items())
+        with self._missing_uploads_lock:
+            items = list(self._missing_uploads.items())
         if not items:
             return self._err("还没有上传的字体，请先上传")
         if not self._scan_lock.acquire(blocking=False):
@@ -4366,32 +6618,71 @@ class Zitifenlei(_PluginBase):
         try:
             ok_count = 0
             failed: List[str] = []
+            index_failed: List[str] = []
+            affected: set = set()
+            targets = self._missing_glyph_targets()
             for tmp_path, item in items:
                 try:
                     src = Path(tmp_path)
                     if not src.is_file():
                         continue
-                    vendor = str(item.get("vendor") or "未知厂商")
+                    # 入库前复核：仍须命中缺失目标且覆盖缺失字符（人工映射按其目标复核）
+                    hint = item.get("matched", "") if item.get("match_kind") == "manual" else ""
+                    verdict = self._evaluate_font_for_targets(src, targets, hint)
+                    if not verdict.get("ok"):
+                        failed.append(f"{item.get('file_name', '')}（{verdict.get('reason') or '未通过缺失校验'}）")
+                        continue
+                    affected.update(verdict.get("affected_keys") or [])
+                    vendor = safe_filename_component(
+                        str(item.get("vendor") or "未知厂商"), "未知厂商"
+                    )
                     dest_dir = Path(lib_dir) / vendor
-                    base = str(item.get("name") or Path(item.get("file_name", "font")).stem)
+                    base = safe_filename_component(
+                        str(item.get("name") or Path(item.get("file_name", "font")).stem)
+                    )
                     # 按格式分子文件夹归档：字体库/厂商/格式/基础名.后缀
                     fmt_dir = dest_dir / _font_subdir_name(src.suffix)
                     existing = _dest_exists_recursive(dest_dir, base, src.suffix)
-                    if existing:
-                        # 已存在同名文件（含旧平铺布局与格式子文件夹）：跳过，不覆盖
-                        failed.append(f"{item.get('file_name', '')}（字体库已存在 {existing.name}）")
-                        self._missing_uploads.pop(tmp_path, None)
+                    if existing and _files_identical(src, existing):
+                        # 库内已有完全相同的文件：清理上传缓冲（含持久化记录），避免条目永久卡在列表
+                        failed.append(f"{item.get('file_name', '')}（字体库已存在相同文件 {existing.name}）")
+                        with self._missing_uploads_lock:
+                            self._missing_uploads.pop(tmp_path, None)
                         try:
-                            src.unlink(missing_ok=True)
+                            self._db.delete_missing_upload(tmp_path)
                         except Exception:
                             pass
+                        arch.safe_unlink(tmp_path, self._tmp_dir, exts=FONT_EXTENSIONS)
                         continue
+                    if existing:
+                        # 同名但内容不同：另存 -2/-3，不覆盖旧版也不卡住条目
+                        base = _unique_archive_base(self._dest_names_for(dest_dir), base, src.suffix)
+                        self._db.add_log(
+                            f"缺失字体 {item.get('file_name', '')} 与库内 {existing.name} 同名但内容不同，另存为 {base}{src.suffix}",
+                            "warning",
+                        )
                     try:
                         fmt_dir.mkdir(parents=True, exist_ok=True)
                     except Exception:
                         pass
                     dest = fmt_dir / f"{base}{src.suffix}"
-                    shutil.copy2(str(src), str(dest))
+                    if not _path_within(dest, Path(lib_dir)):
+                        failed.append(f"{item.get('file_name', '')}（目标越界，拒绝归档）")
+                        continue
+                    src_size = src.stat().st_size
+                    tmp_dest = fmt_dir / f".{dest.name}.tmp-{uuid.uuid4().hex[:8]}"
+                    try:
+                        shutil.copy2(str(src), str(tmp_dest))
+                        written = tmp_dest.stat().st_size
+                        if written != src_size:
+                            raise RuntimeError(f"写入大小不一致（源 {src_size}，目标 {written}）")
+                        os.replace(str(tmp_dest), str(dest))
+                    except Exception:
+                        try:
+                            tmp_dest.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                        raise
                     self._db.add_font(
                         {
                             "name": item.get("name", ""),
@@ -4405,36 +6696,57 @@ class Zitifenlei(_PluginBase):
                             "file_path": str(dest),
                         }
                     )
-                    self._missing_uploads.pop(tmp_path, None)
+                    if not self._index_font_path(dest):
+                        index_failed.append(dest.name)
+                    with self._missing_uploads_lock:
+                        self._missing_uploads.pop(tmp_path, None)
                     try:
-                        src.unlink(missing_ok=True)
+                        self._db.delete_missing_upload(tmp_path)
                     except Exception:
                         pass
+                    arch.safe_unlink(tmp_path, self._tmp_dir, exts=FONT_EXTENSIONS)
                     ok_count += 1
                 except Exception as err:
                     failed.append(f"{item.get('file_name', '')}（{err}）")
-            # 归类后刷新 assfonts 索引，缺失字体即可被子集化使用
-            idx_ok = False
-            idx_msg = ""
-            binary = self._subset_binary()
-            if binary and ok_count:
-                idx_ok, idx_msg = af.build_index(binary, [lib_dir], self._assfonts_idx)
+            # 入库时已按文件写入 fontTools 增量索引；逐文件检查结果，索引失败要在通知里如实提示
+            idx_ok = not index_failed
+            idx_msg = self._short_names(index_failed, 5) if index_failed else ""
+            # 逐字符解决复核：重检受本次入库影响的字幕，缺失标记随之消除
+            recheck = self._recheck_affected_ass(affected, reason="缺失字体入库") if ok_count else {
+                "checked": 0,
+                "ok": 0,
+                "missing": 0,
+                "failed": 0,
+            }
             self._db.add_log(
-                f"缺失字体归类: 入库 {ok_count} 个, 跳过/失败 {len(failed)} 个"
-                + (f"，索引{'已刷新' if idx_ok else '刷新失败: ' + idx_msg[:100]}" if ok_count else ""),
-                "info" if idx_ok or not ok_count else "warning",
+                f"缺失字体归类: 入库 {ok_count} 个, 跳过/失败 {len(failed)} 个", "info"
             )
-            # 通知：入库结果 + 索引刷新
+            # 通知：入库结果 + 复核结果
             if ok_count and self.get_resource_or_config("notify_enabled"):
                 lines = [f"✅ 缺失字体已入库 {ok_count} 个"]
+                if recheck["checked"]:
+                    lines.append(
+                        f"已重检受影响字幕 {recheck['checked']} 个：完整 {recheck['ok']}，仍缺 {recheck['missing']}"
+                    )
                 if idx_ok:
-                    lines.append("assfonts 索引已自动刷新，请回到「子集化」页重新运行")
-                else:
+                    lines.append("索引已自动刷新，请回到「子集化」页重新运行")
+                elif idx_msg:
                     lines.append(f"⚠ 索引刷新失败：{idx_msg[:100]}")
                 self._notify("字体分类管家：缺失字体入库", "\n".join(lines))
             return self._ok(
-                {"classified": ok_count, "failed": failed, "index_ok": idx_ok},
-                f"已入库 {ok_count} 个字体" + ("，索引已刷新，可回到「子集化」页重新运行" if idx_ok else ""),
+                {
+                    "classified": ok_count,
+                    "failed": failed,
+                    "index_ok": idx_ok,
+                    "recheck": recheck,
+                },
+                f"已入库 {ok_count} 个字体"
+                + (
+                    f"，已重检 {recheck['checked']} 个字幕（完整 {recheck['ok']}，仍缺 {recheck['missing']}）"
+                    if recheck["checked"]
+                    else ""
+                )
+                + ("，索引已刷新，可回到「子集化」页重新运行" if idx_ok else ""),
             )
         except Exception as err:
             self._db.add_log(f"缺失字体归类失败: {err}", "error")
@@ -4451,11 +6763,36 @@ class Zitifenlei(_PluginBase):
         不再对每条字幕 read_bytes 整个文件；调用方走 _ass_missing_agg_cached TTL 缓存。
         """
         agg: Dict[str, Dict[str, Any]] = {}
+        glyph_paths: set = set()
+        coverage: Dict[str, set] = {}
+        # 字形级快照优先：名称在库但字符未覆盖同样计入缺失；
+        # 按当前字体库字符覆盖实时扣除——字体库那边补齐字体后，这里立即不再显示
+        for row in self._latest_missing_snapshots():
+            key = normalize_font_key(row.get("font_name") or "")
+            if not key:
+                continue
+            fp = row.get("file_path") or ""
+            if fp:
+                glyph_paths.add(fp)
+                try:
+                    if self._ass_is_subsetted(fp):
+                        continue
+                except Exception:
+                    pass
+            cps, remain, _chars = self._snapshot_remaining(row, coverage)
+            if cps and not remain:
+                continue  # 当前字体库已覆盖全部缺失字符 → 已解决
+            if key in agg:
+                agg[key]["count"] += 1
+            else:
+                agg[key] = {"name": row.get("font_name") or key, "count": 1}
         try:
             families, _fmatch = self._lib_font_keys()  # 与检查列表同口径（索引优先，回退字体库记录）
             for r in self._db.query("SELECT all_fonts, file_path FROM ass_files WHERE all_fonts != '[]'"):
                 # 已内嵌（子集化）字幕自带字体，不参与缺失修复聚合
                 fp = r.get("file_path") or ""
+                if fp and fp in glyph_paths:
+                    continue  # 该字幕已按字形级口径统计
                 try:
                     if fp and self._ass_is_subsetted(fp):
                         continue
@@ -4507,51 +6844,96 @@ class Zitifenlei(_PluginBase):
             pass
         if not upload_files:
             return self._err("请选择要上传的字体文件")
-        upload = upload_files[0]
-        file_name = getattr(upload, "filename", "") or ""
-        if not is_font_file(file_name):
-            return self._err(f"不支持的字体文件格式（支持: {', '.join(FONT_EXTENSIONS)}）")
+        target_hint = ""
         try:
-            raw = await upload.read()
-        except Exception as err:
-            return self._err(f"读取上传文件失败: {err}")
-        if not raw:
-            return self._err("上传文件为空")
-        safe_name = Path(file_name).name
-        tmp_path = Path(self._tmp_dir) / f"{uuid.uuid4().hex}_{safe_name}"
-        try:
-            tmp_path.write_bytes(raw)
-        except Exception as err:
-            return self._err(f"保存临时文件失败: {err}")
-        scan_mode = self.get_resource_or_config("scan_mode") or "internal"
-        try:
-            meta = parse_font_metadata(tmp_path, scan_mode=scan_mode, filename_hint=Path(file_name).stem)
+            raw_target = form.get("target")
+            if isinstance(raw_target, str):
+                target_hint = raw_target.strip()
         except Exception:
-            meta = {"name": Path(file_name).stem, "family": Path(file_name).stem, "vendor": "未知厂商", "designer": ""}
-        agg = self._ass_missing_agg()
-        matched = ""
-        for c in (normalize_font_key(meta.get("name", "")), normalize_font_key(meta.get("family", ""))):
-            if c and c in agg:
-                matched = agg[c]["name"]
-                break
-        if not matched:
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except Exception:
-                pass
-            return self._err("上传的字体与缺失字体不匹配，无法入库（请先对字幕执行「检查」生成缺失列表）")
-        item = {
-            "path": str(tmp_path),
-            "file_name": safe_name,
-            "name": meta.get("name", ""),
-            "family": meta.get("family", ""),
-            "vendor": meta.get("vendor", "未知厂商"),
-            "file_size": len(raw),
-            "matched": matched,
-        }
-        self._missing_uploads[str(tmp_path)] = item
-        self._db.add_log(f"缺失字体上传待入库: {safe_name} → {matched}", "info")
-        return self._ok(item, f"已识别为缺失字体「{matched}」，点击「入库」加入字体库")
+            pass
+        targets = self._missing_glyph_targets()
+        files, notes = await self._receive_uploads(upload_files, FONT_EXTENSIONS, prefix="missingfix")
+        scan_mode = "internal"  # fontTools 为唯一权威解析口径
+        accepted: List[Dict[str, Any]] = []
+        rejected: List[Dict[str, str]] = []
+
+        def _verify_sync() -> None:
+            """校验/解析字体是同步重活：放线程池，避免阻塞事件循环。"""
+            for entry in files:
+                safe_name = entry["file_name"]
+                tmp_path = Path(entry["path"])
+                if not tmp_path.is_file():
+                    continue
+                verdict = self._evaluate_font_for_targets(tmp_path, targets, target_hint)
+                if not verdict.get("ok"):
+                    arch.safe_unlink(tmp_path, self._tmp_dir, exts=FONT_EXTENSIONS)
+                    rejected.append(
+                        {"file_name": safe_name, "reason": str(verdict.get("reason") or "不匹配")}
+                    )
+                    continue
+                try:
+                    meta = parse_font_metadata(tmp_path, scan_mode=scan_mode, filename_hint=Path(safe_name).stem)
+                except Exception:
+                    meta = {
+                        "name": verdict.get("name") or Path(safe_name).stem,
+                        "family": verdict.get("family") or Path(safe_name).stem,
+                        "vendor": "未知厂商",
+                        "designer": "",
+                    }
+                item = {
+                    "path": str(tmp_path),
+                    "file_name": safe_name,
+                    "name": meta.get("name", "") or verdict.get("name") or Path(safe_name).stem,
+                    "family": meta.get("family", "") or verdict.get("family") or Path(safe_name).stem,
+                    "vendor": meta.get("vendor", "未知厂商"),
+                    "designer": meta.get("designer", ""),
+                    "file_size": entry.get("size", 0),
+                    "matched": verdict.get("matched", ""),
+                    "match_kind": verdict.get("match_kind", "name"),
+                    "matched_keys": verdict.get("affected_keys") or verdict.get("matched_keys") or [],
+                    "covered_chars": verdict.get("covered_chars", ""),
+                    "required_chars": verdict.get("required_chars", ""),
+                    "sha256": verdict.get("sha256", ""),
+                    # 严格校验通过的单一 face（P1-4）：归档/子集化沿用，不允许跨 face 拼接
+                    "face_index": int(verdict.get("face_index") or 0),
+                }
+                if item["match_kind"] == "manual":
+                    try:
+                        self._db.set_manual_font_mapping(
+                            item["name"], item["matched"], file_sha256=item["sha256"], note="检查页人工指定目标"
+                        )
+                    except Exception:
+                        pass
+                item["created_at"] = time.time()
+                with self._missing_uploads_lock:
+                    self._missing_uploads[str(tmp_path)] = item
+                try:
+                    self._db.add_missing_upload(item)
+                except Exception:
+                    pass
+                accepted.append(item)
+                self._db.add_log(
+                    f"缺失字体上传待入库: {safe_name} → {item['matched']}"
+                    + (f"（覆盖 {item['covered_chars']}）" if item["covered_chars"] else ""),
+                    "info",
+                )
+
+        await asyncio.to_thread(_verify_sync)
+        if not accepted:
+            if rejected:
+                detail = "；".join(f"{r['file_name']}: {r['reason']}" for r in rejected[:3])
+                return self._err(f"字体未通过缺失校验（{detail}）")
+            if not targets:
+                return self._err("当前没有缺失字体，请先对字幕执行「检查」生成缺失列表")
+            return self._err("没有可上传的字体文件（需字体后缀或 .zip 压缩包，且内容非空）")
+        first = dict(accepted[0])
+        first.update(
+            {"count": len(accepted), "items": accepted, "rejected": rejected, "notes": notes}
+        )
+        message = f"已识别 {len(accepted)} 个缺失字体，点击「入库」加入字体库"
+        if rejected:
+            message += f"；{len(rejected)} 个未通过校验"
+        return self._ok(first, message)
 
     async def api_ass_missing_confirm(self, request: Request) -> Dict[str, Any]:
         """缺失字体入库：复核匹配后归档进字体库并写库，缺失标记随之消除"""
@@ -4564,7 +6946,8 @@ class Zitifenlei(_PluginBase):
         except Exception:
             body = {}
         path = body.get("path") or ""
-        item = self._missing_uploads.get(path)
+        with self._missing_uploads_lock:
+            item = self._missing_uploads.get(path)
         if not item:
             return self._err("上传记录不存在或已失效，请重新上传")
         lib_dir = self.get_resource_or_config("lib_dir") or ""
@@ -4572,46 +6955,71 @@ class Zitifenlei(_PluginBase):
             return self._err("请先在设置中配置字体库目录")
         src = Path(path)
         if not src.is_file():
-            self._missing_uploads.pop(path, None)
+            self._drop_missing_upload(path)
             return self._err("临时字体文件不存在，请重新上传")
-        # 复核：该字体仍处于缺失名单才允许入库（防止重复入库/不复核误入）
-        agg = self._ass_missing_agg()
-        matched = item.get("matched", "")
-        ok = False
-        for c in (normalize_font_key(item.get("name", "")), normalize_font_key(item.get("family", ""))):
-            if c and c in agg:
-                ok = True
-                matched = agg[c]["name"]
-                break
-        if not ok:
-            self._missing_uploads.pop(path, None)
-            try:
-                src.unlink(missing_ok=True)
-            except Exception:
-                pass
-            return self._err("该字体已不再缺失，无法重复入库")
+        # 复核：该字体仍处于缺失名单，且覆盖至少一个缺失字符
+        targets = self._missing_glyph_targets()
+        hint = item.get("matched", "") if item.get("match_kind") == "manual" else ""
+        verdict = await asyncio.to_thread(self._evaluate_font_for_targets, src, targets, hint)
+        if not verdict.get("ok"):
+            # 校验失败不销毁用户上传：保留缓冲与临时文件，用户可改派目标或手动取消
+            return self._err(f"该字体已不再缺失或未通过校验：{verdict.get('reason') or '无法重复入库'}")
+        matched = verdict.get("matched") or item.get("matched", "")
+        affected = verdict.get("affected_keys") or item.get("matched_keys") or []
         try:
-            dest_dir = Path(lib_dir) / item.get("vendor", "未知厂商")
-            base = str(item.get("name") or Path(item.get("file_name", "font")).stem)
+            dest_dir = Path(lib_dir) / safe_filename_component(
+                str(item.get("vendor") or "未知厂商"), "未知厂商"
+            )
+            base = safe_filename_component(
+                str(item.get("name") or Path(item.get("file_name", "font")).stem)
+            )
             # 按格式分子文件夹归档：字体库/厂商/格式/基础名.后缀
             fmt_dir = dest_dir / _font_subdir_name(src.suffix)
             existing = _dest_exists_recursive(dest_dir, base, src.suffix)
+            if existing and _files_identical(src, existing):
+                # 库内已有完全相同的字体：清理上传缓冲（含持久化记录），避免条目永久卡在列表
+                with self._missing_uploads_lock:
+                    self._missing_uploads.pop(path, None)
+                try:
+                    self._db.delete_missing_upload(path)
+                except Exception:
+                    pass
+                arch.safe_unlink(src, self._tmp_dir, exts=FONT_EXTENSIONS)
+                return self._err(f"字体库已存在相同字体 {existing.name}，无需重复入库（已清理上传缓存）")
             if existing:
-                return self._err(f"字体库已存在同名字体 {existing.name}，无需重复入库")
+                # 同名但内容不同：另存 -2/-3，不覆盖旧版
+                base = _unique_archive_base(self._dest_names_for(dest_dir), base, src.suffix)
+                self._db.add_log(
+                    f"缺失字体 {item.get('file_name', '')} 与库内 {existing.name} 同名但内容不同，另存为 {base}{src.suffix}",
+                    "warning",
+                )
             try:
                 fmt_dir.mkdir(parents=True, exist_ok=True)
             except Exception:
                 pass
             dest = fmt_dir / f"{base}{src.suffix}"
-            archive_mode = self.get_resource_or_config("archive_mode") or "copy"
-            if archive_mode == "move":
-                shutil.move(str(src), str(dest))
-            else:
-                shutil.copy2(str(src), str(dest))
+            if not _path_within(dest, Path(lib_dir)):
+                return self._err("目标路径越界，拒绝归档")
+
+            def _land() -> str:
+                """原子落盘 + 大小校验；同步磁盘 IO 放线程池，别占住事件循环。"""
+                src_size = src.stat().st_size
+                tmp_dest = fmt_dir / f".{dest.name}.tmp-{uuid.uuid4().hex[:8]}"
                 try:
-                    src.unlink(missing_ok=True)
+                    shutil.copy2(str(src), str(tmp_dest))
+                    written = tmp_dest.stat().st_size
+                    if written != src_size:
+                        raise RuntimeError(f"写入大小不一致（源 {src_size}，目标 {written}）")
+                    os.replace(str(tmp_dest), str(dest))
                 except Exception:
-                    pass
+                    try:
+                        tmp_dest.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    raise
+                return str(dest)
+
+            await asyncio.to_thread(_land)
         except Exception as err:
             return self._err(f"归档字体失败: {err}")
         try:
@@ -4629,10 +7037,32 @@ class Zitifenlei(_PluginBase):
                 }
             )
         except Exception as err:
+            # 写库失败：回滚刚写入的字体文件，保留上传缓存供重试
+            try:
+                dest.unlink(missing_ok=True)
+            except Exception:
+                pass
             return self._err(f"写库失败: {err}")
-        self._missing_uploads.pop(path, None)
+        await asyncio.to_thread(self._index_font_path, dest)
+        with self._missing_uploads_lock:
+            self._missing_uploads.pop(path, None)
+        try:
+            self._db.delete_missing_upload(path)
+        except Exception:
+            pass
+        arch.safe_unlink(src, self._tmp_dir, exts=FONT_EXTENSIONS)
+        recheck = await asyncio.to_thread(self._recheck_affected_ass, affected, f"入库 {matched}")
+        self._invalidate_missing_agg()
         self._db.add_log(f"缺失字体入库: {dest.name}（匹配缺失 {matched}）", "info")
-        return self._ok({"path": path, "name": dest.name, "matched": matched}, f"「{matched}」已入库，缺失标记自动消除")
+        return self._ok(
+            {"path": path, "name": dest.name, "matched": matched, "recheck": recheck},
+            f"「{matched}」已入库，缺失标记自动消除"
+            + (
+                f"；已重检 {recheck['checked']} 个字幕（完整 {recheck['ok']}，仍缺 {recheck['missing']}）"
+                if recheck["checked"]
+                else ""
+            ),
+        )
 
     async def api_ass_missing_cancel(self, request: Request) -> Dict[str, Any]:
         """取消缺失字体上传（删除暂存文件）"""
@@ -4641,12 +7071,7 @@ class Zitifenlei(_PluginBase):
         except Exception:
             body = {}
         path = body.get("path") or ""
-        item = self._missing_uploads.pop(path, None)
-        if item and item.get("path"):
-            try:
-                Path(item["path"]).unlink(missing_ok=True)
-            except Exception:
-                pass
+        self._drop_missing_upload(path)
         return self._ok({}, "已取消")
 
     def _check_ass_file(self, file_path: Path, source: str = "manual") -> Optional[Dict[str, Any]]:
@@ -4688,21 +7113,62 @@ class Zitifenlei(_PluginBase):
             }
         all_fonts = parse_ass_fonts(raw)
         subsetted = has_embedded_fonts(raw)
-        fam_keys, _fmatch = self._lib_font_keys()
-        # 缺失清单按归一化 key 去重（@竖排变体与本体同 key，只算一次），保留首个原始名
-        seen: set = set()
-        missing: List[str] = []
-        for f in all_fonts:
-            k = normalize_font_key(f)
-            if not k or k in seen:
-                continue
-            seen.add(k)
-            if k not in fam_keys:
-                missing.append(f)
+        missing_details: List[Dict[str, Any]] = []
+        glyph_result = None
+        check_engine = "fonttools"
+        unverified: List[str] = []
+        # 字形级检测优先：字体名存在但 cmap 不覆盖实际字符也算缺失；
+        # 已内嵌字体的字幕自带字体，跳过检测（与旧口径一致）
+        if subsetted:
+            check_engine = "embedded"
+        else:
+            glyph_result = self._glyph_check(raw)
+        if glyph_result is not None:
+            missing = list(glyph_result.missing_names)
+            missing_details = [item.to_dict() for item in glyph_result.fonts]
+            unverified = list(glyph_result.unverified_names)
+            # 字体引用清单以字形解析为准：旧名称解析对复杂 ASS（\fn/\r/绘图/逗号文本）会切出垃圾名
+            all_fonts = [item.name for item in glyph_result.fonts]
+        else:
+            # 索引不可用（库目录未配置/字体库为空/解析异常）时回退旧口径：只判字体名是否存在。
+            # P1-6：名称存在 ≠ 字形完整，此路径的结果只能标为「未验证」（partial_check），
+            # 不能把「名字在库里」当成「字体完整」展示。
+            check_engine = "name-only"
+            fam_keys, _fmatch = self._lib_font_keys()
+            # 缺失清单按归一化 key 去重（@竖排变体与本体同 key，只算一次），保留首个原始名
+            seen: set = set()
+            missing = []
+            for f in all_fonts:
+                k = normalize_font_key(f)
+                if not k or k in seen:
+                    continue
+                seen.add(k)
+                if k not in fam_keys:
+                    missing.append(f)
+            if not missing and all_fonts:
+                unverified = list(all_fonts)
         # 已内嵌（子集化）字幕自带字体：播放不依赖字体库，不再报缺失
         if subsetted and missing:
             missing = []
-        status = "ok" if not missing else "missing"
+        if missing:
+            status = "missing"
+        elif subsetted:
+            status = "ok"
+        elif glyph_result is not None and not unverified:
+            status = "ok"  # 真正完成字形级覆盖验证
+        else:
+            # 名称存在但未做字形级验证（或无有效用字/解析失败）：不得显示「字体完整」
+            status = "partial_check"
+        try:
+            import hashlib
+
+            sha256 = hashlib.sha256(raw).hexdigest()
+        except Exception:
+            sha256 = ""
+        try:
+            index_version = self._db.index_version()
+        except Exception:
+            index_version = 0
         if exist:
             self._db.update_ass(exist["id"], status, missing, all_fonts)
             ass_id = exist["id"]
@@ -4720,20 +7186,55 @@ class Zitifenlei(_PluginBase):
                 (file_path,),
             )
             ass_id = row["id"] if row else 0
+        if ass_id:
+            try:
+                self._db.set_ass_check_detail(
+                    ass_id,
+                    missing_details,
+                    file_sha256=sha256,
+                    index_version=index_version,
+                    check_engine=check_engine,
+                )
+                self._db.replace_missing_glyphs(ass_id, file_path, missing_details)
+            except Exception as err:
+                if self._db is not None:
+                    try:
+                        self._db.add_log(f"写入字形检测明细失败: {err}", "warning")
+                    except Exception:
+                        pass
+        total_missing_chars = sum(int(item.get("missing_count") or 0) for item in missing_details)
+        if missing:
+            status_text = "缺 " + str(len(missing)) + " 个字体" + (
+                f"（{total_missing_chars} 个字符）" if total_missing_chars else ""
+            )
+        elif status == "partial_check":
+            status_text = (
+                f"未验证字形（{len(unverified)} 个字体仅按名称匹配）"
+                if unverified
+                else "未验证字形（无有效用字或解析失败）"
+            )
+        else:
+            status_text = "字体完整"
         return {
             "id": ass_id,
             "status": status,
-            "status_text": "缺 " + str(len(missing)) + " 个字体" if missing else "字体完整",
+            "status_text": status_text,
+            "check_engine": check_engine,
+            "unverified_fonts": unverified[:20],
             "missing_count": len(missing),
             "all_fonts": all_fonts,
             "missing_fonts": missing,
+            "missing_details": missing_details,
+            "total_missing_chars": total_missing_chars,
             "subsetted": subsetted,
+            "index_version": index_version,
         }
 
     # ─── API 注册 ───────────────────────────────────────
     def get_api(self) -> List[Dict[str, Any]]:
-        return [
+        apis = [
             {"path": "/deps/check", "endpoint": self.api_deps_check, "methods": ["GET"], "auth": "bear", "summary": "检测运行依赖是否安装"},
+            {"path": "/deps/install", "endpoint": self.api_deps_install, "methods": ["POST"], "auth": "bear", "summary": "重新安装运行依赖（pip）"},
             {"path": "/task/status", "endpoint": self.api_task_status, "methods": ["GET"], "auth": "bear", "summary": "后台任务状态（供前端拦截停用插件）"},
             {"path": "/stats", "endpoint": self.api_stats, "methods": ["GET"], "auth": "bear", "summary": "仪表盘统计"},
             {"path": "/vendors", "endpoint": self.api_vendors, "methods": ["GET"], "auth": "bear", "summary": "厂商分布"},
@@ -4768,8 +7269,8 @@ class Zitifenlei(_PluginBase):
             {"path": "/ass/missing/upload", "endpoint": self.api_ass_missing_upload, "methods": ["POST"], "auth": "bear", "summary": "上传缺失字体（校验匹配）"},
             {"path": "/ass/missing/confirm", "endpoint": self.api_ass_missing_confirm, "methods": ["POST"], "auth": "bear", "summary": "缺失字体入库"},
             {"path": "/ass/missing/cancel", "endpoint": self.api_ass_missing_cancel, "methods": ["POST"], "auth": "bear", "summary": "取消缺失字体上传"},
-            {"path": "/subset/index", "endpoint": self.api_subset_index, "methods": ["GET"], "auth": "bear", "summary": "assfonts 状态与字体索引"},
-            {"path": "/subset/rebuild_index", "endpoint": self.api_subset_rebuild_index, "methods": ["POST"], "auth": "bear", "summary": "重建 assfonts 字体索引"},
+            {"path": "/subset/index", "endpoint": self.api_subset_index, "methods": ["GET"], "auth": "bear", "summary": "子集化引擎状态与字体索引"},
+            {"path": "/subset/rebuild_index", "endpoint": self.api_subset_rebuild_index, "methods": ["POST"], "auth": "bear", "summary": "全部重建字体库索引（逐文件重新解析）"},
             {"path": "/subset/all", "endpoint": self.api_subset_all, "methods": ["POST"], "auth": "bear", "summary": "全量子集化（递归扫字幕目录）"},
             {"path": "/subset/records", "endpoint": self.api_subset_records, "methods": ["GET"], "auth": "bear", "summary": "子集化记录列表"},
             {"path": "/subset/download", "endpoint": self.api_subset_download, "methods": ["GET"], "auth": "bear", "summary": "下载子集化结果文件"},
@@ -4782,8 +7283,19 @@ class Zitifenlei(_PluginBase):
             {"path": "/subset/retry", "endpoint": self.api_subset_retry, "methods": ["POST"], "auth": "bear", "summary": "重试失败/缺字体的子集化"},
             {"path": "/missing/summary", "endpoint": self.api_missing_summary, "methods": ["GET"], "auth": "bear", "summary": "缺失字体汇总（检查+子集化）"},
             {"path": "/missing/uploads", "endpoint": self.api_missing_uploads, "methods": ["GET"], "auth": "bear", "summary": "已上传待归类字体列表"},
-            {"path": "/missing/upload", "endpoint": self.api_missing_upload, "methods": ["POST"], "auth": "bear", "summary": "缺失字体上传"},
+            {"path": "/missing/upload", "endpoint": self.api_missing_upload, "methods": ["POST"], "auth": "bear", "summary": "缺失字体上传（严格校验）"},
+            {"path": "/missing/remap", "endpoint": self.api_missing_remap, "methods": ["POST"], "auth": "bear", "summary": "人工映射已上传字体到缺失目标"},
+            {"path": "/missing/mappings", "endpoint": self.api_missing_mappings, "methods": ["GET"], "auth": "bear", "summary": "人工映射审计列表"},
+            {"path": "/missing/mappings/remove", "endpoint": self.api_missing_mapping_delete, "methods": ["DELETE"], "auth": "bear", "summary": "删除人工映射记录"},
             {"path": "/missing/classify", "endpoint": self.api_missing_classify, "methods": ["POST"], "auth": "bear", "summary": "归类入库并重建索引"},
             {"path": "/missing/uploads/clear", "endpoint": self.api_missing_uploads_clear, "methods": ["DELETE"], "auth": "bear", "summary": "清除已上传字体"},
             {"path": "/missing/uploads/remove", "endpoint": self.api_missing_upload_remove, "methods": ["DELETE"], "auth": "bear", "summary": "删除单条已上传字体"},
-        ] 
+        ]
+        # 写接口（POST/PUT/PATCH/DELETE）统一追加管理员依赖：宿主只按 auth 校验登录，
+        # 不追加这一步的话，任意登录用户都能清库/删文件/装依赖/改配置。
+        admin = _admin_write_dependencies()
+        if admin:
+            for api in apis:
+                if any(str(m).upper() in ("POST", "PUT", "PATCH", "DELETE") for m in api.get("methods") or []):
+                    api["dependencies"] = list(admin)
+        return apis

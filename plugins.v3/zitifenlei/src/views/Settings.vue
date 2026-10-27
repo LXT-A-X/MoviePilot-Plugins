@@ -17,7 +17,8 @@ const DEFAULT_CONFIG = {
   lib_dir: '',
   ass_dir: '',
   subset_dir: '',
-  scan_mode: 'internal',
+  // 缺失字体专用接收目录（空=关闭）：严格校验后才入库
+  missing_font_dir: '',
   archive_mode: 'copy',
   // 移动归档时删除判重跳过的残留源文件（只作用于「移动原文件」模式）
   move_delete_duplicate: true,
@@ -28,11 +29,17 @@ const DEFAULT_CONFIG = {
   auto_inbound: true,
   auto_collect: true,
   notify_enabled: false,
+  // 索引维护：启动轻检（stat 级校验，索引为空时从磁盘重建）+ 每周差异核对（定时增量比对）
+  startup_light_check: true,
+  weekly_reconcile: true,
   auto_subset: false,
   subset_overwrite: false,
+  // 子集化在独立工作进程执行（uharfbuzz 段错误/病态字体只影响当前字幕，不拖垮主进程）
+  subset_process_isolation: true,
+  // MP 入库成品是否直接替换媒体库原字幕（与「输出覆盖原文件」独立）
+  inbound_subset_overwrite: false,
   subset_out_dir: '',
   subset_out_mode: 'copy',
-  subset_sync_subdir: false,
   hdr_brightness: false,
   hdr_brightness_level: '',
 }
@@ -42,10 +49,6 @@ const DEFAULT_CONFIG = {
 const config = ref({ ...DEFAULT_CONFIG, ...(props.initialConfig || {}) })
 const saving = ref(false)
 
-const scanModes = [
-  { title: '内部扫描(推荐)', value: 'internal', description: '扫描字体文件内部元数据（需 fontTools）' },
-  { title: '文件名解析', value: 'filename', description: '直接从文件名提取信息，速度更快' },
-]
 const archiveModes = [
   { title: '复制保留原文件', value: 'copy', description: '归档时复制字体到字体库目录' },
   { title: '移动原文件', value: 'move', description: '归档时移动字体到字体库目录' },
@@ -54,7 +57,7 @@ const subsetOutModes = [
   { title: '复制到输出目录', value: 'copy', description: '把新的字幕（成品）复制到输出目录，旧的源字幕还在原处' },
   { title: '移动到输出目录', value: 'move', description: '把字幕（成品）移动到输出目录，原处不再保留' },
 ]
-// 同步子集字体夹（*_subsetted）：字体已内嵌进成品字幕，夹子仅是 assfonts 的备份，默认不保留
+// 同步子集字体夹（*_subsetted）：字体已内嵌进成品字幕，夹子仅是备份，默认不保留
 // HDR 字幕亮度档位（关/档位选择，对应 ASS 色码压暗比例）
 const hdrLevels = [
   { title: '关（不调整亮度）', value: '' },
@@ -123,6 +126,8 @@ async function save() {
 }
 
 onMounted(loadConfig)
+
+// 字体索引状态与「全部重建」已移至子集化页；HarfBuzz 依赖状态见仪表盘-依赖
 
 // 「插件总开关」拨向关闭时拦截：后台有任务（全量检查/扫描/子集化运行中）则弹提示并取消关闭，
 // 保住 v1.2.13 优雅停止的前提——先不触发 stop_service，任务跑完再关，不留任何半截状态
@@ -203,6 +208,8 @@ watch(() => config.value.auto_subset, (v) => {
           density="compact"
           variant="outlined"
           class="mb-3"
+          hint="新字体放这里自动归档进字体库"
+          persistent-hint
         ></v-text-field>
         <v-text-field
           v-model="config.lib_dir"
@@ -210,23 +217,29 @@ watch(() => config.value.auto_subset, (v) => {
           placeholder="/media/fonts/library"
           density="compact"
           variant="outlined"
-          class="mb-3"
+          class="mb-3 mt-5"
+          hint="字体唯一来源：检查与子集化都按这里的字体逐字符比对"
+          persistent-hint
         ></v-text-field>
         <v-text-field
           v-model="config.ass_dir"
-          label="ASS字幕目录监控"
+          label="ASS 字幕检查目录"
           placeholder="/media/subtitles"
           density="compact"
           variant="outlined"
-          class="mb-3"
+          class="mb-3 mt-5"
+          hint="放入字幕自动检查缺字体（不产出子集化成品的目录）"
+          persistent-hint
         ></v-text-field>
         <v-text-field
           v-model="config.subset_dir"
-          label="ASS目录监控子集"
+          label="ASS 自动子集化目录"
           placeholder="/media/subtitles/subset"
           density="compact"
           variant="outlined"
-          class="mb-3"
+          class="mb-3 mt-5"
+          hint="放入字幕自动子集化并内嵌字体，成品按「输出目录/剧名/」输出"
+          persistent-hint
         ></v-text-field>
         <v-text-field
           v-model="config.subset_out_dir"
@@ -234,7 +247,17 @@ watch(() => config.value.auto_subset, (v) => {
           placeholder="/media/subtitles/subset-out"
           density="compact"
           variant="outlined"
-          hint="目录监控（ASS目录监控子集）子集化成品（字幕与子集字体夹）的落点，按剧名分到子文件夹；手动上传字幕的子集结果留在插件临时文件夹，不受此设置影响"
+          hint="「ASS 自动子集化目录」的成品落点，按剧名分到子文件夹；手动上传字幕的结果留在插件临时目录，不受此设置影响"
+          persistent-hint
+        ></v-text-field>
+        <v-text-field
+          v-model="config.missing_font_dir"
+          label="缺失字体接收目录（严格校验）"
+          placeholder="/media/fonts/missing"
+          density="compact"
+          variant="outlined"
+          class="mt-5"
+          hint="专门接收「缺失字体页」要补的字体：放入后先等写入完成，再逐 face 校验是否命中缺失目标并真实覆盖缺失字符；通过的直接入库，未通过的移入该目录下 rejected/ 留档（不删文件）。留空=关闭该通道，请勿与其他监控目录相同"
           persistent-hint
         ></v-text-field>
       </v-card-text>
@@ -243,25 +266,10 @@ watch(() => config.value.auto_subset, (v) => {
     <v-card class="zt-card-bg mt-4">
       <v-card-title class="zt-card-title">
         <v-icon start size="18">mdi-tune-variant</v-icon>
-        扫描与归档模式
+        归档设置
       </v-card-title>
       <v-card-text>
-        <div class="zt-option-label mb-1">扫描模式</div>
-        <v-radio-group v-model="config.scan_mode" density="compact">
-          <v-radio
-            v-for="mode in scanModes"
-            :key="mode.value"
-            :label="mode.title"
-            :value="mode.value"
-          >
-            <template #label>
-              <div>
-                <div class="zt-radio-title">{{ mode.title }}</div>
-                <div class="zt-radio-desc">{{ mode.description }}</div>
-              </div>
-            </template>
-          </v-radio>
-        </v-radio-group>
+        <div class="zt-hint mb-3">字体元数据统一由 fontTools 读取字体内部（名称 / 别名 / 字符覆盖），不再提供「文件名解析」模式。</div>
 
         <div class="zt-option-label mb-1 mt-2">归档模式</div>
         <v-radio-group v-model="config.archive_mode" density="compact">
@@ -305,7 +313,7 @@ watch(() => config.value.auto_subset, (v) => {
         <div class="zt-switch-row">
           <div class="flex-grow-1">
             <div class="zt-switch-title">是否启用监控</div>
-            <div class="zt-switch-desc">总开关：统一控制「字体监控目录」「ASS字幕目录监控」「ASS目录监控子集」三个目录的监控启停；关闭则三个目录都不监控</div>
+            <div class="zt-switch-desc">总开关：统一控制「字体监控目录」「ASS 字幕检查目录」「ASS 自动子集化目录」三个目录的监控启停；关闭则三个目录都不监控</div>
           </div>
           <v-switch v-model="config.monitor_enabled" color="primary" hide-details></v-switch>
         </div>
@@ -315,6 +323,20 @@ watch(() => config.value.auto_subset, (v) => {
             <div class="zt-switch-desc">开：监控到新东西直接执行——字体直接归档、字幕直接检查、子集化直接运行；关：待定——字体进待确认、检查进待检查、子集化进待处理，等手动处理</div>
           </div>
           <v-switch v-model="config.auto_collect" color="primary" hide-details></v-switch>
+        </div>
+        <div class="zt-switch-row">
+          <div class="flex-grow-1">
+            <div class="zt-switch-title">启动轻检</div>
+            <div class="zt-switch-desc">插件启动时只按文件大小/修改时间校验索引：磁盘已删除的撤销索引、变更的只重解析该文件、磁盘有而索引没有的新字体一并补索引；索引为空（新装/换库/升级）则自动从磁盘重建字体库。不做全量解析，不拖慢启动</div>
+          </div>
+          <v-switch v-model="config.startup_light_check" color="primary" hide-details></v-switch>
+        </div>
+        <div class="zt-switch-row">
+          <div class="flex-grow-1">
+            <div class="zt-switch-title">每周差异核对</div>
+            <div class="zt-switch-desc">每周日凌晨 4:30 与磁盘指纹比对一次索引，只重解析差异文件并清理失效记录，另抽检 50 个「未变」文件重算哈希（发现同大小同时间戳的内容替换）；按既定策略默认开启（保存后需重载插件生效）</div>
+          </div>
+          <v-switch v-model="config.weekly_reconcile" color="primary" hide-details></v-switch>
         </div>
         <div class="zt-switch-row">
           <div class="flex-grow-1">
@@ -342,16 +364,30 @@ watch(() => config.value.auto_subset, (v) => {
         <div class="zt-switch-row">
           <div class="flex-grow-1">
             <div class="zt-switch-title">入库后自动子集化</div>
-            <div class="zt-switch-desc">MP 转存完成时，对新增字幕调用 assfonts 子集化并内嵌字体（结果可在「子集化」页查看；与「入库自动检查字幕」互斥，同时只能开一个）</div>
+            <div class="zt-switch-desc">MP 转存完成时，对新增字幕执行子集化并内嵌字体（结果可在「子集化」页查看；与「入库自动检查字幕」互斥，同时只能开一个）</div>
           </div>
           <v-switch v-model="config.auto_subset" color="primary" hide-details></v-switch>
         </div>
         <div class="zt-switch-row">
           <div class="flex-grow-1">
-            <div class="zt-switch-title">输出覆盖原文件</div>
-            <div class="zt-switch-desc">开：子集化结果直接替换原字幕文件（文件名不变，媒体库只保留一份）；关：保留原字幕，另生成 xx.assfonts.ass 成品文件</div>
+            <div class="zt-switch-title">MP 入库替换原字幕</div>
+            <div class="zt-switch-desc">开：入库子集化的成品直接替换媒体库原字幕（文件名不变，媒体库只保留一份）；关：保留原字幕，另生成 xx.ziti.ass 成品（默认）。只作用于 MP 入库，目录监控见下方「输出覆盖原文件」，手动上传永不覆盖</div>
+          </div>
+          <v-switch v-model="config.inbound_subset_overwrite" color="primary" hide-details></v-switch>
+        </div>
+        <div class="zt-switch-row">
+          <div class="flex-grow-1">
+            <div class="zt-switch-title">输出覆盖原文件（目录监控）</div>
+            <div class="zt-switch-desc">开：ASS 自动子集化目录的成品直接替换源字幕（文件名不变）；关：保留源字幕，另生成 xx.ziti.ass 成品文件</div>
           </div>
           <v-switch v-model="config.subset_overwrite" color="primary" hide-details></v-switch>
+        </div>
+        <div class="zt-switch-row">
+          <div class="flex-grow-1">
+            <div class="zt-switch-title">子集化进程隔离</div>
+            <div class="zt-switch-desc">开：字体子集化在独立工作进程执行，uharfbuzz 崩溃或病态字体只影响当前字幕，不会拖垮 MoviePilot 主进程；工作进程无法启动时自动回退进程内执行（默认开）</div>
+          </div>
+          <v-switch v-model="config.subset_process_isolation" color="primary" hide-details></v-switch>
         </div>
 
         <div class="zt-option-label mb-1 mt-2">监控目录输出方式</div>
@@ -370,14 +406,8 @@ watch(() => config.value.auto_subset, (v) => {
             </template>
           </v-radio>
         </v-radio-group>
-        <div class="zt-hint">目录监控（ASS目录监控子集）的字幕成品按「输出目录/剧名/」子文件夹分类输出（如「你的名字.ass」→「你的名字」文件夹），多剧字幕互不混淆；手动上传的字幕子集结果留在插件临时文件夹，不受此设置影响</div>
-        <div class="zt-switch-row">
-          <div class="flex-grow-1">
-            <div class="zt-switch-title">是否在输出端保留子集化字体文件夹</div>
-            <div class="zt-switch-desc">管 MP 入库与监控目录子集化：开＝在输出端产生 *_subsetted 字体文件夹；关＝不产生，源字幕目录里的也自动清理。手动上传的字幕子集不受此开关支配（始终不产生）</div>
-          </div>
-          <v-switch v-model="config.subset_sync_subdir" color="primary" hide-details></v-switch>
-        </div>
+        <div class="zt-hint">目录监控（ASS 自动子集化目录）的字幕成品按「输出目录/剧名/」子文件夹分类输出（如「你的名字.ass」→「你的名字」文件夹），多剧字幕互不混淆；手动上传的字幕子集结果留在插件临时文件夹，不受此设置影响</div>
+        <div class="zt-hint">字体已内嵌进 .ziti.ass 成品，不再产生 *_subsetted 字体备份夹；旧版本遗留的备份夹会在对应源字幕删除时自动清理</div>
 
         <div class="zt-option-label mb-1 mt-2">HDR 字幕亮度</div>
         <div class="zt-switch-row">
@@ -402,9 +432,9 @@ watch(() => config.value.auto_subset, (v) => {
           persistent-hint
         ></v-select>
         <div class="zt-hint">应用范围：全量子集化、目录监控自动子集化、入库子集化处理后生成的成品字幕（原始字幕不受影响）</div>
-        <div class="zt-hint">assfonts 可执行文件随插件分发（bin/assfonts），字体来源为「字体库目录」；新字体入库后在「子集化」页点击「重建索引」即可生效</div>
       </v-card-text>
     </v-card>
+
     </div>
 
     <div class="d-flex justify-end mt-4">
