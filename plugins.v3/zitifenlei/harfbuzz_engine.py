@@ -36,10 +36,10 @@ except Exception:  # pragma: no cover
 
 from .font_utils import (
     MAX_ASS_FILE_BYTES,
-    MAX_FONT_FILE_BYTES,
     _decode_ass_text,
     ass_section_name,
     is_ass_file,
+    max_font_file_bytes,
 )
 
 FONT_EMBED_LINE_BYTES = 45  # 45 字节 → 60 个编码字符（4 的倍数）
@@ -170,9 +170,11 @@ def subset_font_bytes(
         font_size = Path(font_path).stat().st_size
     except OSError as err:
         raise EngineError(f"读取字体文件失败（{Path(font_path).name}）: {err}")
-    if font_size > MAX_FONT_FILE_BYTES:
+    limit = max_font_file_bytes()
+    if font_size > limit:
         raise EngineError(
-            f"字体文件超过解析上限（{font_size} > {MAX_FONT_FILE_BYTES} 字节），拒绝子集化"
+            f"字体文件超过解析上限（{font_size // (1024 * 1024)}MB > "
+            f"{limit // (1024 * 1024)}MB，可在设置中调整），拒绝子集化"
         )
     raw = Path(font_path).read_bytes()
     try:

@@ -15,6 +15,8 @@ const statusLoaded = ref(false)
 const engineReady = computed(() => !!status.value.hb_ok)
 const indexReady = computed(() => !!status.value.font_index?.faces)
 const indexCount = computed(() => status.value.font_index?.faces || 0)
+// 文件数：TTC/OTC 一个文件含多个 face，face 数必然大于文件数，两个口径并列显示
+const indexFileCount = computed(() => status.value.font_index?.files || 0)
 // 索引重建中（全部重建/启动轻检/每周核对都可能触发）：UI 明确显示进度，
 // 否则只看到「（—」会以为索引坏了
 const indexRebuilding = computed(() => !!status.value.rebuilding)
@@ -110,8 +112,10 @@ async function loadPending() {
     loadingPending.value = false
   }
 }
-async function loadRecords(reset = false) {
-  if (loadingRecords.value) return
+async function loadRecords(reset = false, force = false) {
+  // 30 秒轮询（refreshCurrentPage）会占住这把锁：用户操作后的强制刷新不能被它吞掉，
+  // 否则子集化/删除完成时列表停在旧数据，看起来像没生效（必须等下一轮轮询才补上）
+  if (loadingRecords.value && !force) return
   if (reset) {
     recordPage.value = 1
     recordReachedEnd.value = false
@@ -252,6 +256,7 @@ async function removePending(id) {
   try {
     await apiModule.post(props.api, `/subset/pending/remove/${id}`)
     pendingList.value = pendingList.value.filter(p => p.id !== id)
+    emit('notify', '已移除待处理', 'success')
   } catch (e) {
     emit('notify', e.message || '移除失败')
   }
@@ -271,11 +276,13 @@ async function clearPending() {
 async function scanAll() {
   if (scanning.value) return
   scanning.value = true
+  // 点击即提示：子集化是同步长任务，先给反馈避免用户以为没点上而重复点击
+  emit('notify', '正在全量子集化，请勿重复点击', 'info')
   try {
     const res = await apiModule.post(props.api, '/subset/all')
     const s = res || {}
     emit('notify', `全量子集化完成：成功 ${s.success ?? 0}，跳过 ${s.skipped ?? 0}，缺字体 ${s.missing ?? 0}，失败 ${s.error ?? 0}`, 'success')
-    await loadRecords(true)
+    await loadRecords(true, true)
     await loadPending()
     await loadStatus()
     emit('action', { type: 'subset_done' })
@@ -308,7 +315,7 @@ async function retryFailed() {
     const res = await apiModule.post(props.api, '/subset/retry')
     const s = res || {}
     emit('notify', `重试完成：成功 ${s.success ?? 0}，缺字体 ${s.missing ?? 0}，失败 ${s.error ?? 0}`, 'success')
-    await loadRecords(true)
+    await loadRecords(true, true)
     await loadStatus()
     emit('action', { type: 'subset_done' })
   } catch (e) {
@@ -422,8 +429,9 @@ async function downloadAll() {
 async function deleteRecord(id) {
   try {
     await apiModule.post(props.api, `/subset/delete/${id}`)
+    emit('notify', '已删除记录', 'success')
     // 删除后软刷新回第 1 页（计数、分页、retriable 一并同步）
-    await loadRecords(true)
+    await loadRecords(true, true)
   } catch (e) {
     emit('notify', e.message || '删除失败')
   }
@@ -432,7 +440,7 @@ async function deleteRecord(id) {
 async function clearRecords() {
   try {
     await apiModule.del(props.api, '/subset/clear')
-    await loadRecords(true)
+    await loadRecords(true, true)
     emit('notify', '已清空子集化记录', 'success')
   } catch (e) {
     emit('notify', e.message || '清空失败')
@@ -549,7 +557,7 @@ function stopPolling() {
           字体库索引：正在重建…{{ indexProgressText }}
         </template>
         <template v-else>
-          字体库索引：{{ indexReady ? `${indexCount} 个 face` : '未构建' }}（{{ indexTimeText() }}）
+          字体库索引：{{ indexReady ? `${indexFileCount} 个文件 / ${indexCount} 个 face` : '未构建' }}（{{ indexTimeText() }}）
         </template>
       </span>
       <v-btn

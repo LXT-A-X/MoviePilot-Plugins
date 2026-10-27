@@ -330,6 +330,44 @@ def test_inbound_subset_overwrite_option(tmp_path):
         db.close()
 
 
+@needs_fonts
+def test_watch_output_dir_overwrite_only_deletes_source(tmp_path):
+    """目录监控 + 输出目录：成品一律进输出目录；「覆盖原文件」只决定是否删监控目录源字幕。"""
+    lib = _make_lib(tmp_path)
+    db = _make_db(tmp_path, lib)
+    try:
+        plugin = _plugin(tmp_path, db, lib)
+        watch = tmp_path / "watch"
+        out = tmp_path / "out"
+        watch.mkdir()
+        out.mkdir()
+        plugin._config.update({"subset_dir": str(watch), "subset_out_dir": str(out)})
+        body = he.strip_fonts_section(FIXTURE.read_text(encoding="utf-8")).replace(
+            "NoSuchFont", "Microsoft YaHei"
+        )
+
+        # 默认关：源字幕保留，成品输出到输出目录
+        src = watch / "movie.ass"
+        src.write_text(body, encoding="utf-8")
+        stats = plugin._run_subset_batch([src], source="watch")
+        assert stats["success"] == 1, stats
+        assert src.is_file()
+        produced = list(out.rglob("*.ass"))
+        assert len(produced) == 1, produced
+        assert fu.has_embedded_fonts(produced[0].read_bytes())
+
+        # 开启「覆盖原文件」：成品输出成功后删除监控目录的源字幕
+        src2 = watch / "movie2.ass"
+        src2.write_text(body, encoding="utf-8")
+        plugin._config["subset_overwrite"] = True
+        stats = plugin._run_subset_batch([src2], source="watch")
+        assert stats["success"] == 1, stats
+        assert not src2.exists()
+        assert len(list(out.rglob("*.ass"))) == 2
+    finally:
+        db.close()
+
+
 # ─── 3. 批量子集化真实落盘 ──────────────────────────────────────────────
 
 @needs_fonts

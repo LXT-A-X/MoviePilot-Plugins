@@ -491,11 +491,18 @@ class FontDB:
         pending = self.query_one("SELECT COUNT(*) AS c FROM fonts WHERE status = '待整理'")["c"]
         archived = self.query_one("SELECT COUNT(*) AS c FROM fonts WHERE status = '已归档'")["c"]
         missing = self.query_one("SELECT COALESCE(SUM(missing_count), 0) AS c FROM ass_files")["c"]
+        # 字体索引口径的 face 数：TTC/OTC 一个文件含多个 face，与「字体总数（文件数）」
+        # 天然不相等，并列展示避免被误当成统计错误
+        try:
+            faces = self.query_one("SELECT COUNT(*) AS c FROM font_faces WHERE status = 'ok'")["c"]
+        except Exception:
+            faces = 0
         return {
             "total": total,
             "pending": pending,
             "archived": archived,
             "error": missing,
+            "faces": faces,
         }
 
     def vendors(self, top: int = 0) -> List[Dict[str, Any]]:

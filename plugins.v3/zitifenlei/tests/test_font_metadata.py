@@ -73,6 +73,26 @@ def test_fingerprint_changes_with_content(tmp_path):
     assert fp1["size"] == fp2["size"] == 100
 
 
+def test_max_font_mb_configurable_and_applied(tmp_path):
+    """字体大小上限可配置：非法值回落默认，指纹阶段按当前上限拒绝超限文件。"""
+    try:
+        assert fu.set_max_font_mb(256) == 256 * 1024 * 1024
+        assert fu.max_font_file_bytes() == 256 * 1024 * 1024
+        assert fu.set_max_font_mb(1) == fu.MIN_MAX_FONT_MB * 1024 * 1024
+        assert fu.set_max_font_mb("bad") == fu.DEFAULT_MAX_FONT_MB * 1024 * 1024
+
+        # 上限调到最小（8MB）后，略超上限的文件在指纹阶段即被拒绝
+        fu.set_max_font_mb(fu.MIN_MAX_FONT_MB)
+        big = tmp_path / "big.ttf"
+        with big.open("wb") as fh:
+            fh.truncate(fu.MIN_MAX_FONT_MB * 1024 * 1024 + 1024)
+        with pytest.raises(RuntimeError) as err:
+            fm.compute_fingerprint(big)
+        assert "解析上限" in str(err.value)
+    finally:
+        fu.set_max_font_mb(fu.DEFAULT_MAX_FONT_MB)
+
+
 def test_safe_filename_component_blocks_traversal():
     """字体内部名不可信：清洗后不得含路径分隔符、不得以点开头、不得为空。"""
     for raw in ("../../escape", "a/b", r"C:\Windows\Temp\x", "..", ".hidden", "", "x" * 300):

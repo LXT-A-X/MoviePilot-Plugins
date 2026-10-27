@@ -1,50 +1,57 @@
 
-.zt-deps-tag[data-v-8f067364] {
+.zt-deps-tag[data-v-a83bc4a4] {
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   gap: 4px;
   margin-left: 24px;
 }
-.zt-deps-hint[data-v-8f067364] {
+.zt-deps-hint[data-v-a83bc4a4] {
   opacity: 0.6;
   font-size: 12px;
   margin-top: 8px;
   padding: 8px;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
 }
-.zt-stat-value[data-v-8f067364] {
+.zt-stat-value[data-v-a83bc4a4] {
   font-size: 32px;
   font-weight: 700;
   line-height: 1.2;
 }
-.zt-stat-label[data-v-8f067364] {
+.zt-stat-label[data-v-a83bc4a4] {
   font-size: 13px;
   opacity: 0.75;
   margin-top: 4px;
 }
-.zt-card-title[data-v-8f067364] {
+/* 副标题：TTC/OTC 一个文件多 face，与文件数并列展示避免误读 */
+.zt-stat-sub[data-v-a83bc4a4] {
+  font-size: 11px;
+  opacity: 0.55;
+  margin-top: 2px;
+  line-height: 1.3;
+}
+.zt-card-title[data-v-a83bc4a4] {
   font-size: 15px;
   font-weight: 600;
 }
 /* 固定高度 + 内部滚动（滑块），防止 UI 被内容拉长 */
-.zt-mid-card[data-v-8f067364] {
+.zt-mid-card[data-v-a83bc4a4] {
   height: 260px;
   display: flex;
   flex-direction: column;
 }
-.zt-log-card[data-v-8f067364] {
+.zt-log-card[data-v-a83bc4a4] {
   height: 300px;
   display: flex;
   flex-direction: column;
 }
-.zt-scroll-body[data-v-8f067364] {
+.zt-scroll-body[data-v-a83bc4a4] {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
 }
-.zt-vendor-container[data-v-8f067364] {
+.zt-vendor-container[data-v-a83bc4a4] {
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -54,7 +61,7 @@
   max-height: 100%;
   scrollbar-width: thin;
 }
-.zt-vendor-row[data-v-8f067364] {
+.zt-vendor-row[data-v-a83bc4a4] {
   flex: 0 0 auto;
   width: 100%;
   display: flex;
@@ -66,71 +73,71 @@
   background: rgba(128, 128, 128, 0.06);
   box-sizing: border-box;
 }
-.zt-vendor-head[data-v-8f067364] {
+.zt-vendor-head[data-v-a83bc4a4] {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
 }
-.zt-vendor-name[data-v-8f067364] {
+.zt-vendor-name[data-v-a83bc4a4] {
   font-size: 13px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
 }
-.zt-vendor-bar-bg[data-v-8f067364] {
+.zt-vendor-bar-bg[data-v-a83bc4a4] {
   width: 100%;
   height: 10px;
   border-radius: 5px;
   background: rgba(128, 128, 128, 0.18);
   overflow: hidden;
 }
-.zt-vendor-bar[data-v-8f067364] {
+.zt-vendor-bar[data-v-a83bc4a4] {
   height: 100%;
   border-radius: 5px;
   background: linear-gradient(90deg, #5c6bc0, #42a5f5);
 }
-.zt-vendor-count[data-v-8f067364] {
+.zt-vendor-count[data-v-a83bc4a4] {
   flex-shrink: 0;
   font-size: 13px;
 }
-.zt-vendor-percent[data-v-8f067364] {
+.zt-vendor-percent[data-v-a83bc4a4] {
   font-size: 12px;
   opacity: 0.7;
 }
-.zt-vendor-total[data-v-8f067364] {
+.zt-vendor-total[data-v-a83bc4a4] {
   font-size: 12px;
   opacity: 0.6;
   margin-left: 4px;
   font-weight: 400;
 }
-.zt-dir-item[data-v-8f067364] {
+.zt-dir-item[data-v-a83bc4a4] {
   display: flex;
   align-items: flex-start;
   margin-bottom: 12px;
 }
-.zt-dir-label[data-v-8f067364] {
+.zt-dir-label[data-v-a83bc4a4] {
   font-size: 13px;
   font-weight: 500;
 }
-.zt-dir-path[data-v-8f067364] {
+.zt-dir-path[data-v-a83bc4a4] {
   opacity: 0.7;
   word-break: break-all;
 }
-.zt-log-time[data-v-8f067364] {
+.zt-log-time[data-v-a83bc4a4] {
   width: 160px;
   white-space: nowrap;
   font-size: 12px;
   opacity: 0.75;
 }
-.zt-log-level[data-v-8f067364] {
+.zt-log-level[data-v-a83bc4a4] {
   width: 70px;
 }
-.zt-log-message[data-v-8f067364] {
+.zt-log-message[data-v-a83bc4a4] {
   font-size: 13px;
 }
-.zt-empty[data-v-8f067364] {
+.zt-empty[data-v-a83bc4a4] {
   font-size: 13px;
   opacity: 0.6;
   text-align: center;
@@ -352,42 +359,42 @@
   max-width: 100%;
 }
 
-.zt-card-title[data-v-255ca8ef] {
+.zt-card-title[data-v-5f8a1e19] {
   font-size: 15px;
   font-weight: 600;
 }
 /* 插件停用时：其他配置黑化且不可点击 */
-.zt-disabled-zone.is-off[data-v-255ca8ef] {
+.zt-disabled-zone.is-off[data-v-5f8a1e19] {
   pointer-events: none;
   opacity: 0.45;
   filter: grayscale(0.9);
 }
-.zt-option-label[data-v-255ca8ef] {
+.zt-option-label[data-v-5f8a1e19] {
   font-size: 13px;
   color: inherit;
   opacity: 0.8;
 }
-.zt-radio-title[data-v-255ca8ef] {
+.zt-radio-title[data-v-5f8a1e19] {
   font-size: 13px;
 }
-.zt-radio-desc[data-v-255ca8ef] {
+.zt-radio-desc[data-v-5f8a1e19] {
   font-size: 12px;
   opacity: 0.65;
 }
-.zt-switch-row[data-v-255ca8ef] {
+.zt-switch-row[data-v-5f8a1e19] {
   display: flex;
   align-items: center;
   padding: 8px 0;
 }
-.zt-switch-title[data-v-255ca8ef] {
+.zt-switch-title[data-v-5f8a1e19] {
   font-size: 14px;
   font-weight: 500;
 }
-.zt-switch-desc[data-v-255ca8ef] {
+.zt-switch-desc[data-v-5f8a1e19] {
   font-size: 12px;
   opacity: 0.7;
 }
-.zt-hint[data-v-255ca8ef] {
+.zt-hint[data-v-5f8a1e19] {
   font-size: 12px;
   opacity: 0.6;
   margin-top: 8px;

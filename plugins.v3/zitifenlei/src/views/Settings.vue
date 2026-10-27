@@ -24,6 +24,8 @@ const DEFAULT_CONFIG = {
   move_delete_duplicate: true,
   // 是否利用字体内部名称命名（开：用字体内部 PostScript 名；关：保持原文件名）
   font_name_internal: false,
+  // 单字体文件大小上限（MB）：超过该值不做哈希/解析、不接受上传
+  max_font_mb: 128,
   // 是否启用监控（总开关）：统一控制字体监控目录 / ASS字幕目录监控 / ASS目录监控子集
   monitor_enabled: false,
   auto_inbound: true,
@@ -36,7 +38,7 @@ const DEFAULT_CONFIG = {
   subset_overwrite: false,
   // 子集化在独立工作进程执行（uharfbuzz 段错误/病态字体只影响当前字幕，不拖垮主进程）
   subset_process_isolation: true,
-  // MP 入库成品是否直接替换媒体库原字幕（与「输出覆盖原文件」独立）
+  // MP 入库成品是否直接替换媒体库原字幕（与「子集是否删除源文件」独立）
   inbound_subset_overwrite: false,
   subset_out_dir: '',
   subset_out_mode: 'copy',
@@ -54,8 +56,8 @@ const archiveModes = [
   { title: '移动原文件', value: 'move', description: '归档时移动字体到字体库目录' },
 ]
 const subsetOutModes = [
-  { title: '复制到输出目录', value: 'copy', description: '把新的字幕（成品）复制到输出目录，旧的源字幕还在原处' },
-  { title: '移动到输出目录', value: 'move', description: '把字幕（成品）移动到输出目录，原处不再保留' },
+  { title: '复制到输出目录', value: 'copy', description: '成品复制一份到输出目录；监控目录里是否删源字幕，由上方「子集是否删除源文件」决定' },
+  { title: '移动到输出目录', value: 'move', description: '成品移动到输出目录；监控目录里是否删源字幕，由上方「子集是否删除源文件」决定' },
 ]
 // 同步子集字体夹（*_subsetted）：字体已内嵌进成品字幕，夹子仅是备份，默认不保留
 // HDR 字幕亮度档位（关/档位选择，对应 ASS 色码压暗比例）
@@ -100,6 +102,9 @@ async function save() {
     if (!config.value.hdr_brightness) {
       config.value.hdr_brightness_level = ''
     }
+    // 字体大小上限规范化成整数 MB（越界/空值回落到默认 128，与后端 set_max_font_mb 一致）
+    const mb = Number(config.value.max_font_mb)
+    config.value.max_font_mb = Number.isFinite(mb) && mb > 0 ? Math.min(4096, Math.max(8, Math.round(mb))) : 128
     if (typeof props.api?.post === 'function') {
       await apiModule.post(props.api, '/config', { ...config.value })
       try {
@@ -301,6 +306,19 @@ watch(() => config.value.auto_subset, (v) => {
           </div>
           <v-switch v-model="config.font_name_internal" color="primary" hide-details></v-switch>
         </div>
+        <v-text-field
+          v-model="config.max_font_mb"
+          label="字体文件大小上限"
+          type="number"
+          min="8"
+          max="4096"
+          suffix="MB"
+          density="compact"
+          variant="outlined"
+          class="mt-5"
+          hint="超过该值的字体不做哈希/解析、不接受上传（默认 128MB）。超大 TTC 逐 face 读取很吃内存，确有需要再调大；调大后需「全部重建」索引才会纳入"
+          persistent-hint
+        ></v-text-field>
       </v-card-text>
     </v-card>
 
@@ -371,14 +389,14 @@ watch(() => config.value.auto_subset, (v) => {
         <div class="zt-switch-row">
           <div class="flex-grow-1">
             <div class="zt-switch-title">MP 入库替换原字幕</div>
-            <div class="zt-switch-desc">开：入库子集化的成品直接替换媒体库原字幕（文件名不变，媒体库只保留一份）；关：保留原字幕，另生成 xx.ziti.ass 成品（默认）。只作用于 MP 入库，目录监控见下方「输出覆盖原文件」，手动上传永不覆盖</div>
+            <div class="zt-switch-desc">开：入库子集化的成品直接替换媒体库原字幕（文件名不变，媒体库只保留一份）；关：保留原字幕，另生成 xx.ziti.ass 成品（默认）。只作用于 MP 入库，目录监控见下方「子集是否删除源文件」，手动上传永不覆盖</div>
           </div>
           <v-switch v-model="config.inbound_subset_overwrite" color="primary" hide-details></v-switch>
         </div>
         <div class="zt-switch-row">
           <div class="flex-grow-1">
-            <div class="zt-switch-title">输出覆盖原文件（目录监控）</div>
-            <div class="zt-switch-desc">开：ASS 自动子集化目录的成品直接替换源字幕（文件名不变）；关：保留源字幕，另生成 xx.ziti.ass 成品文件</div>
+            <div class="zt-switch-title">子集是否删除源文件</div>
+            <div class="zt-switch-desc">只作用于目录监控（手动上传与 MP 入库不受影响）。配了「子集化输出目录」时：成品固定输出到输出目录，开=输出成功后删除监控目录的源字幕，关=源字幕保留（默认）。未配输出目录时：开=成品就地替换源字幕，关=另生成 xx.ziti.ass</div>
           </div>
           <v-switch v-model="config.subset_overwrite" color="primary" hide-details></v-switch>
         </div>

@@ -24,7 +24,7 @@ except Exception:  # pragma: no cover - 宿主未装 fontTools 时只做降级�
     TTFont = None
     TTLibError = Exception
 
-from .font_utils import MAX_FONT_FILE_BYTES, map_vendor, normalize_font_key
+from .font_utils import map_vendor, max_font_file_bytes, normalize_font_key
 
 # 参与别名匹配的 name 记录 ID：家族 / 子家族 / 全名 / PostScript 名 / 排版家族 / 排版子家族
 _NAME_IDS = (1, 2, 4, 6, 16, 17)
@@ -134,9 +134,11 @@ def compute_fingerprint(path: str | Path, with_hash: bool = True) -> Dict[str, A
     """计算文件指纹。带稳定性校验：读取期间文件变化（上传未完成）直接报错。"""
     p = Path(path)
     st = p.stat()
-    if st.st_size > MAX_FONT_FILE_BYTES:
+    limit = max_font_file_bytes()
+    if st.st_size > limit:
         raise RuntimeError(
-            f"字体文件超过解析上限（{st.st_size} > {MAX_FONT_FILE_BYTES} 字节），拒绝哈希/解析"
+            f"字体文件超过解析上限（{st.st_size // (1024 * 1024)}MB > "
+            f"{limit // (1024 * 1024)}MB，可在设置中调整），拒绝哈希/解析"
         )
     digest = ""
     if with_hash:

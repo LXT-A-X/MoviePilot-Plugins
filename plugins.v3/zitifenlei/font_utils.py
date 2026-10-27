@@ -21,7 +21,32 @@ FONT_EXTENSIONS = (".ttf", ".otf", ".ttc", ".otc", ".woff", ".woff2")
 ASS_EXTENSIONS = (".ass",)
 
 # ── 上传/解析安全上限（P1-11）：防止超大字体/压缩包拖垮宿主或 OOM ──
-MAX_FONT_FILE_BYTES = 128 * 1024 * 1024  # 单字体 128MB（覆盖超大 CJK 合集）
+# 单字体默认 128MB（覆盖超大 CJK 合集）；可在设置「字体文件大小上限」中调整，
+# 超过该上限的字体不做哈希/解析（超大 TTC 逐 face 读 cmap 会长时间占内存）
+DEFAULT_MAX_FONT_MB = 128
+MIN_MAX_FONT_MB = 8
+MAX_MAX_FONT_MB = 4096
+MAX_FONT_FILE_BYTES = DEFAULT_MAX_FONT_MB * 1024 * 1024
+_MAX_FONT_FILE_BYTES = MAX_FONT_FILE_BYTES
+
+
+def max_font_file_bytes() -> int:
+    """当前生效的单字体大小上限（字节）。由插件配置 max_font_mb 决定。"""
+    return _MAX_FONT_FILE_BYTES
+
+
+def set_max_font_mb(value) -> int:
+    """按 MB 设置单字体上限；非法/越界值收敛到 [8, 4096]，返回生效字节数。"""
+    global _MAX_FONT_FILE_BYTES
+    try:
+        mb = int(float(value))
+    except Exception:
+        mb = DEFAULT_MAX_FONT_MB
+    mb = max(MIN_MAX_FONT_MB, min(MAX_MAX_FONT_MB, mb))
+    _MAX_FONT_FILE_BYTES = mb * 1024 * 1024
+    return _MAX_FONT_FILE_BYTES
+
+
 MAX_ASS_FILE_BYTES = 16 * 1024 * 1024  # 单字幕 16MB
 MAX_UPLOAD_FILES = 50  # 单次请求最多接收文件数（含压缩包展开后）
 MAX_UPLOAD_TOTAL_BYTES = 512 * 1024 * 1024  # 单次请求总量 512MB

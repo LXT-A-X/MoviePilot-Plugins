@@ -118,18 +118,19 @@ from .font_utils import (
     ASS_EXTENSIONS,
     FONT_EXTENSIONS,
     MAX_ASS_FILE_BYTES,
-    MAX_FONT_FILE_BYTES,
     MAX_UPLOAD_FILES,
     MAX_UPLOAD_TOTAL_BYTES,
     TTFont,
     is_font_file,
     is_ass_file,
+    max_font_file_bytes,
     parse_font_metadata,
     get_font_psname,
     parse_ass_fonts,
     normalize_font_key,
     safe_filename_component,
     has_embedded_fonts,
+    set_max_font_mb,
 )
 from . import archive_utils as arch
 from .hdr_utils import apply_hdr_brightness
@@ -166,6 +167,10 @@ _DEFAULT_CONFIG = {
     # 老配置里的 scan_mode 键不再读取
     "archive_mode": "copy",
     "font_name_internal": False,  # 利用字体内部名称（PostScript 名 nameID 6）命名归档：开用内部名，关保持原名
+    # 单字体文件大小上限（MB）：超过该值的字体不做哈希/解析、不接受上传、不能预览。
+    # 默认 128；超大 TTC（如 785MB 的 Sarasa-SuperTTC 含 480 个 face）逐 face 读 cmap
+    # 会长时间占内存，确有需要可调大后重建索引
+    "max_font_mb": 128,
     # 移动归档时删除判重跳过的残留源文件：只作用于「移动原文件」模式——
     # move 归档判重跳过（字体库已存在同名同后缀）时，监控目录的源文件会残留，
     # 开关开=删除残留；关=保留（复制模式不受影响，源文件本就保留）
@@ -401,7 +406,7 @@ class Zitifenlei(_PluginBase):
     plugin_name = "字体分类管家"
     plugin_desc = "字体归档整理与 ASS 字幕字体检查插件：扫描/上传字体到字体库，检查字幕缺失字体。"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/zitifenlei.png"
-    plugin_version = "3.0.5"
+    plugin_version = "3.0.6"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "zitifenlei_"
@@ -584,6 +589,16 @@ class Zitifenlei(_PluginBase):
         """获取插件启用状态。"""
         return self._enabled
 
+    def _apply_font_limits(self) -> None:
+        """把配置的「字体文件大小上限」同步到解析/上传/预览的统一口径。
+
+        上限只在运行时生效，不需要重启插件；调大后原有超限文件需重建索引才会纳入。
+        """
+        try:
+            set_max_font_mb(self._config.get("max_font_mb"))
+        except Exception:
+            pass
+
     def init_plugin(self, config: Optional[Dict[str, Any]] = None) -> None:
         """插件初始化：读取配置、初始化数据库与临时目录。
 
@@ -629,6 +644,9 @@ class Zitifenlei(_PluginBase):
                     if "monitor_enabled" not in (saved_cfg or {}):
                         merged["monitor_enabled"] = bool(merged.get("auto_monitor")) or bool(merged.get("auto_check"))
                     self._config = merged
+
+            # 字体大小上限：无论配置来自宿主还是本地镜像，都按最终生效配置同步一次
+            self._apply_font_limits()
 
             try:
                 if not self._db:
@@ -2977,6 +2995,7 @@ class Zitifenlei(_PluginBase):
             return stats
         overwrite_all = bool(self.get_resource_or_config("subset_overwrite"))
         inbound_overwrite = bool(self.get_resource_or_config("inbound_subset_overwrite"))
+        out_dir_cfg = str(self.get_resource_or_config("subset_out_dir") or "")
         for f in files:
             try:
                 # 优雅停止：停插件时当前条子集化处理完（含写结果记录）就不再继续
@@ -3021,10 +3040,14 @@ class Zitifenlei(_PluginBase):
                 if status == "success":
                     out = Path(res.get("out") or "")
                     # 成品输出名：以「原始字幕名」为准（去掉上传临时目录的 uuid 前缀），
-                    # 后缀固定 .ziti.ass；「输出覆盖原文件」开启时直接替换原字幕
+                    # 后缀固定 .ziti.ass；「子集是否删除源文件」开启时直接替换原字幕
                     orig = self._original_subset_name(f)
                     base = orig[:-4] if orig.lower().endswith(".ass") else orig
-                    if overwrite:
+                    # 配了输出目录的目录监控：成品统一先落成 .ziti.ass 再同步到输出目录，
+                    # 不再就地改写监控目录的源字幕（否则「覆盖原文件」和「输出方式」互相打架）。
+                    # 此模式下「覆盖原文件」= 成品成功输出到输出目录后，删除监控目录的源字幕。
+                    watch_with_out = src_kind == "watch" and bool(out_dir_cfg)
+                    if overwrite and not watch_with_out:
                         # 覆盖模式：子集化结果直接替换原字幕文件（原名不变）。
                         # 上传临时缓存文件名带 subset_<uuid>_ 前缀，同名覆盖会让成品带前缀，
                         # 这里先把成品落到「原始名」路径，再清理带前缀的临时缓存副本
@@ -3081,6 +3104,15 @@ class Zitifenlei(_PluginBase):
                         synced, sync_msg = self._sync_subset_output(
                             final_out, self._extract_show_name(str(final_out))
                         )
+                        # 「覆盖原文件」在配了输出目录时表示「成品输出成功后删除源字幕」：
+                        # 源字幕已无用（成品在输出目录里），留着只会在下次扫描时重复处理
+                        if synced and overwrite and watch_with_out:
+                            try:
+                                if Path(f).resolve() != Path(final_out).resolve():
+                                    Path(f).unlink(missing_ok=True)
+                                    sync_msg = f"{sync_msg}；已删除源字幕"
+                            except Exception as err:
+                                sync_msg = f"{sync_msg}；源字幕删除失败: {err}"
                     record_out = str(synced) if synced else (str(final_out) if final_out.is_file() else "")
                     self._db.add_subset_record(
                         {
@@ -3816,6 +3848,7 @@ class Zitifenlei(_PluginBase):
             _logger.warning("宿主配置写入失败: %s", err)
         # 2) 更新运行时并热生效
         self._config = new_cfg
+        self._apply_font_limits()
         if self._db:
             try:
                 self._db.save_full_config(new_cfg)
@@ -4382,10 +4415,10 @@ class Zitifenlei(_PluginBase):
                 font_size = Path(file_path).stat().st_size
             except OSError as err:
                 return self._err(f"读取字体文件失败: {err}")
-            if font_size > MAX_FONT_FILE_BYTES:
+            if font_size > max_font_file_bytes():
                 return self._err(
                     f"字体文件过大（{font_size // (1024 * 1024)}MB），超过预览上限 "
-                    f"{MAX_FONT_FILE_BYTES // (1024 * 1024)}MB"
+                    f"{max_font_file_bytes() // (1024 * 1024)}MB"
                 )
             raw = Path(file_path).read_bytes()
             # TTC（TrueType Collection）拆单 face 再预览：浏览器 FontFace 不认 ttcf 容器
@@ -4512,10 +4545,10 @@ class Zitifenlei(_PluginBase):
         except Exception as err:
             return files, [f"临时目录不可用: {err}"]
         exts = tuple(str(e).lower() for e in allowed_exts)
-        # 单文件上限按用途区分：字体 128MB / 字幕 16MB
+        # 单文件上限按用途区分：字体走可配置上限（默认 128MB）/ 字幕 16MB
         extset = set(exts)
         is_font_upload = bool(extset & {e.lower() for e in FONT_EXTENSIONS})
-        member_limit = MAX_FONT_FILE_BYTES if is_font_upload else MAX_ASS_FILE_BYTES
+        member_limit = max_font_file_bytes() if is_font_upload else MAX_ASS_FILE_BYTES
         uploads = list(upload_files)
         if len(uploads) > MAX_UPLOAD_FILES:
             notes.append(
