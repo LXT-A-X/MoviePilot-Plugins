@@ -133,6 +133,7 @@ from .font_utils import (
     set_max_font_mb,
 )
 from . import archive_utils as arch
+from . import torrent_utils as tq
 from .hdr_utils import apply_hdr_brightness
 from .font_metadata import FontInspection, inspect_font
 from .glyph_checker import FaceCoverage, evaluate_usage, parse_ass_usage
@@ -200,6 +201,22 @@ _DEFAULT_CONFIG = {
     # HDR 字幕亮度（子集化/上传字幕处理后按档位压暗主色/描边/阴影，避免 HDR 下刺眼）
     "hdr_brightness": False,
     "hdr_brightness_level": "",
+    # ── 种子字体收集（只读下载器，按种子文件清单截取，不扫目录）──
+    # 总开关：开启后自动包含「字幕入库前收集闸门 + 整理完成兜底 + 定时兜底」
+    "torrent_enabled": False,
+    # 整理完成兜底入口的启动延迟（秒）：等 MP 搬完文件；字幕事件触发的收集不吃这个延迟
+    "torrent_delay_sec": 60,
+    # 字幕入库子集化前的最长等待（秒）：超时照常子集，缺字记入结果可重试
+    "torrent_wait_sec": 300,
+    # 压缩包/路径关键词（逗号分隔）：只对压缩包生效，裸字体文件不看关键词
+    "torrent_keywords": "font,fonts,字体",
+    # 单文件上限（MB）与单种子最多截取文件数
+    "torrent_max_file_mb": 2048,
+    "torrent_max_files": 500,
+    # 收集去向：False=直接入库；True=进「待整理」等确认
+    "torrent_to_pending": False,
+    # 基线时间戳（Unix 秒）：只处理基线之后完成的种子，历史不碰；由后端维护，前端可重置
+    "torrent_baseline_ts": 0,
 }
 
 # _archive_font_file 返回码：>0=归档成功（返回字体 ID），None=处理失败。
@@ -408,7 +425,7 @@ class Zitifenlei(_PluginBase):
     plugin_name = "字体分类管家"
     plugin_desc = "字体归档整理与 ASS 字幕字体检查插件：扫描/上传字体到字体库，检查字幕缺失字体。"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/zitifenlei.png"
-    plugin_version = "3.0.9"
+    plugin_version = "3.1.0"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "zitifenlei_"
@@ -469,6 +486,16 @@ class Zitifenlei(_PluginBase):
         # 优雅停止标志：stop_service 先置位，运行中的扫描/检查/子集化把「当前条目」完整
         # 处理完（copy+写库）再退出，剩余的条目不再处理，避免「文件在库、记录缺失」半截态
         self._stopping = False
+        # ── 种子字体收集运行态 ──
+        # hash -> {event, state, stats, record_id}：同一 hash 只收集一次，闸门靠 event 等待
+        self._torrent_jobs: Dict[str, Dict[str, Any]] = {}
+        self._torrent_jobs_lock = threading.RLock()
+        # 收集并发上限：本地复制+解压以 IO 为主，限 2 个避免多剧同时下时互相排队拖垮闸门
+        self._torrent_sem = threading.BoundedSemaphore(2)
+        # 定时兜底扫描互斥：上一轮没跑完不叠加
+        self._torrent_poll_lock = threading.Lock()
+        # 整理完成兜底的延迟 Timer：hash -> Timer（同 hash 重复事件重置倒计时）
+        self._torrent_delay_timers: Dict[str, threading.Timer] = {}
         # 实时监控通知聚合缓冲：连续放入的字体/字幕在 short 窗口内合并成一条归类通知，
         # 避免「放 5 个字体发 5 条通知」的刷屏。窗口内有新事件则滑动重置，到期统一发送。
         self._notify_agg: Dict[str, Any] = {
@@ -649,6 +676,12 @@ class Zitifenlei(_PluginBase):
 
             # 字体大小上限：无论配置来自宿主还是本地镜像，都按最终生效配置同步一次
             self._apply_font_limits()
+            # 种子收集基线：首次启用（或旧配置无值）时写入当前时间，从此只处理之后完成的种子
+            try:
+                if bool(self._config.get("torrent_enabled")):
+                    self._torrent_ensure_baseline()
+            except Exception:
+                pass
 
             try:
                 if not self._db:
@@ -708,6 +741,24 @@ class Zitifenlei(_PluginBase):
                     pass
             self._show_timers.clear()
             self._pending_shows.clear()
+            # 取消未到期的种子收集延迟计时器，并放行正在等待收集的字幕闸门
+            try:
+                with self._torrent_jobs_lock:
+                    for t in self._torrent_delay_timers.values():
+                        try:
+                            t.cancel()
+                        except Exception:
+                            pass
+                    self._torrent_delay_timers.clear()
+                    for job in self._torrent_jobs.values():
+                        ev = job.get("event")
+                        if ev is not None:
+                            try:
+                                ev.set()
+                            except Exception:
+                                pass
+            except Exception:
+                pass
             # 取消未发送的通知聚合计时器并清空缓冲，避免旧实例残留发通知
             try:
                 agg_timer = self._notify_agg.get("timer")
@@ -906,6 +957,20 @@ class Zitifenlei(_PluginBase):
                         d.rmdir()
                 except Exception:
                     pass
+            # 种子收集暂存目录：只清 6 小时前的残留（运行中的任务自己会在 finally 清理）
+            try:
+                cutoff = time.time() - 6 * 3600
+                for d in Path(self._tmp_dir).iterdir():
+                    if not d.is_dir() or not d.name.startswith("torrent_"):
+                        continue
+                    try:
+                        if d.stat().st_mtime < cutoff:
+                            shutil.rmtree(d, ignore_errors=True)
+                            removed += 1
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             if removed:
                 _logger.debug("字体分类管家清理 %d 个临时文件", removed)
         except Exception as err:
@@ -931,18 +996,34 @@ class Zitifenlei(_PluginBase):
         # 复制模式下同名字体反复归档出 xxx-2/xxx-3 副本堆积（已由 _archive_font_file 同名去重兜住）。
         # watchdog 完全缺失时的 60 秒轮询兜底（_start_polling）同样幂等，不会重复归档/重复建记录。
         if not bool(self.get_resource_or_config("weekly_reconcile")):
-            return []
-        # 每周差异核对：只按 size+mtime 比对并重解析差异文件（未变文件零解析），
-        # 与「启动轻检」互补；关闭配置后不再注册该定时任务
-        return [
-            {
-                "id": "ZitifenleiWeeklyReconcile",
-                "name": "字体索引每周差异核对",
-                "trigger": "cron",
-                "func": self._weekly_reconcile_task,
-                "kwargs": {"day_of_week": "sun", "hour": 4, "minute": 30},
-            }
-        ]
+            jobs: List[Dict[str, Any]] = []
+        else:
+            # 每周差异核对：只按 size+mtime 比对并重解析差异文件（未变文件零解析），
+            # 与「启动轻检」互补；关闭配置后不再注册该定时任务
+            jobs = [
+                {
+                    "id": "ZitifenleiWeeklyReconcile",
+                    "name": "字体索引每周差异核对",
+                    "trigger": "cron",
+                    "func": self._weekly_reconcile_task,
+                    "kwargs": {"day_of_week": "sun", "hour": 4, "minute": 30},
+                }
+            ]
+        # 种子字体收集兜底：总开关开启才注册，每 30 分钟扫一次「基线之后完成」的种子
+        try:
+            if self._torrent_enabled():
+                jobs.append(
+                    {
+                        "id": "ZitifenleiTorrentCollect",
+                        "name": "种子字体收集兜底扫描",
+                        "trigger": "cron",
+                        "func": self._torrent_poll_task,
+                        "kwargs": {"minute": "*/30"},
+                    }
+                )
+        except Exception:
+            pass
+        return jobs
 
     def get_resource_or_config(self, key: str) -> Any:
         """读取配置（兼容运行时更新）：宿主配置有该键才用宿主值，
@@ -1538,15 +1619,19 @@ class Zitifenlei(_PluginBase):
             return True
         return False
 
-    def _archive_font_file(self, file_path: Path, source: str = "auto") -> Optional[int]:
+    def _archive_font_file(
+        self, file_path: Path, source: str = "auto", force_pending: bool = False
+    ) -> Optional[int]:
         """归档入口包装：计入 _active_jobs，停服排空时等本次 copy+写库完整结束。"""
         self._job_begin()
         try:
-            return self._archive_font_file_impl(file_path, source)
+            return self._archive_font_file_impl(file_path, source, force_pending=force_pending)
         finally:
             self._job_end()
 
-    def _archive_font_file_impl(self, file_path: Path, source: str = "auto") -> Optional[int]:
+    def _archive_font_file_impl(
+        self, file_path: Path, source: str = "auto", force_pending: bool = False
+    ) -> Optional[int]:
         """自动归档单个字体（监控发现）：直接写入字体库（不经待确认）。
 
         「目录自动收集」关闭时：监控到的字体改进「待确认」，等待一键整理。
@@ -1556,8 +1641,8 @@ class Zitifenlei(_PluginBase):
         _ARCH_DUP / _ARCH_DUP_DELETED / _ARCH_DUP_DEL_FAILED=库中已存在跳过；
         None=处理失败。调用方据此区分「跳过」与「失败」分别统计。
         """
-        # 收集开关：关闭 → 只收下待确认，不自动归档
-        if self.get_resource_or_config("auto_collect") is False:
+        # 收集开关：关闭 → 只收下待确认，不自动归档；种子来源可按「收集去向」强制走待确认
+        if force_pending or self.get_resource_or_config("auto_collect") is False:
             return self._queue_auto_pending(file_path, source)
         lib_dir = self.get_resource_or_config("lib_dir") or ""
         if not lib_dir:
@@ -1747,7 +1832,9 @@ class Zitifenlei(_PluginBase):
                 pass
         return font_id
 
-    def _archive_from_dir(self, directory: Path, source: str = "auto") -> Dict[str, Any]:
+    def _archive_from_dir(
+        self, directory: Path, source: str = "auto", force_pending: bool = False
+    ) -> Dict[str, Any]:
         """批量自动归档目录内字体（定时兜底）：直接写入字体库，不经过待确认。
 
         返回统计字典（供通知按「新增 / 跳过 / 失败 / 删除重复源文件」分项展示）：
@@ -1779,7 +1866,7 @@ class Zitifenlei(_PluginBase):
                 continue
             if not f.is_file() or not is_font_file(f.name):
                 continue
-            ret = self._archive_font_file(f, source=source)
+            ret = self._archive_font_file(f, source=source, force_pending=force_pending)
             if ret is not None and ret > 0:
                 stats["added"].append(f.name)
             elif ret == _ARCH_PENDING:
@@ -3272,6 +3359,468 @@ class Zitifenlei(_PluginBase):
         except Exception as err:
             _logger.debug("目录子集化调度失败: %s", err)
 
+    # ─── 种子字体收集（只读下载器，按种子文件清单截取，不扫目录）────────────
+    def _torrent_enabled(self) -> bool:
+        """总开关：插件启用 + 种子收集开关。"""
+        try:
+            return bool(self._enabled) and bool(self.get_resource_or_config("torrent_enabled"))
+        except Exception:
+            return False
+
+    def _torrent_baseline_ts(self) -> int:
+        try:
+            if self._db is None:
+                return 0
+            return int(self._db.get_setting("torrent_baseline_ts", 0) or 0)
+        except Exception:
+            return 0
+
+    def _torrent_set_baseline(self, ts: int = 0) -> int:
+        ts = int(ts or time.time())
+        try:
+            if self._db is not None:
+                self._db.set_setting("torrent_baseline_ts", ts)
+        except Exception:
+            pass
+        return ts
+
+    def _torrent_ensure_baseline(self) -> int:
+        """取基线；没有就写入当前时间（只处理基线之后完成的种子，历史不碰）。"""
+        ts = self._torrent_baseline_ts()
+        if ts <= 0:
+            ts = self._torrent_set_baseline(int(time.time()))
+        return ts
+
+    def _torrent_cfg_int(self, key: str, default: int) -> int:
+        """读取数值型种子收集配置：0 是合法值，不能被 `or default` 吞掉。"""
+        try:
+            raw = self.get_resource_or_config(key)
+        except Exception:
+            raw = None
+        if raw is None or raw == "":
+            return int(default)
+        try:
+            return int(raw)
+        except Exception:
+            return int(default)
+
+    def _torrent_plan(self, torrent_hash: str, downloader: str) -> Tuple[bool, str, Dict[str, Any]]:
+        """只读探测：拿种子文件清单并挑出字体候选（不复制、不改下载器）。"""
+        if not torrent_hash:
+            return False, "缺少种子 hash", {}
+        service = tq.get_downloader_service(downloader)
+        instance = tq.service_instance(service)
+        if instance is None:
+            return False, f"下载器不可用：{downloader or '（未指定）'}", {}
+        meta = tq.torrent_meta(instance, torrent_hash)
+        root = tq.map_download_path(str(meta.get("save_path") or ""), service, downloader)
+        if not root:
+            return False, "下载器未返回保存路径（save_path 为空）", {}
+        if not Path(root).is_dir():
+            return False, f"下载路径在插件侧不可访问：{root}（请检查下载器路径映射）", {}
+        files = tq.list_files(instance, torrent_hash)
+        if not files:
+            return False, "读取种子文件清单失败或种子已被删除", {}
+        keywords = str(self.get_resource_or_config("torrent_keywords") or "font,fonts,字体")
+        max_mb = self._torrent_cfg_int("torrent_max_file_mb", 2048)
+        max_files = self._torrent_cfg_int("torrent_max_files", 500)
+        candidates, stats = tq.pick_candidates(files, root, keywords, max_mb, max_files)
+        alive: List[Dict[str, Any]] = []
+        for item in candidates:
+            try:
+                if Path(item.get("abs_path") or "").is_file():
+                    alive.append(item)
+            except Exception:
+                continue
+        stats["missing_files"] = len(candidates) - len(alive)
+        return True, "", {
+            "hash": torrent_hash,
+            "name": str(meta.get("name") or ""),
+            "root": root,
+            "candidates": alive,
+            "stats": stats,
+        }
+
+    def _ensure_torrent_collect(
+        self,
+        torrent_hash: str,
+        downloader: str,
+        source: str = "inbound",
+        wait: bool = False,
+    ) -> Dict[str, Any]:
+        """确保该种子的字体收集已入队/完成；wait=True 时最多等 torrent_wait_sec 秒。
+
+        返回 {state, added, skipped, failed, picked, name, reason}：
+          state: skipped（未开启/无 hash）/ cached（已收集过）/ queued|running（不等待时）
+                 / done|empty|failed / timeout
+        """
+        empty = {"state": "skipped", "added": 0, "skipped": 0, "failed": 0, "picked": 0, "name": "", "reason": ""}
+        if not self._torrent_enabled() or not torrent_hash:
+            return empty
+        job: Optional[Dict[str, Any]] = None
+        with self._torrent_jobs_lock:
+            job = self._torrent_jobs.get(torrent_hash)
+            if job is None:
+                # 幂等：该 hash 已成功收集过（含「种子内无字体」）就不再重复截取
+                try:
+                    done = self._db.get_torrent_ingest_by_hash(torrent_hash) if self._db else None
+                except Exception:
+                    done = None
+                if done is not None:
+                    return {
+                        "state": "cached",
+                        "added": int(done.get("added") or 0),
+                        "skipped": int(done.get("skipped") or 0),
+                        "failed": int(done.get("failed") or 0),
+                        "picked": int(done.get("picked") or 0),
+                        "name": str(done.get("torrent_name") or ""),
+                        "reason": "",
+                    }
+                job = {"event": threading.Event(), "state": "queued", "stats": {}}
+                self._torrent_jobs[torrent_hash] = job
+                try:
+                    threading.Thread(
+                        target=self._torrent_job_run,
+                        args=(torrent_hash, downloader, source),
+                        name="zt-torrent",
+                        daemon=True,
+                    ).start()
+                except Exception as err:
+                    job["state"] = "failed"
+                    job["stats"] = {"reason": f"线程启动失败: {err}"}
+                    job["event"].set()
+        if not wait:
+            return {**empty, "state": str(job.get("state") or "queued")}
+        timeout = max(0, self._torrent_cfg_int("torrent_wait_sec", 300))
+        finished = job["event"].wait(timeout)
+        stats = dict(job.get("stats") or {})
+        if not finished:
+            return {
+                "state": "timeout",
+                "added": int(stats.get("added") or 0),
+                "skipped": int(stats.get("skipped") or 0),
+                "failed": int(stats.get("failed") or 0),
+                "picked": int(stats.get("picked") or 0),
+                "name": str(stats.get("name") or ""),
+                "reason": f"等待 {timeout} 秒超时",
+            }
+        return {
+            "state": str(job.get("state") or "done"),
+            "added": int(stats.get("added") or 0),
+            "skipped": int(stats.get("skipped") or 0),
+            "failed": int(stats.get("failed") or 0),
+            "picked": int(stats.get("picked") or 0),
+            "name": str(stats.get("name") or ""),
+            "reason": str(stats.get("reason") or ""),
+        }
+
+    def _torrent_job_run(self, torrent_hash: str, downloader: str, source: str) -> None:
+        """执行一次种子字体截取：暂存复制 → 解压 → 归档入库 → 重建索引 → 写记录。"""
+        job = self._torrent_jobs.get(torrent_hash) or {}
+        stats: Dict[str, Any] = {"picked": 0, "added": 0, "skipped": 0, "failed": 0, "name": ""}
+        staging: Optional[Path] = None
+        record_id = 0
+        state = "failed"
+        detail = ""
+        try:
+            with self._torrent_sem:
+                if self._stopping:
+                    state = "failed"
+                    stats["reason"] = "插件正在停止"
+                    return
+                job["state"] = "running"
+                ok, err, plan = self._torrent_plan(torrent_hash, downloader)
+                plan_stats = (plan or {}).get("stats") or {}
+                stats["name"] = str((plan or {}).get("name") or "")
+                if not ok:
+                    stats["reason"] = err
+                    detail = err
+                    self._db.add_log(f"种子字体收集跳过：{err}", "warning")
+                    record_id = self._db.add_torrent_ingest(
+                        torrent_hash, downloader, "", source, "failed", 0, 0, 0, 1, err
+                    )
+                    return
+                candidates = plan.get("candidates") or []
+                stats["picked"] = len(candidates)
+                if not candidates:
+                    state = "empty"
+                    detail = (
+                        f"扫描 {plan_stats.get('scanned', 0)} 个文件，无已下载的字体/字体包"
+                        + (f"（{plan_stats.get('pending', 0)} 个未下完）" if plan_stats.get("pending") else "")
+                    )
+                    self._db.add_log(f"种子字体收集：{stats['name'] or torrent_hash[:8]} {detail}", "info")
+                    record_id = self._db.add_torrent_ingest(
+                        torrent_hash, downloader, stats["name"], source, "empty", 0, 0, 0, 0, detail
+                    )
+                    return
+                if not self._tmp_dir:
+                    stats["reason"] = "临时目录未初始化"
+                    detail = stats["reason"]
+                    return
+                staging = Path(self._tmp_dir) / f"torrent_{torrent_hash[:12]}_{uuid.uuid4().hex[:6]}"
+                raw_dir = staging / "raw"
+                extract_dir = staging / "extract"
+                raw_dir.mkdir(parents=True, exist_ok=True)
+                extract_dir.mkdir(parents=True, exist_ok=True)
+                max_mb = self._torrent_cfg_int("torrent_max_file_mb", 2048)
+                max_files = self._torrent_cfg_int("torrent_max_files", 500)
+                skipped_notes: List[str] = []
+                empty_archives = 0
+                for item in candidates:
+                    if self._stopping:
+                        break
+                    src = Path(str(item.get("abs_path") or ""))
+                    base_name = Path(str(item.get("name") or "")).name or "font"
+                    try:
+                        dst = raw_dir / base_name
+                        if dst.exists():
+                            dst = raw_dir / f"{uuid.uuid4().hex[:6]}_{base_name}"
+                        shutil.copy2(src, dst)
+                    except Exception as err:
+                        stats["failed"] += 1
+                        skipped_notes.append(f"{base_name}: 复制失败 {err}")
+                        continue
+                    if item.get("kind") != "archive":
+                        continue
+                    try:
+                        result = arch.extract_archive(
+                            dst,
+                            extract_dir,
+                            FONT_EXTENSIONS,
+                            max_members=max(1, max_files),
+                            max_total_bytes=max(1, max_mb) * 1024 * 1024,
+                            max_member_bytes=max_font_file_bytes(),
+                        )
+                        if result.files:
+                            for member, reason in (result.skipped + result.errors)[:10]:
+                                skipped_notes.append(f"{base_name}/{member}: {reason}")
+                        elif result.errors:
+                            stats["failed"] += 1
+                            for member, reason in result.errors[:5]:
+                                skipped_notes.append(f"{base_name}/{member}: {reason}")
+                        else:
+                            # 压缩包能正常解开但里面没有任何字体：不算失败，
+                            # 记一笔空包后直接放行（字幕照常走检查/子集）
+                            empty_archives += 1
+                            skipped_notes.append(f"{base_name}: 压缩包内无字体，已丢弃")
+                    except Exception as err:
+                        stats["failed"] += 1
+                        skipped_notes.append(f"{base_name}: 解压失败 {err}")
+                    finally:
+                        try:
+                            dst.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                force_pending = bool(self.get_resource_or_config("torrent_to_pending"))
+                merged: Dict[str, Any] = {
+                    "added": [],
+                    "skipped": [],
+                    "failed": 0,
+                    "dup_deleted": 0,
+                    "delete_failed": 0,
+                    "pending": 0,
+                }
+                for folder in (raw_dir, extract_dir):
+                    try:
+                        if self._stopping:
+                            break
+                        sub = self._archive_from_dir(folder, source="torrent", force_pending=force_pending)
+                        merged["added"].extend(sub.get("added") or [])
+                        merged["skipped"].extend(sub.get("skipped") or [])
+                        merged["failed"] += int(sub.get("failed") or 0)
+                        merged["pending"] += int(sub.get("pending") or 0)
+                    except Exception as err:
+                        merged["failed"] += 1
+                        skipped_notes.append(f"归档失败: {err}")
+                stats["added"] = len(merged["added"])
+                stats["skipped"] = len(merged["skipped"])
+                stats["failed"] += int(merged["failed"] or 0)
+                state = "done" if (stats["added"] or merged["pending"]) else ("failed" if stats["failed"] else "empty")
+                bits = [f"候选 {stats['picked']} 个", f"新增 {stats['added']}", f"跳过 {stats['skipped']}"]
+                if merged["pending"]:
+                    bits.append(f"待确认 {merged['pending']}")
+                if empty_archives:
+                    bits.append(f"空包 {empty_archives} 个")
+                if stats["failed"]:
+                    bits.append(f"失败 {stats['failed']}")
+                if plan_stats.get("pending"):
+                    bits.append(f"未下完 {plan_stats['pending']}")
+                detail = "，".join(bits)
+                if skipped_notes:
+                    detail += "；" + "；".join(skipped_notes[:5])
+                try:
+                    self._db.add_log(
+                        f"种子字体收集（{stats['name'] or torrent_hash[:8]}，{source}）：{detail}",
+                        "info" if state in ("done", "empty") else "warning",
+                    )
+                except Exception:
+                    pass
+                record_id = self._db.add_torrent_ingest(
+                    torrent_hash,
+                    downloader,
+                    stats["name"],
+                    source,
+                    state,
+                    stats["picked"],
+                    stats["added"],
+                    stats["skipped"],
+                    stats["failed"],
+                    detail,
+                )
+                if stats["added"] or merged["pending"]:
+                    idx_ok, idx_msg = self._rebuild_subset_index_silent()
+                    if idx_ok:
+                        self._db.add_log("字体索引已自动重建（种子字体收集后）", "info")
+                    else:
+                        self._db.add_log(f"字体索引自动重建失败: {idx_msg}", "warning")
+                    if stats["added"]:
+                        try:
+                            self._recheck_missing_after_library_change("种子字体收集")
+                        except Exception:
+                            pass
+                # 字幕入库触发时由「入库检查通知」统一说明，这里不重复推送
+                if source != "inbound":
+                    self._torrent_notify_result(stats, merged, source)
+        except Exception as err:
+            state = "failed"
+            stats["reason"] = str(err)
+            try:
+                self._db.add_log(f"种子字体收集异常: {err}", "error")
+            except Exception:
+                pass
+            try:
+                record_id = self._db.add_torrent_ingest(
+                    torrent_hash, downloader, stats.get("name", ""), source, "failed",
+                    stats.get("picked", 0), stats.get("added", 0), stats.get("skipped", 0),
+                    stats.get("failed", 0), f"异常: {err}",
+                )
+            except Exception:
+                pass
+        finally:
+            if staging is not None:
+                try:
+                    shutil.rmtree(staging, ignore_errors=True)
+                except Exception:
+                    pass
+            stats["record_id"] = record_id
+            job["stats"] = stats
+            job["state"] = state
+            try:
+                job["event"].set()
+            except Exception:
+                pass
+
+    def _torrent_notify_result(
+        self, stats: Dict[str, Any], merged: Dict[str, Any], source: str
+    ) -> None:
+        """非字幕入库来源（整理兜底/手动/定时）的收集结果通知。"""
+        try:
+            if not self.get_resource_or_config("notify_enabled"):
+                return
+            added = list(merged.get("added") or [])
+            pending = int(merged.get("pending") or 0)
+            failed = int(stats.get("failed") or 0)
+            if not added and not pending and not failed:
+                return
+            label = {"transfer": "整理完成兜底", "manual": "手动检查", "poll": "定时检查"}.get(source, source)
+            lines = [f"📥 种子字体收集（{label}）：{stats.get('name') or '未知种子'}"]
+            if added:
+                lines.append(f"✅ 新增 {len(added)} 个：{self._short_names(added, 10)}")
+            if pending:
+                lines.append(f"📝 已加入待整理 {pending} 个（等待一键整理）")
+            if failed:
+                lines.append(f"⚠ 处理失败 {failed} 个（详见插件日志）")
+            self._notify("字体分类管家：种子字体收集", "\n".join(lines))
+        except Exception:
+            pass
+
+    def _torrent_queue_delay(self, torrent_hash: str, downloader: str, source: str = "transfer") -> None:
+        """整理完成兜底：延迟 torrent_delay_sec 秒再收集（等 MP 搬完文件）。"""
+        if not self._torrent_enabled() or not torrent_hash:
+            return
+        delay = max(0, self._torrent_cfg_int("torrent_delay_sec", 60))
+        with self._torrent_jobs_lock:
+            timer = self._torrent_delay_timers.get(torrent_hash)
+            if timer:
+                try:
+                    timer.cancel()
+                except Exception:
+                    pass
+            timer = threading.Timer(
+                delay,
+                self._torrent_delay_timer_fire,
+                args=(torrent_hash, downloader, source),
+            )
+            timer.daemon = True
+            timer.start()
+            self._torrent_delay_timers[torrent_hash] = timer
+
+    def _torrent_delay_timer_fire(self, torrent_hash: str, downloader: str, source: str) -> None:
+        with self._torrent_jobs_lock:
+            self._torrent_delay_timers.pop(torrent_hash, None)
+        try:
+            self._ensure_torrent_collect(torrent_hash, downloader, source=source, wait=False)
+        except Exception as err:
+            _logger.debug("种子字体收集入队失败: %s", err)
+
+    def _torrent_scan(self, downloader: str = "", hours: int = 0) -> Dict[str, Any]:
+        """手动/定时扫描已完成种子：只处理基线之后完成的，逐个入队收集。"""
+        if not self._torrent_enabled():
+            return {"queued": 0, "scanned": 0, "skipped": 0, "reason": "种子字体收集未启用"}
+        baseline = int(time.time()) - int(hours) * 3600 if int(hours or 0) > 0 else self._torrent_ensure_baseline()
+        names = [downloader] if downloader else [d["name"] for d in tq.list_downloaders()]
+        queued = 0
+        scanned = 0
+        skipped = 0
+        errors: List[str] = []
+        if not names:
+            errors.append("未发现已启用的下载器")
+        for name in names:
+            service = tq.get_downloader_service(name)
+            instance = tq.service_instance(service)
+            if instance is None:
+                errors.append(f"{name} 不可用")
+                continue
+            for item in tq.list_completed(instance):
+                scanned += 1
+                if int(item.get("completion_on") or 0) < baseline:
+                    skipped += 1
+                    continue
+                res = self._ensure_torrent_collect(item.get("hash") or "", name, source="manual", wait=False)
+                if res.get("state") not in ("skipped", "cached"):
+                    queued += 1
+        return {
+            "queued": queued,
+            "scanned": scanned,
+            "skipped": skipped,
+            "baseline": baseline,
+            "errors": errors,
+        }
+
+    def _torrent_poll_task(self) -> None:
+        """定时兜底：扫描下载器已完成种子（只处理基线之后的）。"""
+        if not self._torrent_enabled():
+            return
+        if not self._torrent_poll_lock.acquire(blocking=False):
+            return
+        try:
+            res = self._torrent_scan("", 0)
+            if res.get("queued"):
+                try:
+                    self._db.add_log(
+                        f"种子字体收集定时扫描：发现 {res.get('queued')} 个新种子入队（跳过历史 {res.get('skipped')} 个）",
+                        "info",
+                    )
+                except Exception:
+                    pass
+        except Exception as err:
+            _logger.debug("种子字体收集定时扫描失败: %s", err)
+        finally:
+            try:
+                self._torrent_poll_lock.release()
+            except Exception:
+                pass
+
     # ─── 入库字幕扫描（TransferComplete / SubtitleTransferComplete 聚合）────────
     @staticmethod
     def _safe_get(obj, key, default=None):
@@ -3337,11 +3886,19 @@ class Zitifenlei(_PluginBase):
         except Exception:
             return False
 
-    def _notify_show_scan(self, show: str, total: int, embedded: int, missing_map: Dict[str, str]) -> None:
+    def _notify_show_scan(
+        self,
+        show: str,
+        total: int,
+        embedded: int,
+        missing_map: Dict[str, str],
+        extra_lines: Optional[List[str]] = None,
+    ) -> None:
         """汇总通知：missing_map = {归一化key: 展示名}（缺 N 种已按 key 去重）
 
         格式对齐单字幕通知：状态符号 + 结果行 + 明细换行。剧级聚合字体可能较多，
         缺失列表保持「最多 5 个 + 等 N 种」折叠，避免消息过长。
+        extra_lines：种子字体收集的补充说明（只在真有收集动作时传入）
         """
         try:
             if not self.get_resource_or_config("notify_enabled"):
@@ -3364,16 +3921,30 @@ class Zitifenlei(_PluginBase):
                     f"✅ 共 {total} 个字幕" + (f"，其中 {embedded} 个已内嵌字体" if embedded else ""),
                     "全部字幕已子集化（自带内嵌字体）" if all_embedded else "字幕字体齐全",
                 ]
+            for extra in extra_lines or []:
+                if extra:
+                    lines.append(extra)
             self._notify(f"《{show}》字幕检查完成", "\n".join(lines))
         except Exception:
             pass
 
-    def _run_show_scan(self, key: str, tmdbid: str, title: str, file_list: List[str]) -> None:
+    def _run_show_scan(
+        self,
+        key: str,
+        tmdbid: str,
+        title: str,
+        file_list: List[str],
+        hashes: Optional[Dict[str, str]] = None,
+    ) -> None:
         """聚合到期：处理本次新增的 ASS 字幕列表（由 on_transfer_complete 汇总传入）。
 
         「入库自动检查字幕」（auto_inbound）开 → 写检查记录并汇总通知；
         「入库后自动子集化」（auto_subset）开 → 对这批字幕做字体子集化并内嵌。
         两者相互独立：只开子集化时不产生检查记录/检查通知，只开检查时不做子集化。
+
+        hashes：本批字幕对应的下载种子（hash -> 下载器名）。种子收集开启时，
+        先等这些种子的字体截取完成（最多 torrent_wait_sec 秒），再检查/子集，
+        避免「字幕先到、字体还没入库」导致误判缺字。超时也继续，缺字记入结果可重试。
         """
         with self._lock:
             self._show_timers.pop(key, None)
@@ -3395,6 +3966,26 @@ class Zitifenlei(_PluginBase):
             do_subset = bool(self.get_resource_or_config("auto_subset"))
             if not (do_check or do_subset):
                 return
+            # ── 种子字体收集闸门：先补字体，再检查/子集 ──
+            torrent_notes: List[str] = []
+            if self._torrent_enabled() and hashes:
+                for h, dl in list(hashes.items()):
+                    if self._stopping:
+                        break
+                    res = self._ensure_torrent_collect(str(h), str(dl or ""), source="inbound", wait=True)
+                    state = str(res.get("state") or "")
+                    if state == "timeout":
+                        torrent_notes.append(
+                            f"⚠ 种子字体收集超时（{res.get('reason') or '等待上限'}），"
+                            "收集仍在后台继续，缺字可稍后重试"
+                        )
+                    elif state == "failed" and res.get("reason"):
+                        torrent_notes.append(f"⚠ 种子字体收集失败：{res.get('reason')}")
+                    elif int(res.get("added") or 0) > 0:
+                        torrent_notes.append(
+                            f"种子收集：补充 {int(res.get('added') or 0)} 个字体"
+                            f"（来自 {res.get('name') or str(h)[:8]}）"
+                        )
             if do_check:
                 total = 0
                 embedded = 0
@@ -3420,7 +4011,7 @@ class Zitifenlei(_PluginBase):
                     f"入库扫描 {title or key}: {total} 个字幕, {embedded} 个已内嵌, 缺 {len(missing_map)} 种字体",
                     "warning" if missing_map else "info",
                 )
-                self._notify_show_scan(title or key, total, embedded, missing_map)
+                self._notify_show_scan(title or key, total, embedded, missing_map, extra_lines=torrent_notes)
             # 入库自动子集化（设置开关 auto_subset 开启时）：独立于「入库自动检查字幕」，
             # 关闭检查开关不阻断子集化——对这批字幕做字体子集化并内嵌
             if do_subset:
@@ -3478,6 +4069,10 @@ class Zitifenlei(_PluginBase):
                 or str(self._safe_get(meta, "en_name") or "")
             )
             transferinfo = data.get("transferinfo") or {}
+            # 本次整理对应的种子：种子收集开启时，字幕一到就按 hash 截取字体（异步），
+            # 聚合到期再等它完成，保证子集化时字体已入库（不依赖视频/字幕事件先后顺序）
+            download_hash = str(data.get("download_hash") or "")
+            downloader = str(data.get("downloader") or "")
             # ── 收集本次新增的 ASS 字幕路径（只算转移后入库文件） ──
             # transferinfo.target_item 是转移后的字幕（媒体库内入库文件）；
             # fileitem / transferinfo.fileitem 是源字幕路径——link 模式下源文件仍
@@ -3504,28 +4099,38 @@ class Zitifenlei(_PluginBase):
                 self._db.add_log("字幕事件未解析到可用 ASS 字幕路径，跳过", "warning")
                 return
             key = tmdbid or title or str(Path(ass_paths[0]).parent)
+            # 字幕一到就先入队种子字体收集（不等视频整理事件，避免事件顺序不可控）
+            if download_hash and self._torrent_enabled():
+                try:
+                    self._ensure_torrent_collect(download_hash, downloader, source="inbound", wait=False)
+                except Exception as err:
+                    _logger.debug("种子字体收集入队失败: %s", err)
             with self._lock:
-                cur = self._pending_shows.get(key)
-                if cur is None:
-                    cur = []
-                    self._pending_shows[key] = cur
+                ctx = self._pending_shows.get(key)
+                if not isinstance(ctx, dict):
+                    ctx = {"files": [], "hashes": {}}
+                    self._pending_shows[key] = ctx
+                cur = ctx["files"]
                 for p in ass_paths:
                     if p not in cur:
                         cur.append(p)
+                if download_hash:
+                    ctx["hashes"][download_hash] = downloader
                 timer = self._show_timers.get(key)
                 if timer:
                     timer.cancel()
                 timer = threading.Timer(
                     self._ass_finalize_delay,
                     self._run_show_scan,
-                    args=(key, tmdbid, title, list(cur)),
+                    args=(key, tmdbid, title, list(cur), dict(ctx["hashes"])),
                 )
                 timer.daemon = True
                 timer.start()
                 self._show_timers[key] = timer
             self._db.add_log(
                 f"入库字幕已排队（{title or key}）：{len(cur)} 个，{self._ass_finalize_delay} 秒聚合后统一处理，"
-                "正在等待整部入库完毕…",
+                + ("种子字体收集已先行入队；" if (download_hash and self._torrent_enabled()) else "")
+                + "正在等待整部入库完毕…",
                 "info",
             )
             _logger.info("入库扫描已排队: %s (%d 个字幕)，%ds 后统一处理", title or key, len(cur), self._ass_finalize_delay)
@@ -3544,6 +4149,26 @@ class Zitifenlei(_PluginBase):
             except Exception:
                 return False
         return self._db is not None
+
+    @eventmanager.register(EventType.TransferComplete)
+    def on_torrent_transfer_complete(self, event) -> None:
+        """整理完成兜底：纯字体包种子（没有字幕）不会触发字幕事件，靠这里延迟截取。
+
+        只入队、不阻塞事件总线；延迟 torrent_delay_sec 秒是为了避开 MP 正在搬文件的时刻。
+        """
+        try:
+            if not self._torrent_enabled():
+                return
+            data = getattr(event, "event_data", None) or {}
+            if not isinstance(data, dict):
+                return
+            torrent_hash = str(data.get("download_hash") or "")
+            downloader = str(data.get("downloader") or "")
+            if not torrent_hash:
+                return
+            self._torrent_queue_delay(torrent_hash, downloader, source="transfer")
+        except Exception as err:
+            _logger.debug("整理完成种子收集入队失败: %s", err)
 
     def _ok(self, data: Any, message: str = "success") -> Dict[str, Any]:
         return {"success": True, "message": message, "data": data}
@@ -3600,6 +4225,21 @@ class Zitifenlei(_PluginBase):
                 "ok": _sqlite_ok,
                 "detail": "插件本地数据库（字体库 / 检查记录）",
                 "impact": "依赖宿主运行环境",
+            }
+        )
+        # 解压工具：zip 内置恒可用；7z/rar 需要系统工具（p7zip / unar / unrar / bsdtar）
+        try:
+            tools = tq.describe_extract_tools(refresh=True)
+        except Exception:
+            tools = {"seven_zip": False, "rar": False, "tools": []}
+        _tool_names = "、".join(tools.get("tools") or []) or "未检测到"
+        items.append(
+            {
+                "key": "extract_tools",
+                "name": "解压工具（7z / rar）",
+                "ok": bool(tools.get("seven_zip") or tools.get("rar")),
+                "detail": f"zip 内置；已检测到：{_tool_names}",
+                "impact": "未安装时只能解 .zip，.7z/.rar 的上传与种子字体收集会被跳过（容器内装 p7zip 后重启插件）",
             }
         )
         ok_count = sum(1 for i in items if i["ok"])
@@ -4572,7 +5212,13 @@ class Zitifenlei(_PluginBase):
             safe_name = Path(file_name).name
             if not safe_name:
                 continue
-            if arch.is_archive(safe_name):
+            if arch.is_any_archive(safe_name):
+                if not arch.is_archive(safe_name):
+                    notes.append(
+                        f"{safe_name}: 未检测到 {Path(safe_name).suffix or '该格式'} 的解压工具，"
+                        "暂不支持该压缩包（.zip 可直接上传）"
+                    )
+                    continue
                 zip_path = base / f"{prefix}_{uuid.uuid4().hex}_{safe_name}"
                 try:
                     written, too_large = await self._write_upload_limited(
@@ -4589,7 +5235,7 @@ class Zitifenlei(_PluginBase):
                 if not written:
                     continue
                 dest = base / f"_unzip_{uuid.uuid4().hex}"
-                result = arch.extract_zip(
+                result = arch.extract_archive(
                     zip_path,
                     dest,
                     exts,
@@ -7317,6 +7963,101 @@ class Zitifenlei(_PluginBase):
         }
 
     # ─── API 注册 ───────────────────────────────────────
+    # ─── API：种子字体收集 ──────────────────────────────
+    def api_torrent_status(self) -> Dict[str, Any]:
+        """种子收集状态：开关、基线、下载器可用性、解压能力、运行中任务数。"""
+        try:
+            tools = tq.describe_extract_tools(refresh=True)
+        except Exception:
+            tools = {"zip": True, "seven_zip": False, "rar": False, "tools": [], "extensions": [".zip"]}
+        downloaders: List[Dict[str, Any]] = []
+        for item in tq.list_downloaders():
+            inst = tq.service_instance(tq.get_downloader_service(item["name"]))
+            downloaders.append({**item, "available": inst is not None})
+        baseline = self._torrent_baseline_ts()
+        try:
+            baseline_text = (
+                datetime.fromtimestamp(baseline).strftime("%Y-%m-%d %H:%M:%S") if baseline > 0 else ""
+            )
+        except Exception:
+            baseline_text = ""
+        running = 0
+        with self._torrent_jobs_lock:
+            for job in self._torrent_jobs.values():
+                if job.get("state") in ("queued", "running"):
+                    running += 1
+        return self._ok(
+            {
+                "enabled": self._torrent_enabled(),
+                "baseline_ts": baseline,
+                "baseline_text": baseline_text,
+                "downloaders": downloaders,
+                "tools": tools,
+                "running": running,
+            }
+        )
+
+    async def api_torrent_scan(self, request: Request = None) -> Dict[str, Any]:
+        """手动检查下载器已完成种子（只处理基线之后完成的，不改下载器任何状态）。"""
+        if not self._enabled:
+            return self._err("插件已停用，请先在设置中启用")
+        if not self._torrent_enabled():
+            return self._err("请先在设置中开启「种子字体收集」")
+        body: Dict[str, Any] = {}
+        try:
+            if request is not None:
+                data = await request.json()
+                if isinstance(data, dict):
+                    body = data
+        except Exception:
+            body = {}
+        downloader = str(body.get("downloader") or "")
+        try:
+            hours = int(body.get("hours") or 0)
+        except Exception:
+            hours = 0
+        res = self._torrent_scan(downloader, hours)
+        msg = (
+            f"扫描 {res.get('scanned', 0)} 个已完成种子，入队 {res.get('queued', 0)} 个"
+            f"（跳过历史 {res.get('skipped', 0)} 个）"
+        )
+        if res.get("errors"):
+            msg += "；" + "；".join(res["errors"][:3])
+        try:
+            self._db.add_log(msg, "info")
+        except Exception:
+            pass
+        return self._ok(res, msg)
+
+    def api_torrent_records(self, limit: int = 20) -> Dict[str, Any]:
+        """最近种子截取记录（只读展示，不影响任何文件）。"""
+        try:
+            rows = self._db.list_torrent_ingest(max(1, min(int(limit or 20), 200)))
+        except Exception:
+            rows = []
+        return self._ok({"items": rows})
+
+    def api_torrent_records_clear(self) -> Dict[str, Any]:
+        """清空种子截取记录（只删记录，不动字体库与下载目录）。"""
+        try:
+            count = self._db.clear_torrent_ingest()
+        except Exception:
+            count = 0
+        try:
+            self._db.add_log(f"清空种子字体收集记录 {count} 条", "warning")
+        except Exception:
+            pass
+        return self._ok({"removed": count}, f"已清空 {count} 条记录")
+
+    def api_torrent_baseline_reset(self) -> Dict[str, Any]:
+        """把基线重置为当前时间：从此只处理之后完成的种子。"""
+        ts = self._torrent_set_baseline(int(time.time()))
+        try:
+            self._db.add_log("种子字体收集基线已重置为当前时间", "info")
+        except Exception:
+            pass
+        return self._ok({"baseline_ts": ts}, "基线已重置")
+
     def get_api(self) -> List[Dict[str, Any]]:
         apis = [
             {"path": "/deps/check", "endpoint": self.api_deps_check, "methods": ["GET"], "auth": "bear", "summary": "检测运行依赖是否安装"},
@@ -7376,6 +8117,11 @@ class Zitifenlei(_PluginBase):
             {"path": "/missing/classify", "endpoint": self.api_missing_classify, "methods": ["POST"], "auth": "bear", "summary": "归类入库并重建索引"},
             {"path": "/missing/uploads/clear", "endpoint": self.api_missing_uploads_clear, "methods": ["DELETE"], "auth": "bear", "summary": "清除已上传字体"},
             {"path": "/missing/uploads/remove", "endpoint": self.api_missing_upload_remove, "methods": ["DELETE"], "auth": "bear", "summary": "删除单条已上传字体"},
+            {"path": "/torrent/status", "endpoint": self.api_torrent_status, "methods": ["GET"], "auth": "bear", "summary": "种子字体收集状态（下载器/解压工具/基线）"},
+            {"path": "/torrent/scan", "endpoint": self.api_torrent_scan, "methods": ["POST"], "auth": "bear", "summary": "立即检查下载器已完成种子"},
+            {"path": "/torrent/records", "endpoint": self.api_torrent_records, "methods": ["GET"], "auth": "bear", "summary": "种子字体收集记录"},
+            {"path": "/torrent/records", "endpoint": self.api_torrent_records_clear, "methods": ["DELETE"], "auth": "bear", "summary": "清空种子字体收集记录"},
+            {"path": "/torrent/baseline", "endpoint": self.api_torrent_baseline_reset, "methods": ["POST"], "auth": "bear", "summary": "重置种子收集基线为当前时间"},
         ]
         # 写接口（POST/PUT/PATCH/DELETE）统一追加管理员依赖：宿主只按 auth 校验登录，
         # 不追加这一步的话，任意登录用户都能清库/删文件/装依赖/改配置。

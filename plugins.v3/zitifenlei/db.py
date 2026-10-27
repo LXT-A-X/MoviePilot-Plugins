@@ -188,6 +188,22 @@ CREATE TABLE IF NOT EXISTS manual_font_mappings (
     created_at TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_manual_mapping ON manual_font_mappings(source_name, target_name);
+-- torrent_ingest：种子字体截取的处理记录（幂等判断 / 页面展示 / 失败排查）
+CREATE TABLE IF NOT EXISTS torrent_ingest (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    hash TEXT DEFAULT '',
+    downloader TEXT DEFAULT '',
+    torrent_name TEXT DEFAULT '',
+    source TEXT DEFAULT '',
+    status TEXT DEFAULT 'pending',
+    picked INTEGER DEFAULT 0,
+    added INTEGER DEFAULT 0,
+    skipped INTEGER DEFAULT 0,
+    failed INTEGER DEFAULT 0,
+    detail TEXT DEFAULT '',
+    created_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_torrent_ingest_hash ON torrent_ingest(hash);
 """
 
 
@@ -1566,3 +1582,94 @@ class FontDB:
         """返回表的所有列名（白名单），用于导入时过滤字段"""
         rows = self._conn.execute(f"PRAGMA table_info({table})").fetchall()
         return {r["name"] for r in rows}
+
+    # ============ 种子字体截取记录 ============
+
+    def add_torrent_ingest(
+        self,
+        torrent_hash: str,
+        downloader: str,
+        torrent_name: str,
+        source: str,
+        status: str = "pending",
+        picked: int = 0,
+        added: int = 0,
+        skipped: int = 0,
+        failed: int = 0,
+        detail: str = "",
+    ) -> int:
+        """新增一条种子截取记录，返回自增 ID。"""
+        try:
+            cur = self._conn.execute(
+                "INSERT INTO torrent_ingest (hash, downloader, torrent_name, source, status, "
+                "picked, added, skipped, failed, detail, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    str(torrent_hash or ""),
+                    str(downloader or ""),
+                    str(torrent_name or ""),
+                    str(source or ""),
+                    str(status or ""),
+                    int(picked or 0),
+                    int(added or 0),
+                    int(skipped or 0),
+                    int(failed or 0),
+                    str(detail or "")[:1000],
+                    self.now(),
+                ),
+            )
+            try:
+                self._conn.commit()
+            except Exception:
+                pass
+            return int(cur.lastrowid or 0)
+        except Exception:
+            return 0
+
+    def update_torrent_ingest(self, record_id: int, **fields: Any) -> None:
+        """按 ID 更新种子截取记录（只允许白名单字段）。"""
+        if not record_id:
+            return
+        allow = {"status", "picked", "added", "skipped", "failed", "detail", "torrent_name", "source"}
+        pairs = [(k, v) for k, v in fields.items() if k in allow]
+        if not pairs:
+            return
+        sets = ", ".join(f"{k} = ?" for k, _ in pairs)
+        values = [v for _, v in pairs]
+        values.append(int(record_id))
+        try:
+            self.execute(f"UPDATE torrent_ingest SET {sets} WHERE id = ?", tuple(values))
+        except Exception:
+            pass
+
+    def list_torrent_ingest(self, limit: int = 20) -> List[Dict[str, Any]]:
+        try:
+            return self.query(
+                "SELECT * FROM torrent_ingest ORDER BY id DESC LIMIT ?", (int(limit),)
+            )
+        except Exception:
+            return []
+
+    def get_torrent_ingest_by_hash(self, torrent_hash: str) -> Optional[Dict[str, Any]]:
+        """取该种子最近一条成功记录（幂等判断用）。"""
+        if not torrent_hash:
+            return None
+        try:
+            rows = self.query(
+                "SELECT * FROM torrent_ingest WHERE hash = ? AND status IN ('done', 'empty') "
+                "ORDER BY id DESC LIMIT 1",
+                (str(torrent_hash),),
+            )
+            return rows[0] if rows else None
+        except Exception:
+            return None
+
+    def clear_torrent_ingest(self) -> int:
+        """清空种子截取记录（只删记录，不动任何文件）。"""
+        try:
+            row = self.query_one("SELECT COUNT(*) AS c FROM torrent_ingest")
+            count = int(row["c"]) if row else 0
+            self.execute("DELETE FROM torrent_ingest")
+            return count
+        except Exception:
+            return 0

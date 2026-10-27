@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import apiModule from '../api/fontManager.js'
 
 const props = defineProps({
@@ -43,6 +43,14 @@ const DEFAULT_CONFIG = {
   subset_out_mode: 'copy',
   hdr_brightness: false,
   hdr_brightness_level: '',
+  // 种子字体收集：总开关 + 等待秒数 + 关键词/上限 + 收集去向
+  torrent_enabled: false,
+  torrent_delay_sec: 60,
+  torrent_wait_sec: 300,
+  torrent_keywords: 'font,fonts,字体',
+  torrent_max_file_mb: 2048,
+  torrent_max_files: 500,
+  torrent_to_pending: false,
 }
 
 // 数据源：宿主 initial-config（默认值+已存配置）；进入页面后立即用后端权威配置回填，
@@ -104,6 +112,15 @@ async function save() {
     // 字体大小上限规范化成整数 MB（越界/空值回落到默认 128，与后端 set_max_font_mb 一致）
     const mb = Number(config.value.max_font_mb)
     config.value.max_font_mb = Number.isFinite(mb) && mb > 0 ? Math.min(4096, Math.max(8, Math.round(mb))) : 128
+    // 种子收集数值项规范化（0 对延迟/等待是合法值，不能被默认值吞掉）
+    const normInt = (v, d, min, max) => {
+      const n = Number(v)
+      return Number.isFinite(n) ? Math.min(max, Math.max(min, Math.round(n))) : d
+    }
+    config.value.torrent_delay_sec = normInt(config.value.torrent_delay_sec, 60, 0, 3600)
+    config.value.torrent_wait_sec = normInt(config.value.torrent_wait_sec, 300, 0, 3600)
+    config.value.torrent_max_file_mb = normInt(config.value.torrent_max_file_mb, 2048, 1, 40960)
+    config.value.torrent_max_files = normInt(config.value.torrent_max_files, 500, 1, 5000)
     if (typeof props.api?.post === 'function') {
       await apiModule.post(props.api, '/config', { ...config.value })
       try {
@@ -122,6 +139,7 @@ async function save() {
       emit('save', { ...config.value })
       emit('notify', '配置已保存', 'success')
     }
+    loadTorrentStatus()
   } catch (e) {
     emit('notify', e.message || '保存失败')
   } finally {
@@ -129,7 +147,95 @@ async function save() {
   }
 }
 
-onMounted(loadConfig)
+onMounted(() => {
+  loadConfig()
+  loadTorrentStatus()
+})
+
+// ── 种子字体收集：状态 / 立即检查 / 基线 / 记录 ──────────────────────
+const torrentStatus = ref({ downloaders: [], tools: {}, baseline_text: '', running: 0 })
+const torrentRecords = ref([])
+const torrentBusy = ref(false)
+const torrentClearing = ref(false)
+
+const TORRENT_STATUS_TEXT = { done: '完成', empty: '无字体', failed: '失败', partial: '部分成功' }
+const recordStatusText = (s) => TORRENT_STATUS_TEXT[s] || s || ''
+const torrentToolText = computed(() => {
+  const t = torrentStatus.value.tools || {}
+  const parts = ['zip 内置']
+  parts.push(t.seven_zip ? '7z 可用' : '7z 未安装')
+  parts.push(t.rar ? 'rar 可用' : 'rar 未安装')
+  return parts.join(' · ')
+})
+const torrentDownloaderText = computed(() => {
+  const list = torrentStatus.value.downloaders || []
+  if (!list.length) return '未发现已启用的下载器'
+  return list.map((d) => `${d.name}（${d.type || '未知'}${d.available ? '' : '，不可用'}）`).join('、')
+})
+
+async function loadTorrentStatus() {
+  if (typeof props.api?.get !== 'function') return
+  try {
+    const st = await apiModule.get(props.api, '/torrent/status')
+    if (st && typeof st === 'object') {
+      torrentStatus.value = {
+        downloaders: st.downloaders || [],
+        tools: st.tools || {},
+        baseline_text: st.baseline_text || '',
+        running: st.running || 0,
+      }
+    }
+  } catch (e) {
+    // 状态读取失败不影响配置编辑
+  }
+  try {
+    const rec = await apiModule.get(props.api, '/torrent/records', { limit: 5 })
+    torrentRecords.value = (rec && rec.items) || []
+  } catch (e) {
+    torrentRecords.value = []
+  }
+}
+
+async function scanTorrents() {
+  if (torrentBusy.value) return
+  torrentBusy.value = true
+  try {
+    const res = await apiModule.post(props.api, '/torrent/scan', {})
+    const scanned = Number(res?.scanned || 0)
+    const queued = Number(res?.queued || 0)
+    const skipped = Number(res?.skipped || 0)
+    emit('notify', `扫描 ${scanned} 个已完成种子，入队 ${queued} 个（跳过历史 ${skipped} 个）`, 'success')
+    await loadTorrentStatus()
+  } catch (e) {
+    emit('notify', e.message || '检查下载器失败')
+  } finally {
+    torrentBusy.value = false
+  }
+}
+
+async function resetTorrentBaseline() {
+  try {
+    await apiModule.post(props.api, '/torrent/baseline', {})
+    emit('notify', '基线已重置为当前时间，之后完成的种子才会被收集', 'success')
+    await loadTorrentStatus()
+  } catch (e) {
+    emit('notify', e.message || '重置基线失败')
+  }
+}
+
+async function clearTorrentRecords() {
+  if (torrentClearing.value) return
+  torrentClearing.value = true
+  try {
+    const res = await apiModule.del(props.api, '/torrent/records')
+    emit('notify', `已清空 ${Number(res?.removed || 0)} 条记录（只删记录，不动字体库与下载目录）`, 'success')
+    await loadTorrentStatus()
+  } catch (e) {
+    emit('notify', e.message || '清空记录失败')
+  } finally {
+    torrentClearing.value = false
+  }
+}
 
 // 字体索引状态与「全部重建」已移至子集化页；HarfBuzz 依赖状态见仪表盘-依赖
 
@@ -369,6 +475,120 @@ watch(() => config.value.auto_subset, (v) => {
           </div>
           <v-switch v-model="config.notify_enabled" color="primary" hide-details></v-switch>
         </div>
+      </v-card-text>
+    </v-card>
+
+    <v-card class="zt-card-bg mt-4">
+      <v-card-title class="zt-card-title">
+        <v-icon start size="18">mdi-download-box-outline</v-icon>
+        种子字体收集
+      </v-card-title>
+      <v-card-text>
+        <div class="zt-switch-row">
+          <div class="flex-grow-1">
+            <div class="zt-switch-title">启用种子字体收集</div>
+            <div class="zt-switch-desc">只读下载器：从下载完成的种子里按文件清单截取字体（不扫描下载目录、不改下载优先级、不删任何源文件）。开启后自动包含「字幕入库前收集闸门 + 整理完成兜底 + 每 30 分钟兜底扫描」，要停就关这个总开关</div>
+          </div>
+          <v-switch v-model="config.torrent_enabled" color="primary" hide-details></v-switch>
+        </div>
+        <v-row dense class="mt-2">
+          <v-col cols="12" sm="6">
+            <v-text-field
+              v-model.number="config.torrent_delay_sec"
+              type="number" min="0" max="3600"
+              label="启动延迟（秒）"
+              density="compact" variant="outlined"
+              hint="整理完成后等这么久再截取，避开 MP 搬文件；字幕事件触发的收集不等这个延迟"
+              persistent-hint
+            ></v-text-field>
+          </v-col>
+          <v-col cols="12" sm="6">
+            <v-text-field
+              v-model.number="config.torrent_wait_sec"
+              type="number" min="0" max="3600"
+              label="子集前最长等待（秒）"
+              density="compact" variant="outlined"
+              hint="字幕入库子集化前最多等这么久；超时照常子集，缺字记入结果可重试"
+              persistent-hint
+            ></v-text-field>
+          </v-col>
+        </v-row>
+        <v-row dense class="mt-2">
+          <v-col cols="12" sm="6">
+            <v-text-field
+              v-model="config.torrent_keywords"
+              label="关键词（逗号分隔）"
+              density="compact" variant="outlined"
+              hint="只对压缩包生效；裸字体文件命中后缀即收，不看关键词"
+              persistent-hint
+            ></v-text-field>
+          </v-col>
+          <v-col cols="6" sm="3">
+            <v-text-field
+              v-model.number="config.torrent_max_file_mb"
+              type="number" min="1" max="40960"
+              label="单文件上限（MB）"
+              density="compact" variant="outlined"
+              hide-details
+            ></v-text-field>
+          </v-col>
+          <v-col cols="6" sm="3">
+            <v-text-field
+              v-model.number="config.torrent_max_files"
+              type="number" min="1" max="5000"
+              label="单种子最多文件"
+              density="compact" variant="outlined"
+              hide-details
+            ></v-text-field>
+          </v-col>
+        </v-row>
+        <div class="zt-switch-row mt-2">
+          <div class="flex-grow-1">
+            <div class="zt-switch-title">收集后进「待整理」</div>
+            <div class="zt-switch-desc">开：截取到的字体先进待整理等你确认；关：直接归档进字体库（默认，走哈希去重与厂商归档）</div>
+          </div>
+          <v-switch v-model="config.torrent_to_pending" color="primary" hide-details></v-switch>
+        </div>
+        <div class="zt-hint">
+          下载器：{{ torrentDownloaderText }}<br>
+          解压能力：{{ torrentToolText }}（7z/rar 需容器内安装 p7zip/unar，未装时只解 zip）<br>
+          基线：{{ torrentStatus.baseline_text || '未设置' }}（只处理基线之后完成的种子，历史不碰）<span v-if="torrentStatus.running"> · 正在收集 {{ torrentStatus.running }} 个</span>
+        </div>
+        <div class="d-flex flex-wrap ga-2 mt-2">
+          <v-btn
+            size="small" color="primary" variant="tonal"
+            :loading="torrentBusy" :disabled="!config.torrent_enabled"
+            @click="scanTorrents"
+          >
+            <v-icon start size="16">mdi-magnify-scan</v-icon>
+            立即检查下载器
+          </v-btn>
+          <v-btn size="small" variant="tonal" @click="resetTorrentBaseline">
+            <v-icon start size="16">mdi-clock-outline</v-icon>
+            重置基线为现在
+          </v-btn>
+          <v-btn
+            size="small" variant="text" color="error"
+            :loading="torrentClearing" :disabled="!torrentRecords.length"
+            @click="clearTorrentRecords"
+          >
+            <v-icon start size="16">mdi-delete-sweep</v-icon>
+            清空记录
+          </v-btn>
+        </div>
+        <div v-if="torrentRecords.length" class="mt-2">
+          <div class="zt-option-label mb-1">最近处理记录</div>
+          <div
+            v-for="r in torrentRecords"
+            :key="r.id"
+            class="zt-hint" style="line-height: 1.5"
+          >
+            {{ r.created_at }} · {{ recordStatusText(r.status) }} · {{ r.torrent_name || (r.hash || '').slice(0, 8) }} ·
+            新增 {{ r.added }} / 跳过 {{ r.skipped }}<span v-if="r.failed"> / 失败 {{ r.failed }}</span>
+            <span v-if="r.detail"> — {{ r.detail }}</span>
+          </div>
+        </div>
+        <div v-else class="zt-hint mt-2">暂无处理记录</div>
       </v-card-text>
     </v-card>
 

@@ -239,7 +239,6 @@ watch(() => props.refreshKey, () => {
           <v-card-text class="text-center pa-4">
             <div class="zt-stat-value text-primary">{{ stats.total }}</div>
             <div class="zt-stat-label">字体文件数</div>
-            <div class="zt-stat-sub">索引 {{ stats.faces || 0 }} 个 face</div>
           </v-card-text>
         </v-card>
       </v-col>
@@ -386,13 +385,6 @@ watch(() => props.refreshKey, () => {
   font-size: 13px;
   opacity: 0.75;
   margin-top: 4px;
-}
-/* 副标题：TTC/OTC 一个文件多 face，与文件数并列展示避免误读 */
-.zt-stat-sub {
-  font-size: 11px;
-  opacity: 0.55;
-  margin-top: 2px;
-  line-height: 1.3;
 }
 .zt-card-title {
   font-size: 15px;

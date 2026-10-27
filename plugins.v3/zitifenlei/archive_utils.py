@@ -1,5 +1,5 @@
 """
-上传压缩包安全解包（仅 .zip，标准库 zipfile，不引入额外依赖）。
+压缩包安全解包（.zip 用标准库；.7z/.rar 依赖系统解压工具，探测不到则明确拒绝）。
 
 约束（后端强校验，不依赖前端提示）：
 - 只解一层：嵌套压缩包不解，按不支持扩展名跳过
@@ -7,17 +7,27 @@
 - 拒绝加密成员、目录项、系统/隐藏垃圾文件（__MACOSX、.DS_Store 等）
 - 单成员大小、总大小、成员数量上限，防止 zip bomb / 磁盘打满
 - 按扩展名白名单只取需要处理的文件（字体 / .ass）
+- .7z/.rar：先解到隔离临时目录，再逐个校验（路径/后缀/体积）后复制到目标，
+  7z 可用时还会先 `l -slt` 预检成员数与总大小，避免解压后才发现超限
 """
 
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
+import uuid
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 ZIP_EXTENSIONS = (".zip",)
+EXTERNAL_ARCHIVE_EXTENSIONS = (".7z", ".rar")
+
+# 外部解压工具探测顺序：7z 同时能读 7z/rar（p7zip 自带 Rar 解码），优先
+_TOOL_NAMES = ("7z", "7za", "unar", "unrar", "bsdtar")
+_TOOL_CACHE: Optional[Dict[str, str]] = None
 
 # 默认上限：单包 2GB、单成员 1GB、最多 5000 个成员（字体库/字幕包足够）
 DEFAULT_MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
@@ -55,8 +65,49 @@ class ExtractResult:
         }
 
 
+def detect_extract_tools(refresh: bool = False) -> Dict[str, str]:
+    """探测系统可用的解压工具，返回 {工具名: 可执行文件路径}。
+
+    结果缓存，避免每次上传都扫 PATH；传 refresh=True 强制重扫（依赖检测接口用）。
+    """
+    global _TOOL_CACHE
+    if _TOOL_CACHE is not None and not refresh:
+        return dict(_TOOL_CACHE)
+    found: Dict[str, str] = {}
+    for name in _TOOL_NAMES:
+        exe = shutil.which(name)
+        if exe:
+            found[name] = exe
+    _TOOL_CACHE = found
+    return dict(found)
+
+
+def external_archive_extensions() -> Tuple[str, ...]:
+    """当前环境实际可解的外部压缩包后缀（工具缺失时返回空）。"""
+    tools = detect_extract_tools()
+    exts: List[str] = []
+    # 7z/7za 与 unar 都能读 .7z
+    if tools.get("7z") or tools.get("7za") or tools.get("unar"):
+        exts.append(".7z")
+    # .rar 需要 7z/7za、unar、unrar 或 bsdtar（libarchive）
+    if any(tools.get(k) for k in ("7z", "7za", "unar", "unrar", "bsdtar")):
+        exts.append(".rar")
+    return tuple(exts)
+
+
+def archive_extensions() -> Tuple[str, ...]:
+    """当前环境支持的压缩包后缀：zip 永远支持，其余按工具探测结果。"""
+    return ZIP_EXTENSIONS + external_archive_extensions()
+
+
 def is_archive(name: str) -> bool:
-    return Path(name or "").suffix.lower() in ZIP_EXTENSIONS
+    """是否为本环境支持的压缩包（zip 恒支持，7z/rar 取决于解压工具）。"""
+    return Path(name or "").suffix.lower() in archive_extensions()
+
+
+def is_any_archive(name: str) -> bool:
+    """是否压缩包后缀（不管当前环境能否解），用于生成「未装工具」的明确提示。"""
+    return Path(name or "").suffix.lower() in (ZIP_EXTENSIONS + EXTERNAL_ARCHIVE_EXTENSIONS)
 
 
 def safe_unlink(
@@ -183,7 +234,7 @@ def extract_zip(
                     result.skipped.append((member, "系统/隐藏垃圾文件"))
                     continue
                 if suffix not in exts:
-                    if suffix in ZIP_EXTENSIONS:
+                    if suffix in (ZIP_EXTENSIONS + EXTERNAL_ARCHIVE_EXTENSIONS):
                         result.skipped.append((member, "嵌套压缩包不解（只解一层）"))
                     else:
                         result.skipped.append((member, "不在允许的扩展名内"))
@@ -221,3 +272,216 @@ def extract_zip(
     except Exception as err:
         result.errors.append((zip_file.name, f"解压异常: {err}"))
     return result
+
+
+def _pick_external_tool(suffix: str) -> Tuple[str, str]:
+    """按后缀选一个可用的外部解压工具，返回 (工具名, 可执行路径)；没有则返回 ("", "")。"""
+    tools = detect_extract_tools()
+    order = ("7z", "7za", "unar") if suffix == ".7z" else ("7z", "7za", "unar", "unrar", "bsdtar")
+    for name in order:
+        exe = tools.get(name)
+        if exe:
+            return name, exe
+    return "", ""
+
+
+def _tool_cmd(tool: str, exe: str, archive: Path, outdir: Path) -> List[str]:
+    """不同解压工具的命令行（统一解到 outdir，不保留压缩包内顶层目录限制由调用方处理）。"""
+    if tool in ("7z", "7za"):
+        return [exe, "x", "-y", "-bd", f"-o{outdir.as_posix()}", archive.as_posix()]
+    if tool == "unar":
+        return [exe, "-q", "-f", "-o", outdir.as_posix(), "-D", archive.as_posix()]
+    if tool == "unrar":
+        return [exe, "x", "-o+", "-y", archive.as_posix(), outdir.as_posix() + "/"]
+    if tool == "bsdtar":
+        return [exe, "-xf", archive.as_posix(), "-C", outdir.as_posix()]
+    return []
+
+
+def _precheck_with_7z(
+    exe: str,
+    archive: Path,
+    max_members: int,
+    max_total_bytes: int,
+) -> Optional[str]:
+    """用 7z l -slt 预检成员数与解压后总大小；超限返回原因，正常返回 None。
+
+    预检失败（工具不支持该格式/输出不可解析）时返回 None，交给解压后的二次校验兜底。
+    """
+    try:
+        proc = subprocess.run(
+            [exe, "l", "-slt", archive.as_posix()],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    members: List[Tuple[str, int]] = []
+    name = ""
+    size = 0
+    is_dir = False
+    kind = ""
+
+    def _flush() -> None:
+        nonlocal name, size, is_dir, kind
+        if name and not is_dir and kind.lower() not in ("7z", "rar", "zip", "cab", "tar", "gzip"):
+            members.append((name, size))
+        name, size, is_dir, kind = "", 0, False, ""
+
+    for raw_line in proc.stdout.splitlines():
+        line = raw_line.strip()
+        if line.startswith("Path = "):
+            _flush()
+            name = line[7:].strip()
+        elif line.startswith("Size = "):
+            try:
+                size = int(line[7:].strip())
+            except Exception:
+                size = 0
+        elif line.startswith("Attributes = "):
+            attr = line[13:].strip()
+            if attr.startswith("D"):
+                is_dir = True
+        elif line.startswith("Type = "):
+            kind = line[7:].strip()
+    _flush()
+    if not members:
+        return None
+    if len(members) > max_members:
+        return f"压缩包成员过多（{len(members)} > {max_members}），已拒绝解压"
+    total = sum(size for _, size in members)
+    if total > max_total_bytes:
+        return f"解压后总大小超过上限（{total} > {max_total_bytes} 字节），已拒绝解压"
+    return None
+
+
+def extract_external(
+    archive_path: str | Path,
+    dest_dir: str | Path,
+    allowed_exts: Sequence[str],
+    max_members: int = DEFAULT_MAX_MEMBERS,
+    max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES,
+    max_member_bytes: int = DEFAULT_MAX_MEMBER_BYTES,
+) -> ExtractResult:
+    """用系统解压工具解 .7z/.rar：先解到隔离临时目录，再校验后复制到目标目录。"""
+    result = ExtractResult()
+    archive = Path(archive_path)
+    root = Path(dest_dir)
+    exts = tuple(ext.lower() for ext in allowed_exts)
+    suffix = archive.suffix.lower()
+    tool, exe = _pick_external_tool(suffix)
+    if not tool:
+        result.errors.append(
+            (archive.name, f"未检测到可解 {suffix} 的解压工具（需 7z/7za/unar/unrar/bsdtar）")
+        )
+        return result
+    if tool in ("7z", "7za"):
+        precheck = _precheck_with_7z(exe, archive, max_members, max_total_bytes)
+        if precheck:
+            result.errors.append((archive.name, precheck))
+            return result
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except Exception as err:
+        result.errors.append((archive.name, f"创建解压目录失败: {err}"))
+        return result
+    staging = root / f".extract_{uuid.uuid4().hex}"
+    try:
+        staging.mkdir(parents=True, exist_ok=True)
+    except Exception as err:
+        result.errors.append((archive.name, f"创建临时解压目录失败: {err}"))
+        return result
+    try:
+        try:
+            proc = subprocess.run(
+                _tool_cmd(tool, exe, archive, staging),
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+        except Exception as err:
+            result.errors.append((archive.name, f"调用 {tool} 解压失败: {err}"))
+            return result
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+            reason = detail[-1] if detail else f"退出码 {proc.returncode}"
+            result.errors.append((archive.name, f"{tool} 解压失败（加密或损坏？）: {reason[:200]}"))
+            return result
+
+        staged = [p for p in sorted(staging.rglob("*")) if p.is_file()]
+        if len(staged) > max_members:
+            result.errors.append((archive.name, f"压缩包成员过多（{len(staged)} > {max_members}），已拒绝"))
+            return result
+        for src_file in staged:
+            member = src_file.relative_to(staging).as_posix()
+            if _is_junk_member(member):
+                result.skipped.append((member, "系统/隐藏垃圾文件"))
+                continue
+            member_suffix = Path(member).suffix.lower()
+            if member_suffix not in exts:
+                if member_suffix in (ZIP_EXTENSIONS + EXTERNAL_ARCHIVE_EXTENSIONS):
+                    result.skipped.append((member, "嵌套压缩包不解（只解一层）"))
+                else:
+                    result.skipped.append((member, "不在允许的扩展名内"))
+                continue
+            try:
+                size = src_file.stat().st_size
+            except Exception:
+                size = 0
+            if size > max_member_bytes:
+                result.skipped.append((member, f"单文件超过上限 {max_member_bytes} 字节"))
+                continue
+            if result.total_bytes + size > max_total_bytes:
+                result.errors.append((archive.name, f"解压后总大小超过上限 {max_total_bytes} 字节，已停止"))
+                break
+            target = _safe_member_path(root, member)
+            if target is None:
+                result.errors.append((member, "非法路径（疑似越界），已拒绝"))
+                continue
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(src_file, target)
+                result.total_bytes += size
+                result.files.append(ExtractedFile(path=target, member=member, size=size))
+            except Exception as err:
+                result.errors.append((member, f"复制失败: {err}"))
+        return result
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def extract_archive(
+    archive_path: str | Path,
+    dest_dir: str | Path,
+    allowed_exts: Sequence[str],
+    max_members: int = DEFAULT_MAX_MEMBERS,
+    max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES,
+    max_member_bytes: int = DEFAULT_MAX_MEMBER_BYTES,
+) -> ExtractResult:
+    """按后缀分派解压：.zip 走标准库，.7z/.rar 走系统工具（缺工具时明确报错）。"""
+    suffix = Path(archive_path).suffix.lower()
+    if suffix in ZIP_EXTENSIONS:
+        return extract_zip(
+            archive_path,
+            dest_dir,
+            allowed_exts,
+            max_members=max_members,
+            max_total_bytes=max_total_bytes,
+            max_member_bytes=max_member_bytes,
+        )
+    if suffix in EXTERNAL_ARCHIVE_EXTENSIONS:
+        return extract_external(
+            archive_path,
+            dest_dir,
+            allowed_exts,
+            max_members=max_members,
+            max_total_bytes=max_total_bytes,
+            max_member_bytes=max_member_bytes,
+        )
+    result = ExtractResult()
+    result.errors.append((Path(archive_path).name, f"不支持的压缩包格式：{suffix or '（无后缀）'}"))
+    return result
+

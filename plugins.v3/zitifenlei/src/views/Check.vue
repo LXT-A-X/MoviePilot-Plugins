@@ -331,7 +331,7 @@ onUnmounted(() => {
         variant="tonal"
         :disabled="!enabled"
         :loading="uploading"
-        title="上传 ASS 字幕（支持 .ass 与 .zip 压缩包）"
+        title="上传 ASS 字幕（支持 .ass 与 .zip/.7z/.rar 压缩包）"
         @click="uploadRef?.click()"
       >
         <v-icon start size="18">mdi-upload</v-icon>
@@ -340,7 +340,7 @@ onUnmounted(() => {
       <input
         ref="uploadRef"
         type="file"
-        accept=".ass,.ASS,.zip"
+        accept=".ass,.ASS,.zip,.7z,.rar"
         multiple
         style="display: none"
         @change="handleUpload"

@@ -730,7 +730,7 @@ onUnmounted(() => {
         color="primary"
         :disabled="!enabled"
         :loading="uploading"
-        title="上传字体（支持 ttf/otf/ttc/otc/woff/woff2 与 .zip 压缩包）"
+        title="上传字体（支持 ttf/otf/ttc/otc/woff/woff2 与 .zip/.7z/.rar 压缩包）"
         @click="uploadRef?.click()"
       >
         <v-icon start size="18">mdi-upload</v-icon>
@@ -739,7 +739,7 @@ onUnmounted(() => {
       <input
         ref="uploadRef"
         type="file"
-        accept=".ttf,.otf,.ttc,.otc,.woff,.woff2,.zip"
+        accept=".ttf,.otf,.ttc,.otc,.woff,.woff2,.zip,.7z,.rar"
         multiple
         style="display: none"
         @change="handleUpload"

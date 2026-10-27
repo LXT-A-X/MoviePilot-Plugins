@@ -312,7 +312,7 @@ function stopPolling() {
             variant="tonal"
             :disabled="!enabled || uploading || classifying"
             :loading="uploading"
-            title="上传字体（支持 ttf/otf/ttc/otc/woff/woff2 与 .zip 压缩包）"
+            title="上传字体（支持 ttf/otf/ttc/otc/woff/woff2 与 .zip/.7z/.rar 压缩包）"
             @click="uploadRef?.click()"
           >
             <v-icon start size="18">mdi-upload</v-icon>
@@ -321,7 +321,7 @@ function stopPolling() {
           <input
             ref="uploadRef"
             type="file"
-            accept=".ttf,.otf,.ttc,.otc,.woff,.woff2,.zip"
+            accept=".ttf,.otf,.ttc,.otc,.woff,.woff2,.zip,.7z,.rar"
             multiple
             style="display: none"
             @change="handleUpload"
@@ -450,7 +450,7 @@ function stopPolling() {
     </v-card>
 
     <div class="zt-tip mt-3 text-body-2">
-      提示：上传字体（支持 .zip）→ 校验通过后点「归类」入库 → 自动重检受影响字幕 → 回到「子集化」页重新运行。
+      提示：上传字体（支持 .zip/.7z/.rar）→ 校验通过后点「归类」入库 → 自动重检受影响字幕 → 回到「子集化」页重新运行。
     </div>
 
     <!-- 改派：给已上传字体人工指定缺失目标 -->
