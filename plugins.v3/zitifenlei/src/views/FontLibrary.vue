@@ -748,6 +748,49 @@ onUnmounted(() => {
         <v-icon start size="18">mdi-magnify-scan</v-icon>
         全量检查
       </v-btn>
+      <v-divider vertical class="mx-1"></v-divider>
+      <!-- 数据库管理：常见维护操作，直接放在顶栏（清空仍为红色 + 二次确认） -->
+      <v-btn
+        variant="tonal"
+        color="primary"
+        size="small"
+        :disabled="!enabled"
+        :loading="dbBusy"
+        title="导出数据库（字体库/检查/子集化记录与设置）"
+        @click="exportDatabase"
+      >
+        <v-icon start size="16">mdi-database-export-outline</v-icon>
+        导出数据库
+      </v-btn>
+      <v-btn
+        variant="tonal"
+        size="small"
+        :disabled="!enabled"
+        :loading="dbBusy"
+        title="导入数据库（覆盖当前记录与设置）"
+        @click="dbImportRef?.click()"
+      >
+        <v-icon start size="16">mdi-database-import-outline</v-icon>
+        导入数据库
+      </v-btn>
+      <input
+        ref="dbImportRef"
+        type="file"
+        accept=".json,application/json"
+        style="display: none"
+        @change="handleDbImport"
+      />
+      <v-btn
+        variant="tonal"
+        color="error"
+        size="small"
+        :disabled="!enabled"
+        title="清空数据库（字体库/检查/子集化记录，二次确认）"
+        @click="clearDialog = true"
+      >
+        <v-icon start size="16">mdi-database-remove-outline</v-icon>
+        清空数据库
+      </v-btn>
       <v-spacer></v-spacer>
       <span class="zt-total text-body-2">共 {{ allFonts.length }} 个字体</span>
     </div>
@@ -1023,57 +1066,6 @@ onUnmounted(() => {
       </v-card-text>
     </v-card>
 
-    <!-- 数据库管理区块：危险操作收拢于此，远离顶部关闭按钮 -->
-    <v-card class="zt-card-bg mt-4 zt-db-block">
-      <v-card-title class="zt-card-title">
-        <v-icon start size="18">mdi-database-cog-outline</v-icon>
-        数据库管理
-      </v-card-title>
-      <v-card-text class="d-flex align-center flex-wrap pa-3">
-        <v-btn
-          variant="tonal"
-          color="primary"
-          size="small"
-          class="mr-2 mb-2"
-          :disabled="!enabled"
-          :loading="dbBusy"
-          @click="exportDatabase"
-        >
-          <v-icon start size="18">mdi-database-export-outline</v-icon>
-          导出数据库
-        </v-btn>
-        <v-btn
-          variant="tonal"
-          size="small"
-          class="mr-2 mb-2"
-          :disabled="!enabled"
-          :loading="dbBusy"
-          @click="dbImportRef?.click()"
-        >
-          <v-icon start size="18">mdi-database-import-outline</v-icon>
-          导入数据库
-        </v-btn>
-        <input
-          ref="dbImportRef"
-          type="file"
-          accept=".json,application/json"
-          style="display: none"
-          @change="handleDbImport"
-        />
-        <v-btn
-          variant="tonal"
-          color="error"
-          size="small"
-          class="mb-2"
-          :disabled="!enabled"
-          @click="clearDialog = true"
-        >
-          <v-icon start size="18">mdi-database-remove-outline</v-icon>
-          清空数据库
-        </v-btn>
-      </v-card-text>
-    </v-card>
-
     <!-- 删除字体确认对话框 -->
     <v-dialog v-model="deleteDialog" max-width="420">
       <v-card class="zt-card-bg">
@@ -1292,12 +1284,5 @@ onUnmounted(() => {
   border-radius: 4px;
   background: transparent;
   cursor: pointer;
-}
-/* 数据库管理区块：与顶部拉开视觉距离，避免误触 */
-.zt-db-block {
-  border: 1px dashed rgba(255, 255, 255, 0.12);
-}
-.zt-db-block :deep(.v-card-title) {
-  padding-bottom: 4px;
 }
 </style>

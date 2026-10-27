@@ -136,123 +136,123 @@
   text-align: center;
 }
 
-.zt-topbar[data-v-6f1620ab] {
+.zt-topbar[data-v-7b3b9d72] {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 16px;
 }
-.zt-list-card[data-v-6f1620ab],
-.zt-detail-card[data-v-6f1620ab] {
+.zt-list-card[data-v-7b3b9d72],
+.zt-detail-card[data-v-7b3b9d72] {
   height: 640px;
   overflow: auto;
 }
-.zt-list-body[data-v-6f1620ab] {
+.zt-list-body[data-v-7b3b9d72] {
   min-height: 60px;
 }
-.zt-total[data-v-6f1620ab] {
+.zt-total[data-v-7b3b9d72] {
   opacity: 0.75;
 }
-.zt-dir-item[data-v-6f1620ab] {
+.zt-dir-item[data-v-7b3b9d72] {
   cursor: pointer;
 }
-.zt-dir-name[data-v-6f1620ab] {
+.zt-dir-name[data-v-7b3b9d72] {
   font-size: 13px;
   font-weight: 600;
 }
-.zt-dir-count[data-v-6f1620ab] {
+.zt-dir-count[data-v-7b3b9d72] {
   font-size: 12px;
   opacity: 0.6;
 }
-.zt-font-item[data-v-6f1620ab] {
+.zt-font-item[data-v-7b3b9d72] {
   cursor: pointer;
 }
-.zt-font-name[data-v-6f1620ab] {
+.zt-font-name[data-v-7b3b9d72] {
   font-size: 14px;
   font-weight: 500;
 }
-.zt-font-meta[data-v-6f1620ab] {
+.zt-font-meta[data-v-7b3b9d72] {
   font-size: 12px;
   opacity: 0.7;
 }
-.zt-fav-icon[data-v-6f1620ab] {
+.zt-fav-icon[data-v-7b3b9d72] {
   cursor: pointer;
 }
-.zt-card-title[data-v-6f1620ab] {
+.zt-card-title[data-v-7b3b9d72] {
   font-size: 15px;
   font-weight: 600;
 }
-.zt-empty[data-v-6f1620ab] {
+.zt-empty[data-v-7b3b9d72] {
   font-size: 13px;
   opacity: 0.6;
   text-align: center;
   cursor: default;
 }
-.zt-detail-title[data-v-6f1620ab] {
+.zt-detail-title[data-v-7b3b9d72] {
   font-size: 17px;
   font-weight: 600;
 }
-.zt-detail-meta[data-v-6f1620ab] {
+.zt-detail-meta[data-v-7b3b9d72] {
   font-size: 12px;
   opacity: 0.7;
   margin-top: 2px;
 }
-.zt-meta-grid[data-v-6f1620ab] {
+.zt-meta-grid[data-v-7b3b9d72] {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 12px 16px;
 }
-.zt-meta-label[data-v-6f1620ab] {
+.zt-meta-label[data-v-7b3b9d72] {
   font-size: 12px;
   opacity: 0.6;
 }
-.zt-meta-value[data-v-6f1620ab] {
+.zt-meta-value[data-v-7b3b9d72] {
   font-size: 13px;
   font-weight: 500;
   word-break: break-all;
 }
-.zt-section-label[data-v-6f1620ab] {
+.zt-section-label[data-v-7b3b9d72] {
   font-size: 14px;
   font-weight: 600;
 }
-.zt-preview-sample[data-v-6f1620ab] {
+.zt-preview-sample[data-v-7b3b9d72] {
   padding: 16px;
   border-radius: 6px;
   background: rgba(255, 255, 255, 0.05);
   text-align: center;
   min-height: 120px;
 }
-.zt-preview-loading[data-v-6f1620ab] {
+.zt-preview-loading[data-v-7b3b9d72] {
   position: absolute;
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
 }
-.zt-preview-name[data-v-6f1620ab] {
+.zt-preview-name[data-v-7b3b9d72] {
   font-size: 16px;
   font-weight: 600;
 }
-.zt-preview-family[data-v-6f1620ab] {
+.zt-preview-family[data-v-7b3b9d72] {
   font-size: 13px;
   opacity: 0.75;
 }
-.zt-preview-controls[data-v-6f1620ab] {
+.zt-preview-controls[data-v-7b3b9d72] {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
 }
-.zt-preview-control-label[data-v-6f1620ab] {
+.zt-preview-control-label[data-v-7b3b9d72] {
   font-size: 12px;
   opacity: 0.75;
 }
-.zt-preview-slider[data-v-6f1620ab] {
+.zt-preview-slider[data-v-7b3b9d72] {
   flex: 1 1 120px;
   min-width: 100px;
   max-width: 200px;
 }
-.zt-color-input[data-v-6f1620ab] {
+.zt-color-input[data-v-7b3b9d72] {
   width: 40px;
   height: 28px;
   padding: 0;
@@ -261,90 +261,148 @@
   background: transparent;
   cursor: pointer;
 }
-/* 数据库管理区块：与顶部拉开视觉距离，避免误触 */
-.zt-db-block[data-v-6f1620ab] {
-  border: 1px dashed rgba(255, 255, 255, 0.12);
-}
 
-.zt-search[data-v-5c26207c] {
+.zt-search[data-v-4bb9353c] {
   max-width: 360px;
 }
-.zt-total[data-v-5c26207c] {
+.zt-total[data-v-4bb9353c] {
   opacity: 0.75;
 }
-.zt-tip[data-v-5c26207c] {
+.zt-tip[data-v-4bb9353c] {
   opacity: 0.6;
 }
-.zt-match-source[data-v-5c26207c] {
+.zt-match-source[data-v-4bb9353c] {
   font-size: 12px;
   opacity: 0.65;
 }
-.zt-list-card[data-v-5c26207c],
-.zt-detail-card[data-v-5c26207c] {
+.zt-list-card[data-v-4bb9353c],
+.zt-detail-card[data-v-4bb9353c] {
   height: 640px;
   overflow: auto;
 }
-.zt-record-name[data-v-5c26207c] {
+/* ===== 分组抽屉：组头按状态着色，点击折叠/展开 ===== */
+.zt-group[data-v-4bb9353c] {
+  --zt-group-color: 158, 158, 158;
+  margin-bottom: 8px;
+  border: 1px solid rgba(var(--zt-group-color), 0.35);
+  border-left: 3px solid rgba(var(--zt-group-color), 0.9);
+  border-radius: 8px;
+  background: rgba(var(--zt-group-color), 0.06);
+  overflow: hidden;
+}
+.zt-group-success[data-v-4bb9353c] { --zt-group-color: 76, 175, 80;
+}
+.zt-group-warning[data-v-4bb9353c] { --zt-group-color: 255, 152, 0;
+}
+.zt-group-error[data-v-4bb9353c]   { --zt-group-color: 244, 67, 54;
+}
+.zt-group-grey[data-v-4bb9353c]    { --zt-group-color: 158, 158, 158;
+}
+.zt-group-head[data-v-4bb9353c] {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  cursor: pointer;
+  user-select: none;
+}
+.zt-group-head[data-v-4bb9353c]:hover {
+  background: rgba(var(--zt-group-color), 0.1);
+}
+.zt-group-name[data-v-4bb9353c] {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.zt-group-count[data-v-4bb9353c] {
+  flex: 0 0 auto;
+  font-size: 12px;
+  opacity: 0.65;
+}
+.zt-group-stats[data-v-4bb9353c],
+.zt-group-actions[data-v-4bb9353c] {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+.zt-group-body[data-v-4bb9353c] {
+  border-top: 1px dashed rgba(var(--zt-group-color), 0.3);
+}
+/* 左栏只有半屏宽：窄屏时组内状态计数收起，避免组头挤成两行 */
+@media (max-width: 959.95px) {
+.zt-group-stats[data-v-4bb9353c] { display: none;
+}
+}
+.zt-loading-more[data-v-4bb9353c] {
+  font-size: 12px;
+  opacity: 0.7;
+}
+.zt-record-name[data-v-4bb9353c] {
   font-weight: 500;
 }
-.zt-record-meta[data-v-5c26207c] {
+.zt-record-meta[data-v-4bb9353c] {
   font-size: 11px;
   opacity: 0.7;
 }
-.zt-record-item[data-v-5c26207c] {
+.zt-record-item[data-v-4bb9353c] {
   cursor: pointer;
 }
-.zt-detail-loading[data-v-5c26207c] {
+.zt-detail-loading[data-v-4bb9353c] {
   position: absolute;
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
 }
-.zt-detail-title[data-v-5c26207c] {
+.zt-detail-title[data-v-4bb9353c] {
   font-weight: 600;
 }
-.zt-detail-meta[data-v-5c26207c] {
+.zt-detail-meta[data-v-4bb9353c] {
   opacity: 0.75;
 }
-.zt-section-label[data-v-5c26207c] {
+.zt-section-label[data-v-4bb9353c] {
   font-size: 13px;
   font-weight: 600;
 }
-.zt-empty[data-v-5c26207c],
-.zt-empty2[data-v-5c26207c] {
+.zt-empty[data-v-4bb9353c],
+.zt-empty2[data-v-4bb9353c] {
   font-size: 13px;
   opacity: 0.6;
   text-align: center;
 }
-.zt-search-icon[data-v-5c26207c] {
+.zt-search-icon[data-v-4bb9353c] {
   cursor: pointer;
 }
-.zt-clear-row[data-v-5c26207c] {
+.zt-clear-row[data-v-4bb9353c] {
   border-top: 1px solid rgba(255, 255, 255, 0.08);
 }
 /* 全部字体：字体库已收录 → 绿光 */
-.zt-in-lib[data-v-5c26207c] {
+.zt-in-lib[data-v-4bb9353c] {
   color: #81c784 !important;
   border-color: rgba(129, 199, 132, 0.55) !important;
   box-shadow: 0 0 8px rgba(76, 175, 80, 0.45) !important;
 }
-.zt-card-title[data-v-5c26207c] {
+.zt-card-title[data-v-4bb9353c] {
   font-size: 15px;
   font-weight: 600;
 }
 /* 缺失字体逐字符明细：名称 + 缺失字符行 */
-.zt-missing-chip[data-v-5c26207c] {
+.zt-missing-chip[data-v-4bb9353c] {
   height: auto !important;
   padding-top: 4px !important;
   padding-bottom: 4px !important;
 }
-.zt-missing-chip-body[data-v-5c26207c] {
+.zt-missing-chip-body[data-v-4bb9353c] {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   line-height: 1.35;
 }
-.zt-missing-chars[data-v-5c26207c] {
+.zt-missing-chars[data-v-4bb9353c] {
   font-size: 11px;
   font-family: monospace;
   opacity: 0.8;

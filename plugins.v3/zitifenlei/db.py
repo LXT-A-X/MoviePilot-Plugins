@@ -77,7 +77,8 @@ CREATE TABLE IF NOT EXISTS ass_files (
     missing_count INTEGER DEFAULT 0,
     missing_fonts TEXT DEFAULT '[]',
     all_fonts TEXT DEFAULT '[]',
-    file_path TEXT DEFAULT ''
+    file_path TEXT DEFAULT '',
+    batch TEXT DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS logs (
@@ -234,6 +235,12 @@ class FontDB:
                 # 兼容旧库：ass_files 补充 file_path 列（存储上传字幕的临时文件路径）
                 try:
                     self._conn.execute("ALTER TABLE ass_files ADD COLUMN file_path TEXT DEFAULT ''")
+                    self._conn.commit()
+                except Exception:
+                    pass
+                # 兼容旧库：ass_files 补充 batch 列（检查页按压缩包/上传批次分组抽屉）
+                try:
+                    self._conn.execute("ALTER TABLE ass_files ADD COLUMN batch TEXT DEFAULT ''")
                     self._conn.commit()
                 except Exception:
                     pass
@@ -732,10 +739,11 @@ class FontDB:
         missing_fonts: List[str],
         all_fonts: List[str],
         file_path: str = "",
+        batch: str = "",
     ) -> None:
         self.execute(
-            """INSERT INTO ass_files (file_name, source, status, check_time, missing_count, missing_fonts, all_fonts, file_path)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO ass_files (file_name, source, status, check_time, missing_count, missing_fonts, all_fonts, file_path, batch)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 file_name,
                 source,
@@ -745,6 +753,7 @@ class FontDB:
                 json.dumps(missing_fonts, ensure_ascii=False),
                 json.dumps(all_fonts, ensure_ascii=False),
                 file_path,
+                batch,
             ),
         )
 
@@ -784,7 +793,7 @@ class FontDB:
         total = self.query_one(f"SELECT COUNT(*) AS c FROM ass_files {where_sql}", tuple(params))["c"]
         offset = (max(int(page), 1) - 1) * int(limit)
         rows = self.query(
-            f"SELECT id, file_name, source, status, check_time, missing_count FROM ass_files {where_sql} ORDER BY id DESC LIMIT ? OFFSET ?",
+            f"SELECT id, file_name, source, status, check_time, missing_count, file_path, batch FROM ass_files {where_sql} ORDER BY id DESC LIMIT ? OFFSET ?",
             tuple(params) + (int(limit), offset),
         )
         return {"list": rows, "total": total}

@@ -425,7 +425,7 @@ class Zitifenlei(_PluginBase):
     plugin_name = "字体分类管家"
     plugin_desc = "字体归档整理与 ASS 字幕字体检查插件：扫描/上传字体到字体库，检查字幕缺失字体。"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/zitifenlei.png"
-    plugin_version = "3.1.4"
+    plugin_version = "3.1.5"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "zitifenlei_"
@@ -5805,6 +5805,11 @@ class Zitifenlei(_PluginBase):
         except Exception:
             pass
         try:
+            # limit<=0：拉取当前搜索下的全部记录（检查页左侧按压缩包/批次分组需要全量数据）
+            try:
+                limit = 100000 if int(limit) <= 0 else int(limit)
+            except Exception:
+                limit = 20
             data = self._db.query_ass(keyword=(search or "").strip(), page=page, limit=limit)
             families, match_source = self._lib_font_keys()
             # 字形快照按 ass_id 分组（一次查询），列表状态与缺失页同口径：按当前字体库实时扣除
@@ -5884,6 +5889,14 @@ class Zitifenlei(_PluginBase):
             pass
         if not upload_files:
             return self._err("请选择要上传的 ASS 文件")
+        # 本次上传批次名：前端一次选择会给所有分片带同一个 batch（单文件上传归一组）；
+        # 压缩包内的文件由 _receive_uploads 的 from_archive 单独覆盖，一个包一组
+        try:
+            batch_hint = str(form.get("batch") or "").strip()[:80]
+        except Exception:
+            batch_hint = ""
+        if not batch_hint:
+            batch_hint = f"手动上传 {datetime.now().strftime('%m-%d %H:%M')}"
         files, notes = await self._receive_uploads(upload_files, ASS_EXTENSIONS, prefix="ass")
         done: List[Dict[str, Any]] = []
         for entry in files:
@@ -5891,6 +5904,7 @@ class Zitifenlei(_PluginBase):
             tmp_path = Path(entry["path"])
             if not tmp_path.is_file():
                 continue
+            batch = str(entry.get("from_archive") or "").strip()[:80] or batch_hint
             # 双轨制：手动上传不自动检查，仅登记待检查记录
             self._db.add_ass(
                 file_name=safe_name,
@@ -5899,6 +5913,7 @@ class Zitifenlei(_PluginBase):
                 missing_fonts=[],
                 all_fonts=[],
                 file_path=str(tmp_path),
+                batch=batch,
             )
             row = self._db.query_one(
                 "SELECT id FROM ass_files WHERE file_path = ? ORDER BY id DESC LIMIT 1",
@@ -5911,6 +5926,7 @@ class Zitifenlei(_PluginBase):
                     "file_name": safe_name,
                     "status": "pending",
                     "missing_count": 0,
+                    "batch": batch,
                 }
             )
         if not done:
@@ -5922,6 +5938,53 @@ class Zitifenlei(_PluginBase):
             {"count": len(done), "items": done, "notes": notes},
             f"已上传 {len(done)} 个字幕，请在列表中手动检查",
         )
+
+    async def _check_ass_by_id(self, ass_id: int, families: Optional[set] = None) -> Dict[str, Any]:
+        """按记录 id 执行一次检查：读盘 + 字形解析 + 与字体库比对并写回结果。
+
+        单条检查与批量检查共用；记录/文件不可用时抛 ValueError，其余异常按检查失败上抛。
+        families 可由批量调用方预先取好，避免逐条重查整张字体别名表。
+        """
+        row = self._db.get_ass(int(ass_id))
+        if not row:
+            raise ValueError("记录不存在")
+        src_path = row.get("file_path") or ""
+        if not src_path or not Path(src_path).is_file():
+            raise ValueError("字幕文件不存在，可能已被清理，请重新上传")
+        # 读盘 + 字形解析 + 索引比对都是同步重活：放线程池，别占住事件循环
+        raw = await asyncio.to_thread(Path(src_path).read_bytes)
+        # 走统一检查口径（字形级优先，索引不可用时回退名称级）
+        result = await asyncio.to_thread(
+            self._check_ass_content,
+            row.get("file_name") or Path(src_path).name,
+            raw,
+            row.get("source") or "manual",
+            src_path,
+        )
+        # 记录 id 可能因并发新增而变化，以本次检查结果为准
+        new_id = result.get("id") or int(ass_id)
+        self._db.add_log(
+            f"手动检查: {row['file_name']} → {result.get('status_text')}",
+            "warning" if result.get("missing_count") else "info",
+        )
+        self._invalidate_missing_agg()
+        if families is None:
+            families, _fmatch = await asyncio.to_thread(self._lib_font_keys)
+        return {
+            "id": new_id,
+            "file_name": row["file_name"],
+            "status": result.get("status"),
+            "status_text": result.get("status_text"),
+            "missing_count": result.get("missing_count", 0),
+            "all_fonts": [
+                {"name": f, "in_lib": normalize_font_key(f) in families}
+                for f in (result.get("all_fonts") or [])
+            ],
+            "missing_fonts": result.get("missing_fonts") or [],
+            "missing_details": result.get("missing_details") or [],
+            "total_missing_chars": result.get("total_missing_chars", 0),
+            "subsetted": result.get("subsetted", False),
+        }
 
     async def api_ass_check(self, request: Request) -> Dict[str, Any]:
         """手动检查：按记录 id 重新解析字幕文件并与字体库对比"""
@@ -5937,50 +6000,57 @@ class Zitifenlei(_PluginBase):
         if not ass_id:
             return self._err("缺少记录ID")
         try:
-            row = self._db.get_ass(int(ass_id))
-            if not row:
-                return self._err("记录不存在")
-            src_path = row.get("file_path") or ""
-            if not src_path or not Path(src_path).is_file():
-                return self._err("字幕文件不存在，可能已被清理，请重新上传")
-            # 读盘 + 字形解析 + 索引比对都是同步重活：放线程池，别占住事件循环
-            raw = await asyncio.to_thread(Path(src_path).read_bytes)
-            # 走统一检查口径（字形级优先，索引不可用时回退名称级）
-            result = await asyncio.to_thread(
-                self._check_ass_content,
-                row.get("file_name") or Path(src_path).name,
-                raw,
-                row.get("source") or "manual",
-                src_path,
-            )
-            # 记录 id 可能因并发新增而变化，以本次检查结果为准
-            ass_id = result.get("id") or int(ass_id)
-            self._db.add_log(
-                f"手动检查: {row['file_name']} → {result.get('status_text')}",
-                "warning" if result.get("missing_count") else "info",
-            )
-            self._invalidate_missing_agg()
-            families, _fmatch = await asyncio.to_thread(self._lib_font_keys)
-            return self._ok(
-                {
-                    "id": ass_id,
-                    "file_name": row["file_name"],
-                    "status": result.get("status"),
-                    "status_text": result.get("status_text"),
-                    "missing_count": result.get("missing_count", 0),
-                    "all_fonts": [
-                        {"name": f, "in_lib": normalize_font_key(f) in families}
-                        for f in (result.get("all_fonts") or [])
-                    ],
-                    "missing_fonts": result.get("missing_fonts") or [],
-                    "missing_details": result.get("missing_details") or [],
-                    "total_missing_chars": result.get("total_missing_chars", 0),
-                    "subsetted": result.get("subsetted", False),
-                },
-                "检查完成",
-            )
+            return self._ok(await self._check_ass_by_id(int(ass_id)), "检查完成")
+        except ValueError as err:
+            return self._err(str(err))
         except Exception as err:
             return self._err(f"检查失败: {err}")
+
+    async def api_ass_check_batch(self, request: Request) -> Dict[str, Any]:
+        """批量检查：按记录 id 列表逐条检查（组头「本组全部检查」/ 顶部「检查」用）。
+
+        一次最多 500 条；逐条串行执行，避免同时解析大量字幕把 CPU 打满。
+        """
+        if not self._enabled:
+            return self._err("插件已停用，请先在设置中启用")
+        if not self._db_ok():
+            return self._err("数据库未初始化")
+        try:
+            body = await request.json() if hasattr(request, "json") else {}
+        except Exception:
+            body = {}
+        ids: List[int] = []
+        for value in (body.get("ids") or [])[:500]:
+            try:
+                iv = int(value)
+            except Exception:
+                continue
+            if iv > 0:
+                ids.append(iv)
+        if not ids:
+            return self._err("没有需要检查的记录")
+        ok = 0
+        missing = 0
+        failed = 0
+        # 字体库键集整批只取一次（逐条取会反复扫整张 font_aliases）
+        families, _fmatch = await asyncio.to_thread(self._lib_font_keys)
+        for i in ids:
+            try:
+                result = await self._check_ass_by_id(i, families)
+                ok += 1
+                if int(result.get("missing_count") or 0) > 0:
+                    missing += 1
+            except Exception:
+                failed += 1
+        message = f"检查完成：{ok}/{len(ids)} 条"
+        if missing:
+            message += f"，{missing} 条缺字体"
+        if failed:
+            message += f"，{failed} 条失败"
+        return self._ok(
+            {"total": len(ids), "ok": ok, "missing": missing, "failed": failed},
+            message,
+        )
 
     def api_ass_detail(self, id: int = 0) -> Dict[str, Any]:
         """ASS 检查详情"""
@@ -8111,6 +8181,7 @@ class Zitifenlei(_PluginBase):
             {"path": "/ass/clear_all", "endpoint": self.api_ass_clear, "methods": ["DELETE"], "auth": "bear", "summary": "清空 ASS 检查记录"},
             {"path": "/ass/upload", "endpoint": self.api_ass_upload, "methods": ["POST"], "auth": "bear", "summary": "上传 ASS 字幕（仅登记，不检查）"},
             {"path": "/ass/check", "endpoint": self.api_ass_check, "methods": ["POST"], "auth": "bear", "summary": "手动检查 ASS 字幕字体"},
+            {"path": "/ass/check_batch", "endpoint": self.api_ass_check_batch, "methods": ["POST"], "auth": "bear", "summary": "批量检查 ASS 字幕字体"},
             {"path": "/ass/scan_all", "endpoint": self.api_ass_scan_all, "methods": ["POST"], "auth": "bear", "summary": "全量扫描字幕目录 ASS 并检查"},
             {"path": "/ass/missing/list", "endpoint": self.api_ass_missing_list, "methods": ["GET"], "auth": "bear", "summary": "聚合缺失字体列表"},
             {"path": "/ass/missing/upload", "endpoint": self.api_ass_missing_upload, "methods": ["POST"], "auth": "bear", "summary": "上传缺失字体（校验匹配）"},
