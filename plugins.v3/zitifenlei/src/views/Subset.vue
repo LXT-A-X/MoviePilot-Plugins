@@ -437,13 +437,20 @@ async function deleteRecord(id) {
   }
 }
 
+const clearConfirm = ref(false)
+const clearingRecords = ref(false)
 async function clearRecords() {
+  if (clearingRecords.value) return
+  clearingRecords.value = true
+  clearConfirm.value = false
   try {
     await apiModule.del(props.api, '/subset/clear')
     await loadRecords(true, true)
     emit('notify', '已清空子集化记录', 'success')
   } catch (e) {
     emit('notify', e.message || '清空失败')
+  } finally {
+    clearingRecords.value = false
   }
 }
 
@@ -640,6 +647,19 @@ function stopPolling() {
               <v-icon start size="15">mdi-download-multiple</v-icon>
               全部下载
             </v-btn>
+            <v-btn
+              class="zt-title-action"
+              size="small"
+              variant="tonal"
+              color="error"
+              :disabled="!enabled || clearingRecords || downloadAllBusy || !!downloadingId || !records.length"
+              :loading="clearingRecords"
+              title="清空全部子集化记录（监控/上传来历的成品一并删除；MP 入库只删记录，不动媒体库原字幕）"
+              @click="clearConfirm = true"
+            >
+              <v-icon start size="15">mdi-delete-sweep</v-icon>
+              全部清空
+            </v-btn>
           </v-card-title>
           <v-divider></v-divider>
           <!-- 筛选栏：状态下拉 + 文件名搜索 -->
@@ -724,6 +744,22 @@ function stopPolling() {
         </v-card>
       </v-col>
     </v-row>
+
+    <!-- 全部清空确认：记录与可删产物一起清理，入库记录只删记录 -->
+    <v-dialog v-model="clearConfirm" max-width="440">
+      <v-card>
+        <v-card-title class="text-h6">清空全部子集化记录？</v-card-title>
+        <v-card-text>
+          将删除全部子集化结果记录，并同步删除监控/上传来历的成品文件（含输出目录中对应文件与空的剧名文件夹）。
+          MP 入库记录只删记录，不动媒体库原字幕；「待处理」列表不受影响。
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer></v-spacer>
+          <v-btn variant="text" @click="clearConfirm = false">取消</v-btn>
+          <v-btn color="error" variant="tonal" :loading="clearingRecords" @click="clearRecords">全部清空</v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
 
     <!-- 全部重建确认：日常归档/入库是增量/减量，只有这里清空索引逐文件重解析 -->
     <v-dialog v-model="rebuildConfirm" max-width="440">

@@ -491,7 +491,7 @@ onUnmounted(() => {
             </v-list>
             <!-- 清空全部：放在列表底部，远离右上角关闭按钮 -->
             <div v-if="records.length" class="zt-clear-row pa-3 d-flex justify-end">
-              <v-btn color="error" variant="tonal" size="small" :disabled="!enabled" :loading="clearing" @click="clearAll">
+              <v-btn color="error" variant="tonal" size="small" :disabled="!enabled" :loading="clearing" title="清空全部检查记录（同时删除上传的临时副本；监控目录与媒体库原字幕不动）" @click="clearAll">
                 <v-icon start size="16">mdi-trash-can-outline</v-icon>
                 清空全部
               </v-btn>

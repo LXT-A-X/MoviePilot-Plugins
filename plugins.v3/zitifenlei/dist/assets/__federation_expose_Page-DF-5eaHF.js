@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import { _ as _export_sfc, a as apiModule, S as Settings, C as Check, F as FontLibrary, D as Dashboard } from './Settings-Bo6wvfbz.js';
+import { _ as _export_sfc, a as apiModule, S as Settings, C as Check, F as FontLibrary, D as Dashboard } from './Settings-DOfBSEqL.js';
 
 const {createTextVNode:_createTextVNode$2,resolveComponent:_resolveComponent$2,withCtx:_withCtx$2,createVNode:_createVNode$2,createElementVNode:_createElementVNode$2,toDisplayString:_toDisplayString$2,Fragment:_Fragment$2,openBlock:_openBlock$2,createElementBlock:_createElementBlock$2,createCommentVNode:_createCommentVNode$2,createBlock:_createBlock$2,renderList:_renderList$2,normalizeClass:_normalizeClass} = await importShared('vue');
 
@@ -478,13 +478,20 @@ async function deleteRecord(id) {
   }
 }
 
+const clearConfirm = ref$2(false);
+const clearingRecords = ref$2(false);
 async function clearRecords() {
+  if (clearingRecords.value) return
+  clearingRecords.value = true;
+  clearConfirm.value = false;
   try {
     await apiModule.del(props.api, '/subset/clear');
     await loadRecords(true, true);
     emit('notify', '已清空子集化记录', 'success');
   } catch (e) {
     emit('notify', e.message || '清空失败');
+  } finally {
+    clearingRecords.value = false;
   }
 }
 
@@ -564,12 +571,12 @@ return (_ctx, _cache) => {
             start: "",
             size: "18"
           }, {
-            default: _withCtx$2(() => [...(_cache[6] || (_cache[6] = [
+            default: _withCtx$2(() => [...(_cache[9] || (_cache[9] = [
               _createTextVNode$2("mdi-upload", -1)
             ]))]),
             _: 1
           }),
-          _cache[7] || (_cache[7] = _createTextVNode$2(" 上传字幕 ", -1))
+          _cache[10] || (_cache[10] = _createTextVNode$2(" 上传字幕 ", -1))
         ]),
         _: 1
       }, 8, ["disabled", "loading"]),
@@ -594,12 +601,12 @@ return (_ctx, _cache) => {
             start: "",
             size: "18"
           }, {
-            default: _withCtx$2(() => [...(_cache[8] || (_cache[8] = [
+            default: _withCtx$2(() => [...(_cache[11] || (_cache[11] = [
               _createTextVNode$2("mdi-magnify-scan", -1)
             ]))]),
             _: 1
           }),
-          _cache[9] || (_cache[9] = _createTextVNode$2(" 全量子集化 ", -1))
+          _cache[12] || (_cache[12] = _createTextVNode$2(" 全量子集化 ", -1))
         ]),
         _: 1
       }, 8, ["disabled", "loading"]),
@@ -616,12 +623,12 @@ return (_ctx, _cache) => {
             start: "",
             size: "18"
           }, {
-            default: _withCtx$2(() => [...(_cache[10] || (_cache[10] = [
+            default: _withCtx$2(() => [...(_cache[13] || (_cache[13] = [
               _createTextVNode$2("mdi-refresh", -1)
             ]))]),
             _: 1
           }),
-          _cache[11] || (_cache[11] = _createTextVNode$2(" 重试失败 ", -1))
+          _cache[14] || (_cache[14] = _createTextVNode$2(" 重试失败 ", -1))
         ]),
         _: 1
       }, 8, ["disabled", "loading"]),
@@ -636,12 +643,12 @@ return (_ctx, _cache) => {
             start: "",
             size: "18"
           }, {
-            default: _withCtx$2(() => [...(_cache[12] || (_cache[12] = [
+            default: _withCtx$2(() => [...(_cache[15] || (_cache[15] = [
               _createTextVNode$2("mdi-delete-sweep-outline", -1)
             ]))]),
             _: 1
           }),
-          _cache[13] || (_cache[13] = _createTextVNode$2(" 清空待处理 ", -1))
+          _cache[16] || (_cache[16] = _createTextVNode$2(" 清空待处理 ", -1))
         ]),
         _: 1
       }, 8, ["disabled"]),
@@ -656,12 +663,12 @@ return (_ctx, _cache) => {
             start: "",
             size: "18"
           }, {
-            default: _withCtx$2(() => [...(_cache[14] || (_cache[14] = [
+            default: _withCtx$2(() => [...(_cache[17] || (_cache[17] = [
               _createTextVNode$2("mdi-trash-can-outline", -1)
             ]))]),
             _: 1
           }),
-          _cache[15] || (_cache[15] = _createTextVNode$2(" 清空记录 ", -1))
+          _cache[18] || (_cache[18] = _createTextVNode$2(" 清空记录 ", -1))
         ]),
         _: 1
       }, 8, ["disabled"]),
@@ -699,12 +706,12 @@ return (_ctx, _cache) => {
             start: "",
             size: "15"
           }, {
-            default: _withCtx$2(() => [...(_cache[16] || (_cache[16] = [
+            default: _withCtx$2(() => [...(_cache[19] || (_cache[19] = [
               _createTextVNode$2("mdi-database-refresh", -1)
             ]))]),
             _: 1
           }),
-          _cache[17] || (_cache[17] = _createTextVNode$2(" 全部重建 ", -1))
+          _cache[20] || (_cache[20] = _createTextVNode$2(" 全部重建 ", -1))
         ]),
         _: 1
       }, 8, ["disabled", "loading"])
@@ -717,7 +724,7 @@ return (_ctx, _cache) => {
           density: "compact",
           class: "mb-3"
         }, {
-          default: _withCtx$2(() => [...(_cache[18] || (_cache[18] = [
+          default: _withCtx$2(() => [...(_cache[21] || (_cache[21] = [
             _createTextVNode$2(" HarfBuzz 子集化引擎未就绪，子集化不可用。请到「仪表盘 → 依赖」中重新安装 uharfbuzz。 ", -1)
           ]))]),
           _: 1
@@ -741,7 +748,7 @@ return (_ctx, _cache) => {
                       start: "",
                       size: "18"
                     }, {
-                      default: _withCtx$2(() => [...(_cache[19] || (_cache[19] = [
+                      default: _withCtx$2(() => [...(_cache[22] || (_cache[22] = [
                         _createTextVNode$2("mdi-tray-full", -1)
                       ]))]),
                       _: 1
@@ -759,7 +766,7 @@ return (_ctx, _cache) => {
                     }))
                   : _createCommentVNode$2("", true),
                 (!loadingPending.value && !pendingList.value.length)
-                  ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_4$2, [...(_cache[20] || (_cache[20] = [
+                  ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_4$2, [...(_cache[23] || (_cache[23] = [
                       _createTextVNode$2(" 暂无待处理字幕", -1),
                       _createElementVNode$2("br", null, null, -1),
                       _createElementVNode$2("span", { class: "zt-empty-sub" }, "上传字幕，或设置开启「入库后自动子集化」+「目录自动收集」关闭时自动收集", -1)
@@ -780,7 +787,7 @@ return (_ctx, _cache) => {
                                   color: "primary",
                                   size: "18"
                                 }, {
-                                  default: _withCtx$2(() => [...(_cache[21] || (_cache[21] = [
+                                  default: _withCtx$2(() => [...(_cache[24] || (_cache[24] = [
                                     _createTextVNode$2("mdi-subtitles-outline", -1)
                                   ]))]),
                                   _: 1
@@ -797,7 +804,7 @@ return (_ctx, _cache) => {
                                 }, {
                                   default: _withCtx$2(() => [
                                     _createVNode$2(_component_v_icon, { size: "16" }, {
-                                      default: _withCtx$2(() => [...(_cache[22] || (_cache[22] = [
+                                      default: _withCtx$2(() => [...(_cache[25] || (_cache[25] = [
                                         _createTextVNode$2("mdi-close", -1)
                                       ]))]),
                                       _: 1
@@ -846,7 +853,7 @@ return (_ctx, _cache) => {
                       start: "",
                       size: "18"
                     }, {
-                      default: _withCtx$2(() => [...(_cache[23] || (_cache[23] = [
+                      default: _withCtx$2(() => [...(_cache[26] || (_cache[26] = [
                         _createTextVNode$2("mdi-history", -1)
                       ]))]),
                       _: 1
@@ -868,12 +875,36 @@ return (_ctx, _cache) => {
                           start: "",
                           size: "15"
                         }, {
-                          default: _withCtx$2(() => [...(_cache[24] || (_cache[24] = [
+                          default: _withCtx$2(() => [...(_cache[27] || (_cache[27] = [
                             _createTextVNode$2("mdi-download-multiple", -1)
                           ]))]),
                           _: 1
                         }),
-                        _cache[25] || (_cache[25] = _createTextVNode$2(" 全部下载 ", -1))
+                        _cache[28] || (_cache[28] = _createTextVNode$2(" 全部下载 ", -1))
+                      ]),
+                      _: 1
+                    }, 8, ["disabled", "loading"]),
+                    _createVNode$2(_component_v_btn, {
+                      class: "zt-title-action",
+                      size: "small",
+                      variant: "tonal",
+                      color: "error",
+                      disabled: !__props.enabled || clearingRecords.value || downloadAllBusy.value || !!downloadingId.value || !records.value.length,
+                      loading: clearingRecords.value,
+                      title: "清空全部子集化记录（监控/上传来历的成品一并删除；MP 入库只删记录，不动媒体库原字幕）",
+                      onClick: _cache[2] || (_cache[2] = $event => (clearConfirm.value = true))
+                    }, {
+                      default: _withCtx$2(() => [
+                        _createVNode$2(_component_v_icon, {
+                          start: "",
+                          size: "15"
+                        }, {
+                          default: _withCtx$2(() => [...(_cache[29] || (_cache[29] = [
+                            _createTextVNode$2("mdi-delete-sweep", -1)
+                          ]))]),
+                          _: 1
+                        }),
+                        _cache[30] || (_cache[30] = _createTextVNode$2(" 全部清空 ", -1))
                       ]),
                       _: 1
                     }, 8, ["disabled", "loading"])
@@ -884,7 +915,7 @@ return (_ctx, _cache) => {
                 _createElementVNode$2("div", _hoisted_7$2, [
                   _createVNode$2(_component_v_select, {
                     modelValue: filterStatus.value,
-                    "onUpdate:modelValue": _cache[2] || (_cache[2] = $event => ((filterStatus).value = $event)),
+                    "onUpdate:modelValue": _cache[3] || (_cache[3] = $event => ((filterStatus).value = $event)),
                     items: statusFilterOptions,
                     "item-title": "title",
                     "item-value": "value",
@@ -895,7 +926,7 @@ return (_ctx, _cache) => {
                   }, null, 8, ["modelValue"]),
                   _createVNode$2(_component_v_text_field, {
                     modelValue: recordSearch.value,
-                    "onUpdate:modelValue": _cache[3] || (_cache[3] = $event => ((recordSearch).value = $event)),
+                    "onUpdate:modelValue": _cache[4] || (_cache[4] = $event => ((recordSearch).value = $event)),
                     density: "compact",
                     variant: "outlined",
                     "hide-details": "",
@@ -916,8 +947,8 @@ return (_ctx, _cache) => {
                 (!loadingRecords.value && !records.value.length)
                   ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_8$2, [
                       _createTextVNode$2(" 暂无" + _toDisplayString$2(filterStatus.value || recordSearch.value ? '匹配' : '') + "处理结果", 1),
-                      _cache[26] || (_cache[26] = _createElementVNode$2("br", null, null, -1)),
-                      _cache[27] || (_cache[27] = _createElementVNode$2("span", { class: "zt-empty-sub" }, "处理完成后结果与输出文件在这里展示，可下载", -1))
+                      _cache[31] || (_cache[31] = _createElementVNode$2("br", null, null, -1)),
+                      _cache[32] || (_cache[32] = _createElementVNode$2("span", { class: "zt-empty-sub" }, "处理完成后结果与输出文件在这里展示，可下载", -1))
                     ]))
                   : (_openBlock$2(), _createElementBlock$2("div", {
                       key: 2,
@@ -968,12 +999,12 @@ return (_ctx, _cache) => {
                                           start: "",
                                           size: "14"
                                         }, {
-                                          default: _withCtx$2(() => [...(_cache[28] || (_cache[28] = [
+                                          default: _withCtx$2(() => [...(_cache[33] || (_cache[33] = [
                                             _createTextVNode$2("mdi-download", -1)
                                           ]))]),
                                           _: 1
                                         }),
-                                        _cache[29] || (_cache[29] = _createTextVNode$2(" 下载 ", -1))
+                                        _cache[34] || (_cache[34] = _createTextVNode$2(" 下载 ", -1))
                                       ]),
                                       _: 1
                                     }, 8, ["disabled", "loading", "onClick"]))
@@ -988,7 +1019,7 @@ return (_ctx, _cache) => {
                                 }, {
                                   default: _withCtx$2(() => [
                                     _createVNode$2(_component_v_icon, { size: "16" }, {
-                                      default: _withCtx$2(() => [...(_cache[30] || (_cache[30] = [
+                                      default: _withCtx$2(() => [...(_cache[35] || (_cache[35] = [
                                         _createTextVNode$2("mdi-close", -1)
                                       ]))]),
                                       _: 1
@@ -1052,21 +1083,73 @@ return (_ctx, _cache) => {
       _: 1
     }),
     _createVNode$2(_component_v_dialog, {
-      modelValue: rebuildConfirm.value,
-      "onUpdate:modelValue": _cache[5] || (_cache[5] = $event => ((rebuildConfirm).value = $event)),
+      modelValue: clearConfirm.value,
+      "onUpdate:modelValue": _cache[6] || (_cache[6] = $event => ((clearConfirm).value = $event)),
       "max-width": "440"
     }, {
       default: _withCtx$2(() => [
         _createVNode$2(_component_v_card, null, {
           default: _withCtx$2(() => [
             _createVNode$2(_component_v_card_title, { class: "text-h6" }, {
-              default: _withCtx$2(() => [...(_cache[31] || (_cache[31] = [
+              default: _withCtx$2(() => [...(_cache[36] || (_cache[36] = [
+                _createTextVNode$2("清空全部子集化记录？", -1)
+              ]))]),
+              _: 1
+            }),
+            _createVNode$2(_component_v_card_text, null, {
+              default: _withCtx$2(() => [...(_cache[37] || (_cache[37] = [
+                _createTextVNode$2(" 将删除全部子集化结果记录，并同步删除监控/上传来历的成品文件（含输出目录中对应文件与空的剧名文件夹）。 MP 入库记录只删记录，不动媒体库原字幕；「待处理」列表不受影响。 ", -1)
+              ]))]),
+              _: 1
+            }),
+            _createVNode$2(_component_v_card_actions, null, {
+              default: _withCtx$2(() => [
+                _createVNode$2(_component_v_spacer),
+                _createVNode$2(_component_v_btn, {
+                  variant: "text",
+                  onClick: _cache[5] || (_cache[5] = $event => (clearConfirm.value = false))
+                }, {
+                  default: _withCtx$2(() => [...(_cache[38] || (_cache[38] = [
+                    _createTextVNode$2("取消", -1)
+                  ]))]),
+                  _: 1
+                }),
+                _createVNode$2(_component_v_btn, {
+                  color: "error",
+                  variant: "tonal",
+                  loading: clearingRecords.value,
+                  onClick: clearRecords
+                }, {
+                  default: _withCtx$2(() => [...(_cache[39] || (_cache[39] = [
+                    _createTextVNode$2("全部清空", -1)
+                  ]))]),
+                  _: 1
+                }, 8, ["loading"])
+              ]),
+              _: 1
+            })
+          ]),
+          _: 1
+        })
+      ]),
+      _: 1
+    }, 8, ["modelValue"]),
+    _createVNode$2(_component_v_dialog, {
+      modelValue: rebuildConfirm.value,
+      "onUpdate:modelValue": _cache[8] || (_cache[8] = $event => ((rebuildConfirm).value = $event)),
+      "max-width": "440"
+    }, {
+      default: _withCtx$2(() => [
+        _createVNode$2(_component_v_card, null, {
+          default: _withCtx$2(() => [
+            _createVNode$2(_component_v_card_title, { class: "text-h6" }, {
+              default: _withCtx$2(() => [...(_cache[40] || (_cache[40] = [
                 _createTextVNode$2("全部重建字体库？", -1)
               ]))]),
               _: 1
             }),
             _createVNode$2(_component_v_card_text, null, {
-              default: _withCtx$2(() => [...(_cache[32] || (_cache[32] = [
+              default: _withCtx$2(() => [...(_cache[41] || (_cache[41] = [
                 _createTextVNode$2(" 将清空现有字体索引，再逐文件重新解析整个字体库（生成 face/别名/字符覆盖）。 日常归档与入库仍是增量/减量，不需要用这里。耗时取决于字体数量，期间检索可能变慢。 人工映射与字幕缺失快照不受影响。 ", -1)
               ]))]),
               _: 1
@@ -1076,9 +1159,9 @@ return (_ctx, _cache) => {
                 _createVNode$2(_component_v_spacer),
                 _createVNode$2(_component_v_btn, {
                   variant: "text",
-                  onClick: _cache[4] || (_cache[4] = $event => (rebuildConfirm.value = false))
+                  onClick: _cache[7] || (_cache[7] = $event => (rebuildConfirm.value = false))
                 }, {
-                  default: _withCtx$2(() => [...(_cache[33] || (_cache[33] = [
+                  default: _withCtx$2(() => [...(_cache[42] || (_cache[42] = [
                     _createTextVNode$2("取消", -1)
                   ]))]),
                   _: 1
@@ -1089,7 +1172,7 @@ return (_ctx, _cache) => {
                   loading: rebuildingIndex.value,
                   onClick: rebuildIndex
                 }, {
-                  default: _withCtx$2(() => [...(_cache[34] || (_cache[34] = [
+                  default: _withCtx$2(() => [...(_cache[43] || (_cache[43] = [
                     _createTextVNode$2("开始重建", -1)
                   ]))]),
                   _: 1
@@ -1108,7 +1191,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const Subset = /*#__PURE__*/_export_sfc(_sfc_main$2, [['__scopeId',"data-v-0a365f4a"]]);
+const Subset = /*#__PURE__*/_export_sfc(_sfc_main$2, [['__scopeId',"data-v-dbe3acb1"]]);
 
 const {createTextVNode:_createTextVNode$1,resolveComponent:_resolveComponent$1,withCtx:_withCtx$1,createVNode:_createVNode$1,toDisplayString:_toDisplayString$1,createElementVNode:_createElementVNode$1,openBlock:_openBlock$1,createBlock:_createBlock$1,createCommentVNode:_createCommentVNode$1,renderList:_renderList$1,Fragment:_Fragment$1,createElementBlock:_createElementBlock$1} = await importShared('vue');
 

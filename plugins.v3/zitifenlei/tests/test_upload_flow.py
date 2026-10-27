@@ -404,6 +404,90 @@ def test_watch_output_mode_without_out_dir(tmp_path):
         db.close()
 
 
+def _fake_batch(files, source="manual"):
+    """桩：不真正子集化，只按文件数返回成功统计。"""
+    return {
+        "success": len(files),
+        "skipped": 0,
+        "missing": 0,
+        "error": 0,
+        "missing_fonts": [],
+        "file_status": {},
+        "out_files": [],
+    }
+
+
+def _stub_subset_run(plugin, monkeypatch):
+    """桩：跳过引擎检查与真实子集化，只让通知链路真实执行。"""
+    monkeypatch.setattr(plugin, "_subset_engine_ready", lambda: (True, ""))
+    monkeypatch.setattr(plugin, "_run_subset_batch", _fake_batch)
+    plugin._config["notify_enabled"] = True
+
+
+def test_manual_subset_all_does_not_notify(tmp_path, monkeypatch):
+    """手动上传触发的全量子集化不发系统通知（页面 toast 与日志保留）。"""
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    db = _make_db(tmp_path, lib)
+    try:
+        plugin = _plugin(tmp_path, db, lib)
+        src = plugin._tmp_dir / "manual.ass"
+        src.write_text("[Script Info]\n", encoding="utf-8")
+        db.add_subset_pending("manual.ass", str(src), source="upload")
+        _stub_subset_run(plugin, monkeypatch)
+        sent = _notify_recorder(plugin)
+        res = plugin.api_subset_all()
+        assert res.get("success"), res
+        assert sent == []
+    finally:
+        db.close()
+
+
+def test_watch_subset_all_still_notifies(tmp_path, monkeypatch):
+    """目录监控收集的字幕经页面全量子集化后仍发通知（只汇总监控部分）。"""
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    db = _make_db(tmp_path, lib)
+    try:
+        plugin = _plugin(tmp_path, db, lib)
+        src = plugin._tmp_dir / "watch.ass"
+        src.write_text("[Script Info]\n", encoding="utf-8")
+        db.add_subset_pending("watch.ass", str(src), source="watch")
+        _stub_subset_run(plugin, monkeypatch)
+        sent = _notify_recorder(plugin)
+        res = plugin.api_subset_all()
+        assert res.get("success"), res
+        assert len(sent) == 1 and "子集化完成" in sent[0]["title"]
+    finally:
+        db.close()
+
+
+def test_manual_retry_does_not_notify(tmp_path, monkeypatch):
+    """手动上传字幕的「重试失败」不发系统通知。"""
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    db = _make_db(tmp_path, lib)
+    try:
+        plugin = _plugin(tmp_path, db, lib)
+        src = plugin._tmp_dir / "manual-retry.ass"
+        src.write_text("[Script Info]\n", encoding="utf-8")
+        db.add_subset_record(
+            {
+                "file_name": "manual-retry.ass",
+                "file_path": str(src),
+                "status": "missing",
+                "source": "manual",
+            }
+        )
+        _stub_subset_run(plugin, monkeypatch)
+        sent = _notify_recorder(plugin)
+        res = plugin.api_subset_retry()
+        assert res.get("success"), res
+        assert sent == []
+    finally:
+        db.close()
+
+
 # ─── 3. 批量子集化真实落盘 ──────────────────────────────────────────────
 
 @needs_fonts

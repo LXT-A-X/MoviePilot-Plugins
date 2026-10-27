@@ -408,7 +408,7 @@ class Zitifenlei(_PluginBase):
     plugin_name = "字体分类管家"
     plugin_desc = "字体归档整理与 ASS 字幕字体检查插件：扫描/上传字体到字体库，检查字幕缺失字体。"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/zitifenlei.png"
-    plugin_version = "3.0.8"
+    plugin_version = "3.0.9"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "zitifenlei_"
@@ -5473,12 +5473,23 @@ class Zitifenlei(_PluginBase):
             return self._err("正在执行其他维护任务（恢复/清库/删除/重建），请稍后重试")
         try:
             removed = 0
-            for r in self._db.query("SELECT file_path FROM ass_files WHERE file_path != ''"):
-                if self._owns_ass_copy(r.get("file_path") or ""):
-                    if arch.safe_unlink(r["file_path"], self._tmp_dir, exts=ASS_EXTENSIONS):
+            external = 0
+            for r in self._db.query("SELECT file_path FROM ass_files"):
+                fp = r.get("file_path") or ""
+                if not fp:
+                    continue
+                if self._owns_ass_copy(fp):
+                    if arch.safe_unlink(fp, self._tmp_dir, exts=ASS_EXTENSIONS):
                         removed += 1
+                else:
+                    # 监控目录/媒体库里的原件：只删记录，不删文件
+                    external += 1
             self._db.clear_ass()
-            self._db.add_log(f"清空全部ASS检查记录（清理临时副本 {removed} 个，原始字幕未动）", "warning")
+            if external:
+                detail = f"清理上传临时副本 {removed} 个；其余 {external} 条只删记录，监控目录/媒体库原字幕未动"
+            else:
+                detail = f"清理上传临时副本 {removed} 个"
+            self._db.add_log(f"清空全部ASS检查记录（{detail}）", "warning")
             self._invalidate_missing_agg()
             return self._ok({"file_removed": removed}, "已清空")
         except Exception as err:
@@ -5620,6 +5631,7 @@ class Zitifenlei(_PluginBase):
             if not (watch_files or manual_files):
                 return self._ok({"success": 0, "skipped": 0, "missing": 0, "error": 0}, "待处理列表为空（可上传字幕，或开启「目录监控」自动收集）")
             stats: Dict[str, Any] = {"success": 0, "skipped": 0, "missing": 0, "error": 0, "missing_fonts": [], "file_status": {}, "out_files": []}
+            watch_stats: Optional[Dict[str, Any]] = None
             for batch, src in ((manual_files, "manual"), (watch_files, "watch")):
                 if not batch:
                     continue
@@ -5629,6 +5641,8 @@ class Zitifenlei(_PluginBase):
                 stats["missing_fonts"].extend(sub.get("missing_fonts") or [])
                 stats["file_status"].update(sub.get("file_status") or {})
                 stats["out_files"].extend(sub.get("out_files") or [])
+                if src == "watch":
+                    watch_stats = sub
             # 处理完成：移除待处理记录；上传到临时目录的缓存源文件仅成功/跳过才清理，
             # 缺字体/失败（file_status=keep）保留供「重试失败」补字后再次处理
             keep_map = stats.get("file_status") or {}
@@ -5648,7 +5662,10 @@ class Zitifenlei(_PluginBase):
                 f"缺字体 {stats['missing']}, 失败 {stats['error']}",
                 "info",
             )
-            self._notify_subset_result(stats)
+            # 手动上传是页面内的主动操作，不发系统通知；只有目录监控收集的字幕才推送
+            # （后台监控/MP 入库走 _run_show_subset，仍照常通知）
+            if watch_stats:
+                self._notify_subset_result(watch_stats)
             return self._ok(stats, f"全量子集化完成，成功 {stats['success']} 个")
         except Exception as err:
             self._db.add_log(f"全量子集化失败: {err}", "error")
@@ -5949,12 +5966,33 @@ class Zitifenlei(_PluginBase):
                     {"success": 0, "skipped": 0, "missing": 0, "error": 0, "retried": 0},
                     "没有可重试的字幕（失败/缺字体记录的源文件不存在或已处理）",
                 )
-            st = self._run_subset_batch(files, source="retry")
+            st: Dict[str, Any] = {"success": 0, "skipped": 0, "missing": 0, "error": 0, "missing_fonts": [], "file_status": {}, "out_files": []}
+            # 按来源拆两批：手动上传的重试不发系统通知，监控/入库来源仍推送
+            manual_files: List[Path] = []
+            monitor_files: List[Path] = []
+            for p in files:
+                if self._subset_source_kind(p, "retry") == "manual":
+                    manual_files.append(p)
+                else:
+                    monitor_files.append(p)
+            notify_st: Optional[Dict[str, Any]] = None
+            for batch, is_manual in ((manual_files, True), (monitor_files, False)):
+                if not batch:
+                    continue
+                sub = self._run_subset_batch(batch, source="retry")
+                for k in ("success", "skipped", "missing", "error"):
+                    st[k] += sub.get(k, 0)
+                st["missing_fonts"].extend(sub.get("missing_fonts") or [])
+                st["file_status"].update(sub.get("file_status") or {})
+                st["out_files"].extend(sub.get("out_files") or [])
+                if not is_manual:
+                    notify_st = sub
             self._db.add_log(
                 f"重试失败子集化: 重试 {len(files)} 个，成功 {st['success']}，缺字体 {st['missing']}，失败 {st['error']}",
                 "info",
             )
-            self._notify_subset_result(st, scope="重试")
+            if notify_st:
+                self._notify_subset_result(notify_st, scope="重试")
             return self._ok({**st, "retried": len(files)}, f"重试完成：成功 {st['success']} 个")
         except Exception as err:
             self._db.add_log(f"重试失败子集化出错: {err}", "error")

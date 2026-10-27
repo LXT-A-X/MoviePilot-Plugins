@@ -3152,6 +3152,7 @@ return (_ctx, _cache) => {
                             size: "small",
                             disabled: !__props.enabled,
                             loading: clearing.value,
+                            title: "清空全部检查记录（同时删除上传的临时副本；监控目录与媒体库原字幕不动）",
                             onClick: clearAll
                           }, {
                             default: _withCtx$1(() => [
@@ -3426,7 +3427,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const Check = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-a4111cfd"]]);
+const Check = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-50d0aae4"]]);
 
 const {createTextVNode:_createTextVNode,resolveComponent:_resolveComponent,withCtx:_withCtx,createVNode:_createVNode,createElementVNode:_createElementVNode,openBlock:_openBlock,createBlock:_createBlock,createCommentVNode:_createCommentVNode,renderList:_renderList,Fragment:_Fragment,createElementBlock:_createElementBlock,toDisplayString:_toDisplayString,normalizeClass:_normalizeClass} = await importShared('vue');
 
