@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import { _ as _export_sfc, a as apiModule, S as Settings, C as Check, F as FontLibrary, D as Dashboard } from './Settings-CyDlrrID.js';
+import { _ as _export_sfc, a as apiModule, S as Settings, C as Check, F as FontLibrary, D as Dashboard } from './Settings-Bo6wvfbz.js';
 
 const {createTextVNode:_createTextVNode$2,resolveComponent:_resolveComponent$2,withCtx:_withCtx$2,createVNode:_createVNode$2,createElementVNode:_createElementVNode$2,toDisplayString:_toDisplayString$2,Fragment:_Fragment$2,openBlock:_openBlock$2,createElementBlock:_createElementBlock$2,createCommentVNode:_createCommentVNode$2,createBlock:_createBlock$2,renderList:_renderList$2,normalizeClass:_normalizeClass} = await importShared('vue');
 
@@ -556,7 +556,7 @@ return (_ctx, _cache) => {
         color: "primary",
         disabled: !__props.enabled || uploading.value,
         loading: uploading.value,
-        title: "上传字幕到「待处理」",
+        title: "上传字幕到「待处理」（支持 .ass 与 .zip 压缩包）",
         onClick: _cache[0] || (_cache[0] = $event => (uploadRef.value?.click()))
       }, {
         default: _withCtx$2(() => [
@@ -577,7 +577,7 @@ return (_ctx, _cache) => {
         ref_key: "uploadRef",
         ref: uploadRef,
         type: "file",
-        accept: ".ass",
+        accept: ".ass,.ASS,.zip",
         multiple: "",
         style: {"display":"none"},
         onChange: handleUpload
@@ -1108,7 +1108,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const Subset = /*#__PURE__*/_export_sfc(_sfc_main$2, [['__scopeId',"data-v-466a5118"]]);
+const Subset = /*#__PURE__*/_export_sfc(_sfc_main$2, [['__scopeId',"data-v-0a365f4a"]]);
 
 const {createTextVNode:_createTextVNode$1,resolveComponent:_resolveComponent$1,withCtx:_withCtx$1,createVNode:_createVNode$1,toDisplayString:_toDisplayString$1,createElementVNode:_createElementVNode$1,openBlock:_openBlock$1,createBlock:_createBlock$1,createCommentVNode:_createCommentVNode$1,renderList:_renderList$1,Fragment:_Fragment$1,createElementBlock:_createElementBlock$1} = await importShared('vue');
 
@@ -1556,6 +1556,7 @@ return (_ctx, _cache) => {
                 variant: "tonal",
                 disabled: !__props.enabled || uploading.value || classifying.value,
                 loading: uploading.value,
+                title: "上传字体（支持 ttf/otf/ttc/otc/woff/woff2 与 .zip 压缩包）",
                 onClick: _cache[1] || (_cache[1] = $event => (uploadRef.value?.click()))
               }, {
                 default: _withCtx$1(() => [
@@ -1998,7 +1999,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const MissingFonts = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-c604ad83"]]);
+const MissingFonts = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-79f740c5"]]);
 
 const {createTextVNode:_createTextVNode,resolveComponent:_resolveComponent,withCtx:_withCtx,createVNode:_createVNode,createElementVNode:_createElementVNode,renderList:_renderList,Fragment:_Fragment,openBlock:_openBlock,createElementBlock:_createElementBlock,toDisplayString:_toDisplayString,createBlock:_createBlock,createCommentVNode:_createCommentVNode,resolveDynamicComponent:_resolveDynamicComponent,KeepAlive:_KeepAlive,createSlots:_createSlots} = await importShared('vue');
 

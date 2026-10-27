@@ -1568,6 +1568,7 @@ return (_ctx, _cache) => {
         color: "primary",
         disabled: !__props.enabled,
         loading: uploading.value,
+        title: "上传字体（支持 ttf/otf/ttc/otc/woff/woff2 与 .zip 压缩包）",
         onClick: _cache[0] || (_cache[0] = $event => (uploadRef.value?.click()))
       }, {
         default: _withCtx$2(() => [
@@ -1588,7 +1589,7 @@ return (_ctx, _cache) => {
         ref_key: "uploadRef",
         ref: uploadRef,
         type: "file",
-        accept: ".ttf,.otf,.TTF,.OTF",
+        accept: ".ttf,.otf,.ttc,.otc,.woff,.woff2,.zip",
         multiple: "",
         style: {"display":"none"},
         onChange: handleUpload
@@ -2477,7 +2478,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const FontLibrary = /*#__PURE__*/_export_sfc(_sfc_main$2, [['__scopeId',"data-v-670b92df"]]);
+const FontLibrary = /*#__PURE__*/_export_sfc(_sfc_main$2, [['__scopeId',"data-v-b12a6bfc"]]);
 
 const {createTextVNode:_createTextVNode$1,resolveComponent:_resolveComponent$1,withCtx:_withCtx$1,createVNode:_createVNode$1,createElementVNode:_createElementVNode$1,toDisplayString:_toDisplayString$1,openBlock:_openBlock$1,createElementBlock:_createElementBlock$1,createCommentVNode:_createCommentVNode$1,createBlock:_createBlock$1,renderList:_renderList$1,Fragment:_Fragment$1,withModifiers:_withModifiers,normalizeClass:_normalizeClass$1} = await importShared('vue');
 
@@ -2882,6 +2883,7 @@ return (_ctx, _cache) => {
         variant: "tonal",
         disabled: !__props.enabled,
         loading: uploading.value,
+        title: "上传 ASS 字幕（支持 .ass 与 .zip 压缩包）",
         onClick: _cache[0] || (_cache[0] = $event => (uploadRef.value?.click()))
       }, {
         default: _withCtx$1(() => [
@@ -2902,7 +2904,7 @@ return (_ctx, _cache) => {
         ref_key: "uploadRef",
         ref: uploadRef,
         type: "file",
-        accept: ".ass,.ASS",
+        accept: ".ass,.ASS,.zip",
         multiple: "",
         style: {"display":"none"},
         onChange: handleUpload
@@ -3424,7 +3426,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const Check = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-951e06ad"]]);
+const Check = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-a4111cfd"]]);
 
 const {createTextVNode:_createTextVNode,resolveComponent:_resolveComponent,withCtx:_withCtx,createVNode:_createVNode,createElementVNode:_createElementVNode,openBlock:_openBlock,createBlock:_createBlock,createCommentVNode:_createCommentVNode,renderList:_renderList,Fragment:_Fragment,createElementBlock:_createElementBlock,toDisplayString:_toDisplayString,normalizeClass:_normalizeClass} = await importShared('vue');
 

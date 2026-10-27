@@ -143,123 +143,123 @@
   text-align: center;
 }
 
-.zt-topbar[data-v-670b92df] {
+.zt-topbar[data-v-b12a6bfc] {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 16px;
 }
-.zt-list-card[data-v-670b92df],
-.zt-detail-card[data-v-670b92df] {
+.zt-list-card[data-v-b12a6bfc],
+.zt-detail-card[data-v-b12a6bfc] {
   height: 640px;
   overflow: auto;
 }
-.zt-list-body[data-v-670b92df] {
+.zt-list-body[data-v-b12a6bfc] {
   min-height: 60px;
 }
-.zt-total[data-v-670b92df] {
+.zt-total[data-v-b12a6bfc] {
   opacity: 0.75;
 }
-.zt-dir-item[data-v-670b92df] {
+.zt-dir-item[data-v-b12a6bfc] {
   cursor: pointer;
 }
-.zt-dir-name[data-v-670b92df] {
+.zt-dir-name[data-v-b12a6bfc] {
   font-size: 13px;
   font-weight: 600;
 }
-.zt-dir-count[data-v-670b92df] {
+.zt-dir-count[data-v-b12a6bfc] {
   font-size: 12px;
   opacity: 0.6;
 }
-.zt-font-item[data-v-670b92df] {
+.zt-font-item[data-v-b12a6bfc] {
   cursor: pointer;
 }
-.zt-font-name[data-v-670b92df] {
+.zt-font-name[data-v-b12a6bfc] {
   font-size: 14px;
   font-weight: 500;
 }
-.zt-font-meta[data-v-670b92df] {
+.zt-font-meta[data-v-b12a6bfc] {
   font-size: 12px;
   opacity: 0.7;
 }
-.zt-fav-icon[data-v-670b92df] {
+.zt-fav-icon[data-v-b12a6bfc] {
   cursor: pointer;
 }
-.zt-card-title[data-v-670b92df] {
+.zt-card-title[data-v-b12a6bfc] {
   font-size: 15px;
   font-weight: 600;
 }
-.zt-empty[data-v-670b92df] {
+.zt-empty[data-v-b12a6bfc] {
   font-size: 13px;
   opacity: 0.6;
   text-align: center;
   cursor: default;
 }
-.zt-detail-title[data-v-670b92df] {
+.zt-detail-title[data-v-b12a6bfc] {
   font-size: 17px;
   font-weight: 600;
 }
-.zt-detail-meta[data-v-670b92df] {
+.zt-detail-meta[data-v-b12a6bfc] {
   font-size: 12px;
   opacity: 0.7;
   margin-top: 2px;
 }
-.zt-meta-grid[data-v-670b92df] {
+.zt-meta-grid[data-v-b12a6bfc] {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 12px 16px;
 }
-.zt-meta-label[data-v-670b92df] {
+.zt-meta-label[data-v-b12a6bfc] {
   font-size: 12px;
   opacity: 0.6;
 }
-.zt-meta-value[data-v-670b92df] {
+.zt-meta-value[data-v-b12a6bfc] {
   font-size: 13px;
   font-weight: 500;
   word-break: break-all;
 }
-.zt-section-label[data-v-670b92df] {
+.zt-section-label[data-v-b12a6bfc] {
   font-size: 14px;
   font-weight: 600;
 }
-.zt-preview-sample[data-v-670b92df] {
+.zt-preview-sample[data-v-b12a6bfc] {
   padding: 16px;
   border-radius: 6px;
   background: rgba(255, 255, 255, 0.05);
   text-align: center;
   min-height: 120px;
 }
-.zt-preview-loading[data-v-670b92df] {
+.zt-preview-loading[data-v-b12a6bfc] {
   position: absolute;
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
 }
-.zt-preview-name[data-v-670b92df] {
+.zt-preview-name[data-v-b12a6bfc] {
   font-size: 16px;
   font-weight: 600;
 }
-.zt-preview-family[data-v-670b92df] {
+.zt-preview-family[data-v-b12a6bfc] {
   font-size: 13px;
   opacity: 0.75;
 }
-.zt-preview-controls[data-v-670b92df] {
+.zt-preview-controls[data-v-b12a6bfc] {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
 }
-.zt-preview-control-label[data-v-670b92df] {
+.zt-preview-control-label[data-v-b12a6bfc] {
   font-size: 12px;
   opacity: 0.75;
 }
-.zt-preview-slider[data-v-670b92df] {
+.zt-preview-slider[data-v-b12a6bfc] {
   flex: 1 1 120px;
   min-width: 100px;
   max-width: 200px;
 }
-.zt-color-input[data-v-670b92df] {
+.zt-color-input[data-v-b12a6bfc] {
   width: 40px;
   height: 28px;
   padding: 0;
@@ -269,89 +269,89 @@
   cursor: pointer;
 }
 /* 数据库管理区块：与顶部拉开视觉距离，避免误触 */
-.zt-db-block[data-v-670b92df] {
+.zt-db-block[data-v-b12a6bfc] {
   border: 1px dashed rgba(255, 255, 255, 0.12);
 }
 
-.zt-search[data-v-951e06ad] {
+.zt-search[data-v-a4111cfd] {
   max-width: 360px;
 }
-.zt-total[data-v-951e06ad] {
+.zt-total[data-v-a4111cfd] {
   opacity: 0.75;
 }
-.zt-tip[data-v-951e06ad] {
+.zt-tip[data-v-a4111cfd] {
   opacity: 0.6;
 }
-.zt-match-source[data-v-951e06ad] {
+.zt-match-source[data-v-a4111cfd] {
   font-size: 12px;
   opacity: 0.65;
 }
-.zt-list-card[data-v-951e06ad],
-.zt-detail-card[data-v-951e06ad] {
+.zt-list-card[data-v-a4111cfd],
+.zt-detail-card[data-v-a4111cfd] {
   height: 640px;
   overflow: auto;
 }
-.zt-record-name[data-v-951e06ad] {
+.zt-record-name[data-v-a4111cfd] {
   font-weight: 500;
 }
-.zt-record-meta[data-v-951e06ad] {
+.zt-record-meta[data-v-a4111cfd] {
   font-size: 11px;
   opacity: 0.7;
 }
-.zt-record-item[data-v-951e06ad] {
+.zt-record-item[data-v-a4111cfd] {
   cursor: pointer;
 }
-.zt-detail-loading[data-v-951e06ad] {
+.zt-detail-loading[data-v-a4111cfd] {
   position: absolute;
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
 }
-.zt-detail-title[data-v-951e06ad] {
+.zt-detail-title[data-v-a4111cfd] {
   font-weight: 600;
 }
-.zt-detail-meta[data-v-951e06ad] {
+.zt-detail-meta[data-v-a4111cfd] {
   opacity: 0.75;
 }
-.zt-section-label[data-v-951e06ad] {
+.zt-section-label[data-v-a4111cfd] {
   font-size: 13px;
   font-weight: 600;
 }
-.zt-empty[data-v-951e06ad],
-.zt-empty2[data-v-951e06ad] {
+.zt-empty[data-v-a4111cfd],
+.zt-empty2[data-v-a4111cfd] {
   font-size: 13px;
   opacity: 0.6;
   text-align: center;
 }
-.zt-search-icon[data-v-951e06ad] {
+.zt-search-icon[data-v-a4111cfd] {
   cursor: pointer;
 }
-.zt-clear-row[data-v-951e06ad] {
+.zt-clear-row[data-v-a4111cfd] {
   border-top: 1px solid rgba(255, 255, 255, 0.08);
 }
 /* 全部字体：字体库已收录 → 绿光 */
-.zt-in-lib[data-v-951e06ad] {
+.zt-in-lib[data-v-a4111cfd] {
   color: #81c784 !important;
   border-color: rgba(129, 199, 132, 0.55) !important;
   box-shadow: 0 0 8px rgba(76, 175, 80, 0.45) !important;
 }
-.zt-card-title[data-v-951e06ad] {
+.zt-card-title[data-v-a4111cfd] {
   font-size: 15px;
   font-weight: 600;
 }
 /* 缺失字体逐字符明细：名称 + 缺失字符行 */
-.zt-missing-chip[data-v-951e06ad] {
+.zt-missing-chip[data-v-a4111cfd] {
   height: auto !important;
   padding-top: 4px !important;
   padding-bottom: 4px !important;
 }
-.zt-missing-chip-body[data-v-951e06ad] {
+.zt-missing-chip-body[data-v-a4111cfd] {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   line-height: 1.35;
 }
-.zt-missing-chars[data-v-951e06ad] {
+.zt-missing-chars[data-v-a4111cfd] {
   font-size: 11px;
   font-family: monospace;
   opacity: 0.8;

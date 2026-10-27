@@ -312,6 +312,7 @@ function stopPolling() {
             variant="tonal"
             :disabled="!enabled || uploading || classifying"
             :loading="uploading"
+            title="上传字体（支持 ttf/otf/ttc/otc/woff/woff2 与 .zip 压缩包）"
             @click="uploadRef?.click()"
           >
             <v-icon start size="18">mdi-upload</v-icon>
