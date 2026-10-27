@@ -16,8 +16,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-import archive_utils as arch
-from font_utils import FONT_EXTENSIONS
+from . import archive_utils as arch
+from .font_utils import FONT_EXTENSIONS
 
 # 进度视为「已下完」的阈值：qB 返回 1.0，rTorrent 按分块计算可能有 99.9%
 PROGRESS_DONE = 0.99
