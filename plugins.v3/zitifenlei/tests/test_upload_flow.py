@@ -331,8 +331,8 @@ def test_inbound_subset_overwrite_option(tmp_path):
 
 
 @needs_fonts
-def test_watch_output_dir_overwrite_only_deletes_source(tmp_path):
-    """目录监控 + 输出目录：成品一律进输出目录；「覆盖原文件」只决定是否删监控目录源字幕。"""
+def test_watch_output_mode_controls_source_retention(tmp_path):
+    """目录监控 + 输出目录：输出方式决定源字幕去留；成品只进输出目录，监控目录不留副本。"""
     lib = _make_lib(tmp_path)
     db = _make_db(tmp_path, lib)
     try:
@@ -346,24 +346,60 @@ def test_watch_output_dir_overwrite_only_deletes_source(tmp_path):
             "NoSuchFont", "Microsoft YaHei"
         )
 
-        # 默认关：源字幕保留，成品输出到输出目录
+        # 复制（默认）：源字幕保留，成品只进输出目录，监控目录不留 .ziti.ass 副本
         src = watch / "movie.ass"
         src.write_text(body, encoding="utf-8")
         stats = plugin._run_subset_batch([src], source="watch")
         assert stats["success"] == 1, stats
         assert src.is_file()
+        assert not (watch / "movie.ziti.ass").exists()
         produced = list(out.rglob("*.ass"))
         assert len(produced) == 1, produced
         assert fu.has_embedded_fonts(produced[0].read_bytes())
 
-        # 开启「覆盖原文件」：成品输出成功后删除监控目录的源字幕
+        # 移动：成品输出成功后删除监控目录的源字幕
         src2 = watch / "movie2.ass"
         src2.write_text(body, encoding="utf-8")
-        plugin._config["subset_overwrite"] = True
+        plugin._config["subset_out_mode"] = "move"
         stats = plugin._run_subset_batch([src2], source="watch")
         assert stats["success"] == 1, stats
         assert not src2.exists()
         assert len(list(out.rglob("*.ass"))) == 2
+    finally:
+        db.close()
+
+
+@needs_fonts
+def test_watch_output_mode_without_out_dir(tmp_path):
+    """未配输出目录：复制=另生成 xx.ziti.ass 并保留源；移动=成品就地替换源字幕。"""
+    lib = _make_lib(tmp_path)
+    db = _make_db(tmp_path, lib)
+    try:
+        plugin = _plugin(tmp_path, db, lib)
+        watch = tmp_path / "watch"
+        watch.mkdir()
+        plugin._config.update({"subset_dir": str(watch), "subset_out_dir": ""})
+        body = he.strip_fonts_section(FIXTURE.read_text(encoding="utf-8")).replace(
+            "NoSuchFont", "Microsoft YaHei"
+        )
+
+        # 复制（默认）：保留源字幕，另生成 movie.ziti.ass
+        src = watch / "movie.ass"
+        src.write_text(body, encoding="utf-8")
+        stats = plugin._run_subset_batch([src], source="watch")
+        assert stats["success"] == 1, stats
+        assert src.is_file() and not fu.has_embedded_fonts(src.read_bytes())
+        ziti = watch / "movie.ziti.ass"
+        assert ziti.is_file() and fu.has_embedded_fonts(ziti.read_bytes())
+
+        # 移动：成品就地替换源字幕（文件名不变）
+        src2 = watch / "movie2.ass"
+        src2.write_text(body, encoding="utf-8")
+        plugin._config["subset_out_mode"] = "move"
+        stats = plugin._run_subset_batch([src2], source="watch")
+        assert stats["success"] == 1, stats
+        assert src2.is_file() and fu.has_embedded_fonts(src2.read_bytes())
+        assert not (watch / "movie2.ziti.ass").exists()
     finally:
         db.close()
 

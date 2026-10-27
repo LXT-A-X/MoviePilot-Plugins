@@ -187,13 +187,15 @@ _DEFAULT_CONFIG = {
     "weekly_reconcile": True,
     # 子集化设置
     "auto_subset": False,
-    "subset_overwrite": False,
     # 子集化在独立工作进程中执行（uharfbuzz 段错误/病态字体只影响当前字幕，
     # 不拖垮 MoviePilot 主进程）；工作进程无法启动时自动回退进程内执行
     "subset_process_isolation": True,
     # MP 入库成品是否直接替换媒体库原字幕（独立开关：不影响目录监控与手动上传）
     "inbound_subset_overwrite": False,
     "subset_out_dir": "",
+    # 监控目录输出方式：目录监控唯一的成品/源字幕去向开关
+    #   copy = 成品进输出目录、源字幕保留；未配输出目录时另生成 xx.ziti.ass 并保留源字幕
+    #   move = 成品进输出目录、成功后删除源字幕；未配输出目录时成品就地替换源字幕
     "subset_out_mode": "copy",
     # HDR 字幕亮度（子集化/上传字幕处理后按档位压暗主色/描边/阴影，避免 HDR 下刺眼）
     "hdr_brightness": False,
@@ -406,7 +408,7 @@ class Zitifenlei(_PluginBase):
     plugin_name = "字体分类管家"
     plugin_desc = "字体归档整理与 ASS 字幕字体检查插件：扫描/上传字体到字体库，检查字幕缺失字体。"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/zitifenlei.png"
-    plugin_version = "3.0.6"
+    plugin_version = "3.0.7"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "zitifenlei_"
@@ -2993,9 +2995,12 @@ class Zitifenlei(_PluginBase):
         if not self._ensure_font_index():
             self._db.add_log("子集化未执行：字体索引不可用（请确认字体库目录已配置并完成重建）", "warning")
             return stats
-        overwrite_all = bool(self.get_resource_or_config("subset_overwrite"))
         inbound_overwrite = bool(self.get_resource_or_config("inbound_subset_overwrite"))
         out_dir_cfg = str(self.get_resource_or_config("subset_out_dir") or "")
+        # 「监控目录输出方式」是目录监控唯一的成品/源字幕去向开关：
+        #   copy = 成品进输出目录、源字幕保留（未配输出目录：另生成 xx.ziti.ass 并保留源）
+        #   move = 成品进输出目录、成功后删除源字幕（未配输出目录：成品就地替换源字幕）
+        watch_move = str(self.get_resource_or_config("subset_out_mode") or "copy") == "move"
         for f in files:
             try:
                 # 优雅停止：停插件时当前条子集化处理完（含写结果记录）就不再继续
@@ -3005,14 +3010,14 @@ class Zitifenlei(_PluginBase):
                 if not f.is_file() or not is_ass_file(f.name):
                     continue
                 src_kind = self._subset_source_kind(f, source)
-                overwrite = overwrite_all
-                # 上传临时目录（manual）：永远不覆盖源文件，成品留临时目录供下载
-                if src_kind == "manual":
-                    overwrite = False
-                # 媒体库（inbound）：独立开关控制，默认 off 保留原字幕
-                elif src_kind == "inbound":
+                # 监控目录：move=删源（有输出目录时）/就地替换（无输出目录）；copy=保留源
+                # 上传临时目录（manual）与其他来源：永远不覆盖源文件
+                overwrite = False
+                if src_kind == "inbound":
+                    # 媒体库（inbound）：独立开关控制，默认 off 保留原字幕
                     overwrite = inbound_overwrite
-                # watch（监控目录）：走全局 subset_overwrite，不单独隔离
+                elif src_kind == "watch":
+                    overwrite = watch_move
                 # 原始字幕名（去掉上传临时目录的 subset_<uuid> 前缀），全部状态记录统一用它
                 orig = self._original_subset_name(f)
                 # 已内嵌（子集化）字幕跳过，不重复处理
@@ -3040,12 +3045,11 @@ class Zitifenlei(_PluginBase):
                 if status == "success":
                     out = Path(res.get("out") or "")
                     # 成品输出名：以「原始字幕名」为准（去掉上传临时目录的 uuid 前缀），
-                    # 后缀固定 .ziti.ass；「子集是否删除源文件」开启时直接替换原字幕
+                    # 后缀固定 .ziti.ass；未配输出目录且为 move 时直接替换原字幕
                     orig = self._original_subset_name(f)
                     base = orig[:-4] if orig.lower().endswith(".ass") else orig
                     # 配了输出目录的目录监控：成品统一先落成 .ziti.ass 再同步到输出目录，
-                    # 不再就地改写监控目录的源字幕（否则「覆盖原文件」和「输出方式」互相打架）。
-                    # 此模式下「覆盖原文件」= 成品成功输出到输出目录后，删除监控目录的源字幕。
+                    # 不再就地改写监控目录的源字幕（成品去向由「监控目录输出方式」决定）。
                     watch_with_out = src_kind == "watch" and bool(out_dir_cfg)
                     if overwrite and not watch_with_out:
                         # 覆盖模式：子集化结果直接替换原字幕文件（原名不变）。
@@ -3104,8 +3108,15 @@ class Zitifenlei(_PluginBase):
                         synced, sync_msg = self._sync_subset_output(
                             final_out, self._extract_show_name(str(final_out))
                         )
-                        # 「覆盖原文件」在配了输出目录时表示「成品输出成功后删除源字幕」：
-                        # 源字幕已无用（成品在输出目录里），留着只会在下次扫描时重复处理
+                        # 成品已进输出目录：监控目录不再留 .ziti.ass 副本，
+                        # 否则 copy 模式下会同时出现「源字幕 + 成品副本」两份，也容易被下一轮扫描重复收录
+                        if synced:
+                            try:
+                                if Path(final_out).resolve() != Path(synced).resolve():
+                                    Path(final_out).unlink(missing_ok=True)
+                            except Exception as err:
+                                sync_msg = f"{sync_msg}；监控目录成品清理失败: {err}"
+                        # move 模式：成品落地输出目录后删除源字幕（copy 模式保留源字幕）
                         if synced and overwrite and watch_with_out:
                             try:
                                 if Path(f).resolve() != Path(final_out).resolve():

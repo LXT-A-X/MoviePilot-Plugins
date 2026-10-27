@@ -35,10 +35,9 @@ const DEFAULT_CONFIG = {
   startup_light_check: true,
   weekly_reconcile: true,
   auto_subset: false,
-  subset_overwrite: false,
   // 子集化在独立工作进程执行（uharfbuzz 段错误/病态字体只影响当前字幕，不拖垮主进程）
   subset_process_isolation: true,
-  // MP 入库成品是否直接替换媒体库原字幕（与「子集是否删除源文件」独立）
+  // MP 入库成品是否直接替换媒体库原字幕（与「监控目录输出方式」独立）
   inbound_subset_overwrite: false,
   subset_out_dir: '',
   subset_out_mode: 'copy',
@@ -56,8 +55,8 @@ const archiveModes = [
   { title: '移动原文件', value: 'move', description: '归档时移动字体到字体库目录' },
 ]
 const subsetOutModes = [
-  { title: '复制到输出目录', value: 'copy', description: '成品复制一份到输出目录；监控目录里是否删源字幕，由上方「子集是否删除源文件」决定' },
-  { title: '移动到输出目录', value: 'move', description: '成品移动到输出目录；监控目录里是否删源字幕，由上方「子集是否删除源文件」决定' },
+  { title: '复制到输出目录', value: 'copy', description: '成品复制到输出目录，监控目录的源字幕保留（默认）' },
+  { title: '移动到输出目录', value: 'move', description: '成品移动到输出目录，输出成功后删除监控目录的源字幕' },
 ]
 // 同步子集字体夹（*_subsetted）：字体已内嵌进成品字幕，夹子仅是备份，默认不保留
 // HDR 字幕亮度档位（关/档位选择，对应 ASS 色码压暗比例）
@@ -389,16 +388,9 @@ watch(() => config.value.auto_subset, (v) => {
         <div class="zt-switch-row">
           <div class="flex-grow-1">
             <div class="zt-switch-title">MP 入库替换原字幕</div>
-            <div class="zt-switch-desc">开：入库子集化的成品直接替换媒体库原字幕（文件名不变，媒体库只保留一份）；关：保留原字幕，另生成 xx.ziti.ass 成品（默认）。只作用于 MP 入库，目录监控见下方「子集是否删除源文件」，手动上传永不覆盖</div>
+            <div class="zt-switch-desc">开：入库子集化的成品直接替换媒体库原字幕（文件名不变，媒体库只保留一份）；关：保留原字幕，另生成 xx.ziti.ass 成品（默认）。只作用于 MP 入库，目录监控见下方「监控目录输出方式」，手动上传永不覆盖</div>
           </div>
           <v-switch v-model="config.inbound_subset_overwrite" color="primary" hide-details></v-switch>
-        </div>
-        <div class="zt-switch-row">
-          <div class="flex-grow-1">
-            <div class="zt-switch-title">子集是否删除源文件</div>
-            <div class="zt-switch-desc">只作用于目录监控（手动上传与 MP 入库不受影响）。配了「子集化输出目录」时：成品固定输出到输出目录，开=输出成功后删除监控目录的源字幕，关=源字幕保留（默认）。未配输出目录时：开=成品就地替换源字幕，关=另生成 xx.ziti.ass</div>
-          </div>
-          <v-switch v-model="config.subset_overwrite" color="primary" hide-details></v-switch>
         </div>
         <div class="zt-switch-row">
           <div class="flex-grow-1">
@@ -424,7 +416,7 @@ watch(() => config.value.auto_subset, (v) => {
             </template>
           </v-radio>
         </v-radio-group>
-        <div class="zt-hint">目录监控（ASS 自动子集化目录）的字幕成品按「输出目录/剧名/」子文件夹分类输出（如「你的名字.ass」→「你的名字」文件夹），多剧字幕互不混淆；手动上传的字幕子集结果留在插件临时文件夹，不受此设置影响</div>
+        <div class="zt-hint">目录监控（ASS 自动子集化目录）的字幕成品按「输出目录/剧名/」子文件夹分类输出（如「你的名字.ass」→「你的名字」文件夹），多剧字幕互不混淆；手动上传的字幕子集结果留在插件临时文件夹，不受此设置影响。未配输出目录时不涉及复制/移动：复制=另生成 xx.ziti.ass 并保留源字幕，移动=成品就地替换源字幕</div>
         <div class="zt-hint">字体已内嵌进 .ziti.ass 成品，不再产生 *_subsetted 字体备份夹；旧版本遗留的备份夹会在对应源字幕删除时自动清理</div>
 
         <div class="zt-option-label mb-1 mt-2">HDR 字幕亮度</div>
