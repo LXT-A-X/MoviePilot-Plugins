@@ -425,7 +425,7 @@ class Zitifenlei(_PluginBase):
     plugin_name = "字体分类管家"
     plugin_desc = "字体归档整理与 ASS 字幕字体检查插件：扫描/上传字体到字体库，检查字幕缺失字体。"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/zitifenlei.png"
-    plugin_version = "3.1.1"
+    plugin_version = "3.1.2"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "zitifenlei_"
@@ -1641,8 +1641,12 @@ class Zitifenlei(_PluginBase):
         _ARCH_DUP / _ARCH_DUP_DELETED / _ARCH_DUP_DEL_FAILED=库中已存在跳过；
         None=处理失败。调用方据此区分「跳过」与「失败」分别统计。
         """
-        # 收集开关：关闭 → 只收下待确认，不自动归档；种子来源可按「收集去向」强制走待确认
-        if force_pending or self.get_resource_or_config("auto_collect") is False:
+        # 收集开关：关闭 → 只收下待确认，不自动归档。
+        # 种子来源以「收集后进待整理」为准：关=直接入库，不再受「自动执行监控结果」总开关影响，
+        # 否则会与设置页「关：直接归档进字体库」的说明不一致。
+        if force_pending:
+            return self._queue_auto_pending(file_path, source)
+        if source != "torrent" and self.get_resource_or_config("auto_collect") is False:
             return self._queue_auto_pending(file_path, source)
         lib_dir = self.get_resource_or_config("lib_dir") or ""
         if not lib_dir:
@@ -3454,7 +3458,10 @@ class Zitifenlei(_PluginBase):
           state: skipped（未开启/无 hash）/ cached（已收集过）/ queued|running（不等待时）
                  / done|empty|failed / timeout
         """
-        empty = {"state": "skipped", "added": 0, "skipped": 0, "failed": 0, "picked": 0, "name": "", "reason": ""}
+        empty = {
+            "state": "skipped", "added": 0, "pending": 0, "skipped": 0,
+            "failed": 0, "picked": 0, "name": "", "reason": "",
+        }
         if not self._torrent_enabled() or not torrent_hash:
             return empty
         job: Optional[Dict[str, Any]] = None
@@ -3470,6 +3477,7 @@ class Zitifenlei(_PluginBase):
                     return {
                         "state": "cached",
                         "added": int(done.get("added") or 0),
+                        "pending": 0,
                         "skipped": int(done.get("skipped") or 0),
                         "failed": int(done.get("failed") or 0),
                         "picked": int(done.get("picked") or 0),
@@ -3498,6 +3506,7 @@ class Zitifenlei(_PluginBase):
             return {
                 "state": "timeout",
                 "added": int(stats.get("added") or 0),
+                "pending": int(stats.get("pending") or 0),
                 "skipped": int(stats.get("skipped") or 0),
                 "failed": int(stats.get("failed") or 0),
                 "picked": int(stats.get("picked") or 0),
@@ -3507,6 +3516,7 @@ class Zitifenlei(_PluginBase):
         return {
             "state": str(job.get("state") or "done"),
             "added": int(stats.get("added") or 0),
+            "pending": int(stats.get("pending") or 0),
             "skipped": int(stats.get("skipped") or 0),
             "failed": int(stats.get("failed") or 0),
             "picked": int(stats.get("picked") or 0),
@@ -3517,7 +3527,9 @@ class Zitifenlei(_PluginBase):
     def _torrent_job_run(self, torrent_hash: str, downloader: str, source: str) -> None:
         """执行一次种子字体截取：暂存复制 → 解压 → 归档入库 → 重建索引 → 写记录。"""
         job = self._torrent_jobs.get(torrent_hash) or {}
-        stats: Dict[str, Any] = {"picked": 0, "added": 0, "skipped": 0, "failed": 0, "name": ""}
+        stats: Dict[str, Any] = {
+            "picked": 0, "added": 0, "pending": 0, "skipped": 0, "failed": 0, "name": ""
+        }
         staging: Optional[Path] = None
         record_id = 0
         state = "failed"
@@ -3633,6 +3645,7 @@ class Zitifenlei(_PluginBase):
                         merged["failed"] += 1
                         skipped_notes.append(f"归档失败: {err}")
                 stats["added"] = len(merged["added"])
+                stats["pending"] = int(merged["pending"] or 0)
                 stats["skipped"] = len(merged["skipped"])
                 stats["failed"] += int(merged["failed"] or 0)
                 state = "done" if (stats["added"] or merged["pending"]) else ("failed" if stats["failed"] else "empty")
@@ -3981,9 +3994,16 @@ class Zitifenlei(_PluginBase):
                         )
                     elif state == "failed" and res.get("reason"):
                         torrent_notes.append(f"⚠ 种子字体收集失败：{res.get('reason')}")
-                    elif int(res.get("added") or 0) > 0:
+                    elif int(res.get("added") or 0) > 0 or int(res.get("pending") or 0) > 0:
+                        bits: List[str] = []
+                        if int(res.get("added") or 0) > 0:
+                            bits.append(f"补充 {int(res.get('added') or 0)} 个字体")
+                        if int(res.get("pending") or 0) > 0:
+                            bits.append(
+                                f"{int(res.get('pending') or 0)} 个已进待整理（确认后重试）"
+                            )
                         torrent_notes.append(
-                            f"种子收集：补充 {int(res.get('added') or 0)} 个字体"
+                            f"种子收集：{'，'.join(bits)}"
                             f"（来自 {res.get('name') or str(h)[:8]}）"
                         )
             if do_check:

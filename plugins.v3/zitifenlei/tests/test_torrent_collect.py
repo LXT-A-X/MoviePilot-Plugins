@@ -281,6 +281,90 @@ def test_torrent_job_empty_archive_is_not_failure(tmp_path, monkeypatch):
     assert pack.is_file()
 
 
+def test_torrent_job_pending_is_reported(tmp_path, monkeypatch):
+    """「收集后进待整理」开启时，待整理数量要回传给检查通知。"""
+    plugin, _lib = _plugin(tmp_path)
+    plugin._config["torrent_to_pending"] = True
+    dl = tmp_path / "dl"
+    dl.mkdir()
+    (dl / "a.ttf").write_bytes(b"fake")
+    instance = _FakeInstance(
+        files=[{"name": "a.ttf", "size": 4, "progress": 1.0, "index": 0}],
+        meta={
+            "hash": "p" * 40,
+            "name": "待整理种子",
+            "save_path": str(dl),
+            "completion_on": 1,
+        },
+    )
+    monkeypatch.setattr(tq, "get_downloader_service", lambda name: _FakeService(instance))
+
+    def _fake_archive(folder, *a, **k):
+        # 裸字体只经过 raw；extract 目录为空，避免重复计数
+        pending = 2 if Path(folder).name == "raw" else 0
+        return {
+            "added": [], "skipped": [], "failed": 0, "pending": pending,
+            "dup_deleted": 0, "delete_failed": 0,
+        }
+
+    monkeypatch.setattr(plugin, "_archive_from_dir", _fake_archive)
+    monkeypatch.setattr(plugin, "_rebuild_subset_index_silent", lambda: (True, ""))
+
+    res = plugin._ensure_torrent_collect("p" * 40, "下载器1", source="inbound", wait=True)
+    assert res["state"] == "done"
+    assert res["added"] == 0
+    assert res["pending"] == 2
+    rows = plugin._db.list_torrent_ingest()
+    assert rows and "待确认 2" in (rows[0]["detail"] or "")
+
+
+def test_torrent_source_ignores_auto_collect_pending(tmp_path, monkeypatch):
+    """关掉「收集后进待整理」= 直接入库，不再被「自动执行监控结果」总开关送进待确认。"""
+    plugin, _lib = _plugin(tmp_path)
+    plugin._config["auto_collect"] = False
+    plugin._config["lib_dir"] = ""
+    calls = []
+    monkeypatch.setattr(
+        plugin, "_queue_auto_pending", lambda p, s: calls.append((p, s)) or 999
+    )
+    font = tmp_path / "a.ttf"
+    font.write_bytes(b"x")
+
+    ret = plugin._archive_font_file_impl(font, source="torrent", force_pending=False)
+    assert ret is None  # 未配置库目录：走直接入库分支后正常报缺失，而不是进待确认
+    assert not calls
+
+
+def test_watch_source_still_pending_when_auto_collect_off(tmp_path, monkeypatch):
+    """目录监控来源保持原逻辑：总开关关闭时仍进待确认。"""
+    plugin, _lib = _plugin(tmp_path)
+    plugin._config["auto_collect"] = False
+    calls = []
+    monkeypatch.setattr(
+        plugin, "_queue_auto_pending", lambda p, s: calls.append((p, s)) or 999
+    )
+    font = tmp_path / "a.ttf"
+    font.write_bytes(b"x")
+
+    assert plugin._archive_font_file_impl(font, source="auto", force_pending=False) == 999
+    assert calls and calls[0][1] == "auto"
+
+
+def test_torrent_force_pending_still_queues(tmp_path, monkeypatch):
+    """打开「收集后进待整理」时，种子来源按设置进待确认。"""
+    plugin, _lib = _plugin(tmp_path)
+    plugin._config["auto_collect"] = True
+    calls = []
+    monkeypatch.setattr(
+        plugin, "_queue_auto_pending", lambda p, s: calls.append((p, s)) or 999
+    )
+    font = tmp_path / "a.ttf"
+    font.write_bytes(b"x")
+
+    assert plugin._archive_font_file_impl(font, source="torrent", force_pending=True) == 999
+    assert calls and calls[0][1] == "torrent"
+
+
 def test_torrent_collect_disabled_does_nothing(tmp_path, monkeypatch):
     plugin, _lib = _plugin(tmp_path)
     plugin._config["torrent_enabled"] = False

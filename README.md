@@ -8,7 +8,7 @@ MoviePilot 插件仓库，兼容 **V2 与 V3**，收录实用插件。
 | --- | --- | --- | --- |
 | [字幕字体代理](#字幕字体代理-fontinassproxy) | 反代 Emby/Jellyfin 字幕流，实时子集化并嵌入字体 | \- | ✅ 3.1.2 |
 | [Emby 演职人员中文化](#emby-演职人员中文化-embypeoplelocalize) | 大模型翻译 Emby 人名为中文 | ✅ 1.3.11 | ✅ 4.7.10 |
-| [字体分类管家](#字体分类管家-zitifenlei) | 字体归档整理 + ASS 字幕检查 + 子集化 | ✅ 1.2.24 | ✅ 3.1.1 |
+| [字体分类管家](#字体分类管家-zitifenlei) | 字体归档整理 + ASS 字幕检查 + 子集化 | ✅ 1.2.24 | ✅ 3.1.2 |
 
 > V2 插件位于 `plugins.v2/`，适用于 MoviePilot V2；V3 专属版位于 `plugins.v3/`（依赖稳定 SDK），适用于 MoviePilot V3，安装时请选择匹配你 MoviePilot 主版本的版本。
 
@@ -94,7 +94,7 @@ MoviePilot 插件仓库，兼容 **V2 与 V3**，收录实用插件。
 **安装方式：**
 
 1. 在 MoviePilot 插件市场添加本仓库地址
-2. 搜索 "字体分类管家" 并安装（V2 1.2.24 / V3 3.1.1）
+2. 搜索 "字体分类管家" 并安装（V2 1.2.24 / V3 3.1.2）
 3. 在插件「设置」页配置字体库目录与监控目录（详见[使用手册](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v2/zitifenlei/%E4%BD%BF%E7%94%A8%E6%89%8B%E5%86%8C.md)）
 4. 启用插件
 
