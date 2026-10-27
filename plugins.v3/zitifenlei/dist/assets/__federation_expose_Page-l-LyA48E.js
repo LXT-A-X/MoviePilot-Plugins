@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import { _ as _export_sfc, a as apiModule, S as Settings, C as Check, F as FontLibrary, D as Dashboard } from './Settings-CLpHk05u.js';
+import { _ as _export_sfc, a as apiModule, S as Settings, C as Check, F as FontLibrary, D as Dashboard } from './Settings-B_PFCPya.js';
 
 const {createTextVNode:_createTextVNode$2,resolveComponent:_resolveComponent$2,withCtx:_withCtx$2,createVNode:_createVNode$2,createElementVNode:_createElementVNode$2,toDisplayString:_toDisplayString$2,Fragment:_Fragment$2,openBlock:_openBlock$2,createElementBlock:_createElementBlock$2,createCommentVNode:_createCommentVNode$2,createBlock:_createBlock$2,renderList:_renderList$2,withModifiers:_withModifiers,normalizeClass:_normalizeClass} = await importShared('vue');
 
@@ -287,6 +287,9 @@ function onRecordsScroll(e) {
   if (hasMoreRecords.value && el && el.scrollTop + el.clientHeight >= el.scrollHeight - 60) {
     renderBudget.value += RENDER_STEP;
   }
+}
+function loadMoreRecords() {
+  renderBudget.value += RENDER_STEP;
 }
 
 // 索引时间文案：优先显示「构建」时间；索引只由逐文件增量入库建立过时没有构建时间，
@@ -663,7 +666,6 @@ return (_ctx, _cache) => {
   const _component_v_select = _resolveComponent$2("v-select");
   const _component_v_text_field = _resolveComponent$2("v-text-field");
   const _component_v_chip = _resolveComponent$2("v-chip");
-  const _component_v_progress_circular = _resolveComponent$2("v-progress-circular");
   const _component_v_row = _resolveComponent$2("v-row");
   const _component_v_card_text = _resolveComponent$2("v-card-text");
   const _component_v_card_actions = _resolveComponent$2("v-card-actions");
@@ -1293,10 +1295,16 @@ return (_ctx, _cache) => {
                   }), 128)),
                   (hasMoreRecords.value)
                     ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_18$1, [
-                        _createVNode$2(_component_v_progress_circular, {
-                          indeterminate: "",
-                          size: "18",
-                          color: "primary"
+                        _createVNode$2(_component_v_btn, {
+                          size: "small",
+                          variant: "text",
+                          color: "primary",
+                          onClick: loadMoreRecords
+                        }, {
+                          default: _withCtx$2(() => [...(_cache[39] || (_cache[39] = [
+                            _createTextVNode$2("加载更多", -1)
+                          ]))]),
+                          _: 1
                         })
                       ]))
                     : _createCommentVNode$2("", true)
@@ -1332,7 +1340,7 @@ return (_ctx, _cache) => {
                       _createTextVNode$2("， 并同步删除监控/上传来历的成品文件（含输出目录中对应文件）")
                     ], 64))
                   : _createCommentVNode$2("", true),
-                _cache[39] || (_cache[39] = _createTextVNode$2("。 MP 入库记录只删记录，不动媒体库原字幕；字体库与待处理列表不受影响。 ", -1))
+                _cache[40] || (_cache[40] = _createTextVNode$2("。 MP 入库记录只删记录，不动媒体库原字幕；字体库与待处理列表不受影响。 ", -1))
               ]),
               _: 1
             }),
@@ -1343,7 +1351,7 @@ return (_ctx, _cache) => {
                   variant: "text",
                   onClick: _cache[5] || (_cache[5] = $event => (groupConfirm.value = false))
                 }, {
-                  default: _withCtx$2(() => [...(_cache[40] || (_cache[40] = [
+                  default: _withCtx$2(() => [...(_cache[41] || (_cache[41] = [
                     _createTextVNode$2("取消", -1)
                   ]))]),
                   _: 1
@@ -1354,7 +1362,7 @@ return (_ctx, _cache) => {
                   loading: groupDeleting.value,
                   onClick: confirmDeleteGroup
                 }, {
-                  default: _withCtx$2(() => [...(_cache[41] || (_cache[41] = [
+                  default: _withCtx$2(() => [...(_cache[42] || (_cache[42] = [
                     _createTextVNode$2("删除整组", -1)
                   ]))]),
                   _: 1
@@ -1377,13 +1385,13 @@ return (_ctx, _cache) => {
         _createVNode$2(_component_v_card, null, {
           default: _withCtx$2(() => [
             _createVNode$2(_component_v_card_title, { class: "text-h6" }, {
-              default: _withCtx$2(() => [...(_cache[42] || (_cache[42] = [
+              default: _withCtx$2(() => [...(_cache[43] || (_cache[43] = [
                 _createTextVNode$2("清空全部子集化记录？", -1)
               ]))]),
               _: 1
             }),
             _createVNode$2(_component_v_card_text, null, {
-              default: _withCtx$2(() => [...(_cache[43] || (_cache[43] = [
+              default: _withCtx$2(() => [...(_cache[44] || (_cache[44] = [
                 _createTextVNode$2(" 将删除全部子集化结果记录，并同步删除监控/上传来历的成品文件（含输出目录中对应文件与空的剧名文件夹）。 MP 入库记录只删记录，不动媒体库原字幕；「待处理」列表不受影响。 ", -1)
               ]))]),
               _: 1
@@ -1395,7 +1403,7 @@ return (_ctx, _cache) => {
                   variant: "text",
                   onClick: _cache[7] || (_cache[7] = $event => (clearConfirm.value = false))
                 }, {
-                  default: _withCtx$2(() => [...(_cache[44] || (_cache[44] = [
+                  default: _withCtx$2(() => [...(_cache[45] || (_cache[45] = [
                     _createTextVNode$2("取消", -1)
                   ]))]),
                   _: 1
@@ -1406,7 +1414,7 @@ return (_ctx, _cache) => {
                   loading: clearingRecords.value,
                   onClick: clearRecords
                 }, {
-                  default: _withCtx$2(() => [...(_cache[45] || (_cache[45] = [
+                  default: _withCtx$2(() => [...(_cache[46] || (_cache[46] = [
                     _createTextVNode$2("全部清空", -1)
                   ]))]),
                   _: 1
@@ -1429,13 +1437,13 @@ return (_ctx, _cache) => {
         _createVNode$2(_component_v_card, null, {
           default: _withCtx$2(() => [
             _createVNode$2(_component_v_card_title, { class: "text-h6" }, {
-              default: _withCtx$2(() => [...(_cache[46] || (_cache[46] = [
+              default: _withCtx$2(() => [...(_cache[47] || (_cache[47] = [
                 _createTextVNode$2("全部重建字体库？", -1)
               ]))]),
               _: 1
             }),
             _createVNode$2(_component_v_card_text, null, {
-              default: _withCtx$2(() => [...(_cache[47] || (_cache[47] = [
+              default: _withCtx$2(() => [...(_cache[48] || (_cache[48] = [
                 _createTextVNode$2(" 将清空现有字体索引，再逐文件重新解析整个字体库（生成 face/别名/字符覆盖）。 日常归档与入库仍是增量/减量，不需要用这里。耗时取决于字体数量，期间检索可能变慢。 人工映射与字幕缺失快照不受影响。 ", -1)
               ]))]),
               _: 1
@@ -1447,7 +1455,7 @@ return (_ctx, _cache) => {
                   variant: "text",
                   onClick: _cache[9] || (_cache[9] = $event => (rebuildConfirm.value = false))
                 }, {
-                  default: _withCtx$2(() => [...(_cache[48] || (_cache[48] = [
+                  default: _withCtx$2(() => [...(_cache[49] || (_cache[49] = [
                     _createTextVNode$2("取消", -1)
                   ]))]),
                   _: 1
@@ -1458,7 +1466,7 @@ return (_ctx, _cache) => {
                   loading: rebuildingIndex.value,
                   onClick: rebuildIndex
                 }, {
-                  default: _withCtx$2(() => [...(_cache[49] || (_cache[49] = [
+                  default: _withCtx$2(() => [...(_cache[50] || (_cache[50] = [
                     _createTextVNode$2("开始重建", -1)
                   ]))]),
                   _: 1
@@ -1477,7 +1485,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const Subset = /*#__PURE__*/_export_sfc(_sfc_main$2, [['__scopeId',"data-v-c2306b3c"]]);
+const Subset = /*#__PURE__*/_export_sfc(_sfc_main$2, [['__scopeId',"data-v-245b6307"]]);
 
 const {createTextVNode:_createTextVNode$1,resolveComponent:_resolveComponent$1,withCtx:_withCtx$1,createVNode:_createVNode$1,toDisplayString:_toDisplayString$1,createElementVNode:_createElementVNode$1,openBlock:_openBlock$1,createBlock:_createBlock$1,createCommentVNode:_createCommentVNode$1,renderList:_renderList$1,Fragment:_Fragment$1,createElementBlock:_createElementBlock$1} = await importShared('vue');
 
@@ -2370,7 +2378,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const MissingFonts = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-284d98d5"]]);
+const MissingFonts = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-aa214945"]]);
 
 const {createTextVNode:_createTextVNode,resolveComponent:_resolveComponent,withCtx:_withCtx,createVNode:_createVNode,createElementVNode:_createElementVNode,renderList:_renderList,Fragment:_Fragment,openBlock:_openBlock,createElementBlock:_createElementBlock,toDisplayString:_toDisplayString,createBlock:_createBlock,createCommentVNode:_createCommentVNode,resolveDynamicComponent:_resolveDynamicComponent,KeepAlive:_KeepAlive,createSlots:_createSlots} = await importShared('vue');
 

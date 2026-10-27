@@ -237,6 +237,9 @@ function onRecordsScroll(e) {
     renderBudget.value += RENDER_STEP
   }
 }
+function loadMoreRecords() {
+  renderBudget.value += RENDER_STEP
+}
 
 // 索引时间文案：优先显示「构建」时间；索引只由逐文件增量入库建立过时没有构建时间，
 // 退化为「最近更新」（font_files.indexed_at 最大值），避免只显示一个空破折号
@@ -865,7 +868,7 @@ function stopPolling() {
             </div>
           </div>
           <div v-if="hasMoreRecords" class="zt-loading-more pa-2 text-center">
-            <v-progress-circular indeterminate size="18" color="primary"></v-progress-circular>
+            <v-btn size="small" variant="text" color="primary" @click="loadMoreRecords">加载更多</v-btn>
           </div>
         </div>
         </v-card>
@@ -991,6 +994,16 @@ function stopPolling() {
   .zt-title-actions {
     width: 100%;
     margin-inline-start: 0 !important;
+  }
+  /* 手机端不做卡片内滚动：卡片随内容长高，整页由外层统一滚动，避免手指落在列表空白处时整页滑不动 */
+  .zt-list-card {
+    height: auto;
+    overflow: visible;
+  }
+  .zt-list-body,
+  .zt-record-body {
+    overflow-y: visible;
+    overscroll-behavior: auto;
   }
 }
 

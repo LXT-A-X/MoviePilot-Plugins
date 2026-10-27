@@ -186,6 +186,9 @@ function onRecordsScroll(e) {
     renderBudget.value += RENDER_STEP
   }
 }
+function loadMoreRecords() {
+  renderBudget.value += RENDER_STEP
+}
 
 async function loadDetail(id) {
   selectedId.value = id
@@ -730,7 +733,7 @@ onUnmounted(() => {
                 </div>
               </div>
               <div v-if="hasMoreRecords" class="zt-loading-more pa-2 text-center">
-                <v-progress-circular indeterminate size="18" color="primary"></v-progress-circular>
+                <v-btn size="small" variant="text" color="primary" @click="loadMoreRecords">加载更多</v-btn>
               </div>
             </div>
           </div>
@@ -963,6 +966,16 @@ onUnmounted(() => {
   .zt-card-title-row {
     flex-wrap: wrap;
     row-gap: 6px;
+  }
+  /* 手机端不做卡片内滚动：卡片随内容长高，整页由外层统一滚动，避免手指落在列表空白处时整页滑不动 */
+  .zt-list-card,
+  .zt-detail-card {
+    height: auto;
+    overflow: visible;
+  }
+  .zt-list-body {
+    overflow-y: visible;
+    overscroll-behavior: auto;
   }
 }
 /* ===== 分组抽屉：组头按状态着色，点击折叠/展开 ===== */

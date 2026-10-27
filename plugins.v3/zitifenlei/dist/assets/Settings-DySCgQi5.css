@@ -262,62 +262,72 @@
   cursor: pointer;
 }
 
-.zt-tip[data-v-eab4065b] {
+.zt-tip[data-v-8c4566b3] {
   opacity: 0.6;
 }
-.zt-match-source[data-v-eab4065b] {
+.zt-match-source[data-v-8c4566b3] {
   font-size: 12px;
   opacity: 0.65;
 }
-.zt-list-card[data-v-eab4065b] {
+.zt-list-card[data-v-8c4566b3] {
   height: 640px;
   overflow: hidden;
   display: flex;
   flex-direction: column;
 }
-.zt-detail-card[data-v-eab4065b] {
+.zt-detail-card[data-v-8c4566b3] {
   height: 640px;
   overflow: auto;
 }
-.zt-list-body[data-v-eab4065b] {
+.zt-list-body[data-v-8c4566b3] {
   min-height: 60px;
   flex: 1 1 auto;
   overflow-y: auto;
   overscroll-behavior: contain;
 }
 /* 列表卡片标题行：与子集化结果卡片保持同一套标题 / 筛选栏样式 */
-.zt-card-title-row[data-v-eab4065b] {
+.zt-card-title-row[data-v-8c4566b3] {
   display: flex;
   align-items: center;
 }
-.zt-card-title-row .zt-title-text[data-v-eab4065b] {
+.zt-card-title-row .zt-title-text[data-v-8c4566b3] {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.zt-filter-row[data-v-eab4065b] {
+.zt-filter-row[data-v-8c4566b3] {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 8px 12px;
 }
-.zt-filter-status[data-v-eab4065b] {
+.zt-filter-status[data-v-8c4566b3] {
   width: 130px;
   flex-shrink: 0;
 }
-.zt-filter-search[data-v-eab4065b] {
+.zt-filter-search[data-v-8c4566b3] {
   flex: 1 1 auto;
   min-width: 120px;
 }
 @media (max-width: 959.95px) {
-.zt-card-title-row[data-v-eab4065b] {
+.zt-card-title-row[data-v-8c4566b3] {
     flex-wrap: wrap;
     row-gap: 6px;
 }
+  /* 手机端不做卡片内滚动：卡片随内容长高，整页由外层统一滚动，避免手指落在列表空白处时整页滑不动 */
+.zt-list-card[data-v-8c4566b3],
+  .zt-detail-card[data-v-8c4566b3] {
+    height: auto;
+    overflow: visible;
+}
+.zt-list-body[data-v-8c4566b3] {
+    overflow-y: visible;
+    overscroll-behavior: auto;
+}
 }
 /* ===== 分组抽屉：组头按状态着色，点击折叠/展开 ===== */
-.zt-group[data-v-eab4065b] {
+.zt-group[data-v-8c4566b3] {
   --zt-group-color: 158, 158, 158;
   margin-bottom: 8px;
   border: 1px solid rgba(var(--zt-group-color), 0.35);
@@ -326,15 +336,15 @@
   background: rgba(var(--zt-group-color), 0.06);
   overflow: hidden;
 }
-.zt-group-success[data-v-eab4065b] { --zt-group-color: 76, 175, 80;
+.zt-group-success[data-v-8c4566b3] { --zt-group-color: 76, 175, 80;
 }
-.zt-group-warning[data-v-eab4065b] { --zt-group-color: 255, 152, 0;
+.zt-group-warning[data-v-8c4566b3] { --zt-group-color: 255, 152, 0;
 }
-.zt-group-error[data-v-eab4065b]   { --zt-group-color: 244, 67, 54;
+.zt-group-error[data-v-8c4566b3]   { --zt-group-color: 244, 67, 54;
 }
-.zt-group-grey[data-v-eab4065b]    { --zt-group-color: 158, 158, 158;
+.zt-group-grey[data-v-8c4566b3]    { --zt-group-color: 158, 158, 158;
 }
-.zt-group-head[data-v-eab4065b] {
+.zt-group-head[data-v-8c4566b3] {
   display: flex;
   align-items: center;
   gap: 4px;
@@ -342,10 +352,10 @@
   cursor: pointer;
   user-select: none;
 }
-.zt-group-head[data-v-eab4065b]:hover {
+.zt-group-head[data-v-8c4566b3]:hover {
   background: rgba(var(--zt-group-color), 0.1);
 }
-.zt-group-name[data-v-eab4065b] {
+.zt-group-name[data-v-8c4566b3] {
   flex: 1 1 auto;
   min-width: 0;
   font-size: 13.5px;
@@ -354,88 +364,88 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.zt-group-count[data-v-eab4065b] {
+.zt-group-count[data-v-8c4566b3] {
   flex: 0 0 auto;
   font-size: 12px;
   opacity: 0.65;
 }
-.zt-group-stats[data-v-eab4065b],
-.zt-group-actions[data-v-eab4065b] {
+.zt-group-stats[data-v-8c4566b3],
+.zt-group-actions[data-v-8c4566b3] {
   display: inline-flex;
   align-items: center;
   gap: 4px;
   flex: 0 0 auto;
 }
-.zt-group-body[data-v-eab4065b] {
+.zt-group-body[data-v-8c4566b3] {
   border-top: 1px dashed rgba(var(--zt-group-color), 0.3);
 }
 /* 左栏只有半屏宽：窄屏时组内状态计数收起，避免组头挤成两行 */
 @media (max-width: 959.95px) {
-.zt-group-stats[data-v-eab4065b] { display: none;
+.zt-group-stats[data-v-8c4566b3] { display: none;
 }
 }
-.zt-loading-more[data-v-eab4065b] {
+.zt-loading-more[data-v-8c4566b3] {
   font-size: 12px;
   opacity: 0.7;
 }
-.zt-record-name[data-v-eab4065b] {
+.zt-record-name[data-v-8c4566b3] {
   font-weight: 500;
 }
-.zt-record-meta[data-v-eab4065b] {
+.zt-record-meta[data-v-8c4566b3] {
   font-size: 11px;
   opacity: 0.7;
 }
-.zt-record-item[data-v-eab4065b] {
+.zt-record-item[data-v-8c4566b3] {
   cursor: pointer;
 }
-.zt-detail-loading[data-v-eab4065b] {
+.zt-detail-loading[data-v-8c4566b3] {
   position: absolute;
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
 }
-.zt-detail-title[data-v-eab4065b] {
+.zt-detail-title[data-v-8c4566b3] {
   font-weight: 600;
 }
-.zt-detail-meta[data-v-eab4065b] {
+.zt-detail-meta[data-v-8c4566b3] {
   opacity: 0.75;
 }
-.zt-section-label[data-v-eab4065b] {
+.zt-section-label[data-v-8c4566b3] {
   font-size: 13px;
   font-weight: 600;
 }
-.zt-empty[data-v-eab4065b],
-.zt-empty2[data-v-eab4065b] {
+.zt-empty[data-v-8c4566b3],
+.zt-empty2[data-v-8c4566b3] {
   font-size: 13px;
   opacity: 0.6;
   text-align: center;
 }
-.zt-search-icon[data-v-eab4065b] {
+.zt-search-icon[data-v-8c4566b3] {
   cursor: pointer;
 }
 /* 全部字体：字体库已收录 → 绿光 */
-.zt-in-lib[data-v-eab4065b] {
+.zt-in-lib[data-v-8c4566b3] {
   color: #81c784 !important;
   border-color: rgba(129, 199, 132, 0.55) !important;
   box-shadow: 0 0 8px rgba(76, 175, 80, 0.45) !important;
 }
-.zt-card-title[data-v-eab4065b] {
+.zt-card-title[data-v-8c4566b3] {
   font-size: 15px;
   font-weight: 600;
 }
 /* 缺失字体逐字符明细：名称 + 缺失字符行 */
-.zt-missing-chip[data-v-eab4065b] {
+.zt-missing-chip[data-v-8c4566b3] {
   height: auto !important;
   padding-top: 4px !important;
   padding-bottom: 4px !important;
 }
-.zt-missing-chip-body[data-v-eab4065b] {
+.zt-missing-chip-body[data-v-8c4566b3] {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   line-height: 1.35;
 }
-.zt-missing-chars[data-v-eab4065b] {
+.zt-missing-chars[data-v-8c4566b3] {
   font-size: 11px;
   font-family: monospace;
   opacity: 0.8;

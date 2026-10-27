@@ -539,9 +539,11 @@ function stopPolling() {
   max-width: 320px;
   flex: 0 1 280px;
 }
-/* 描边在暗色/手机上 0.38 透明度几乎看不见，单独提高本下拉的边框对比度 */
-.zt-target-select :deep(.v-field__outline) {
-  --v-field-border-opacity: 0.72;
+/* 描边在暗色/手机上 0.38 透明度几乎看不见，单独提高本下拉的边框对比度。
+   注意：构建时 postcss 会剔除选择器里含 “.v-” 的规则（Vuetify 样式由宿主提供），
+   所以这里用属性选择器 [class*="v-field__outline"]，避免我们的覆盖被一起删掉。 */
+.zt-target-select :deep([class*="v-field__outline"]) {
+  --v-field-border-opacity: 0.9;
 }
 @media (max-width: 599.95px) {
   .zt-target-select {
