@@ -12,8 +12,14 @@ const props = defineProps({
 const emit = defineEmits(['notify', 'action'])
 
 const records = ref([])
-const total = ref(0)
 const search = ref('')
+const filterStatus = ref('')
+const statusFilterOptions = [
+  { title: '全部状态', value: '' },
+  { title: '待检查', value: 'pending' },
+  { title: '缺字体', value: 'missing' },
+  { title: '完整', value: 'ok' },
+]
 const loadingList = ref(false)
 
 // 左栏分组抽屉：一次取全量，按压缩包/上传批次/目录分组后前端渐进渲染
@@ -36,6 +42,7 @@ const uploadRef = ref(null)
 const uploading = ref(false)
 const deletingId = ref(null)
 const clearing = ref(false)
+const clearConfirm = ref(false)
 const checkingId = ref(null)
 // 全量扫描（字体监控目录字体直接入库）
 const scanning = ref(false)
@@ -71,7 +78,6 @@ async function loadRecords(reset = false, force = false) {
     })
     if (seq !== listReqSeq) return
     const list = data.list || []
-    total.value = data.total || 0
     matchSource.value = data.match_source || list[0]?.match_source || matchSource.value
     records.value = list
     if (reset) {
@@ -122,9 +128,16 @@ function groupStats(list) {
 function checkableOf(list) {
   return list.filter(r => r.status === 'pending' || r.status === 'missing')
 }
+// 状态筛选：完整含「ok」与「未验证字形（partial_check）」两种结论
+const filteredRecords = computed(() => {
+  const s = filterStatus.value
+  if (!s) return records.value
+  if (s === 'ok') return records.value.filter(r => r.status === 'ok' || r.status === 'partial_check')
+  return records.value.filter(r => r.status === s)
+})
 const groupedRecords = computed(() => {
   const map = new Map()
-  for (const r of records.value) {
+  for (const r of filteredRecords.value) {
     const g = recordGroup(r)
     let item = map.get(g.key)
     if (!item) {
@@ -191,6 +204,11 @@ let searchTimer = null
 watch(search, () => {
   if (searchTimer) clearTimeout(searchTimer)
   searchTimer = setTimeout(() => loadRecords(true), 300)
+})
+// 切换状态筛选：重新从第一组、第一批开始渲染
+watch(filterStatus, () => {
+  renderBudget.value = RENDER_STEP
+  expandedGroups.value = new Set()
 })
 
 async function handleUpload(event) {
@@ -384,6 +402,7 @@ async function clearAll() {
     emit('notify', e.message || '清空失败')
   } finally {
     clearing.value = false
+    clearConfirm.value = false
   }
 }
 
@@ -508,22 +527,10 @@ onUnmounted(() => {
         <v-icon start size="18">mdi-magnify-scan</v-icon>
         全量检查
       </v-btn>
-      <span class="text-body-2 zt-total">共 {{ total }} 条记录</span>
     </div>
     <div class="zt-tip text-body-2 mb-2">
       上传字幕仅登记为「待检查」；点顶部「检查」一次性检查全部，或点左侧每组 / 每条的「检查」单独检查；缺字体的补字/入库请到「缺失字体」页
     </div>
-
-    <v-text-field
-      v-model="search"
-      placeholder="搜索字幕文件名..."
-      density="compact"
-      variant="outlined"
-      hide-details
-      :clearable="!!search"
-      class="mb-3 zt-search"
-      prepend-inner-icon="mdi-magnify"
-    ></v-text-field>
 
     <div v-if="matchSourceText" class="zt-match-source mb-2">
       匹配基准：{{ matchSourceText }}
@@ -532,13 +539,55 @@ onUnmounted(() => {
     <v-row no-gutters>
       <!-- 左栏：记录列表，小屏占满整行（上下结构），大屏 5:7 -->
       <v-col cols="12" md="5">
-        <v-card class="zt-card-bg zt-list-card" @scroll="onRecordsScroll">
-          <v-card-text class="pa-0">
-            <v-progress-linear v-if="loadingList" indeterminate color="primary"></v-progress-linear>
+        <v-card class="zt-card-bg zt-list-card">
+          <v-card-title class="zt-card-title zt-card-title-row">
+            <v-icon start size="18">mdi-file-search-outline</v-icon>
+            <span class="zt-title-text">检查记录（{{ filteredRecords.length }}）</span>
+            <v-spacer></v-spacer>
+            <v-btn
+              size="small"
+              variant="tonal"
+              color="error"
+              :disabled="!enabled || !records.length"
+              :loading="clearing"
+              title="清空全部检查记录（同时删除上传的临时副本；监控目录与媒体库原字幕不动）"
+              @click="clearConfirm = true"
+            >
+              <v-icon start size="15">mdi-delete-sweep</v-icon>
+              <span class="d-none d-sm-inline">全部清空</span>
+            </v-btn>
+          </v-card-title>
+          <v-divider></v-divider>
+          <!-- 筛选栏：状态下拉 + 文件名搜索（与子集化结果卡片一致） -->
+          <div class="zt-filter-row">
+            <v-select
+              v-model="filterStatus"
+              :items="statusFilterOptions"
+              item-title="title"
+              item-value="value"
+              density="compact"
+              variant="outlined"
+              hide-details
+              class="zt-filter-status"
+            ></v-select>
+            <v-text-field
+              v-model="search"
+              placeholder="搜索字幕文件名…"
+              density="compact"
+              variant="outlined"
+              hide-details
+              :clearable="!!search"
+              prepend-inner-icon="mdi-magnify"
+              class="zt-filter-search"
+            ></v-text-field>
+          </div>
+          <v-divider></v-divider>
+          <v-progress-linear v-if="loadingList" indeterminate color="primary"></v-progress-linear>
+          <div class="zt-list-body pa-2" @scroll="onRecordsScroll">
             <div v-if="!loadingList && !groupedRecords.length" class="zt-empty pa-6">
-              暂无检查记录，上传 ASS 字幕后点击「检查」对比字体库
+              {{ filterStatus || search ? '暂无匹配的检查记录' : '暂无检查记录，上传 ASS 字幕后点击「检查」对比字体库' }}
             </div>
-            <div v-else class="zt-group-wrap pa-2">
+            <div v-else class="zt-group-wrap">
               <div
                 v-for="g in visibleGroups"
                 :key="g.key"
@@ -684,14 +733,7 @@ onUnmounted(() => {
                 <v-progress-circular indeterminate size="18" color="primary"></v-progress-circular>
               </div>
             </div>
-            <!-- 清空全部：放在列表底部，远离右上角关闭按钮 -->
-            <div v-if="records.length" class="zt-clear-row pa-3 d-flex justify-end">
-              <v-btn color="error" variant="tonal" size="small" :disabled="!enabled" :loading="clearing" title="清空全部检查记录（同时删除上传的临时副本；监控目录与媒体库原字幕不动）" @click="clearAll">
-                <v-icon start size="16">mdi-trash-can-outline</v-icon>
-                清空全部
-              </v-btn>
-            </div>
-          </v-card-text>
+          </div>
         </v-card>
       </v-col>
 
@@ -834,6 +876,22 @@ onUnmounted(() => {
       </v-col>
     </v-row>
 
+    <!-- 全部清空确认：上传的临时副本一并清理，监控/媒体库原字幕不动 -->
+    <v-dialog v-model="clearConfirm" max-width="440">
+      <v-card>
+        <v-card-title class="text-h6">清空全部检查记录？</v-card-title>
+        <v-card-text>
+          将删除全部 {{ records.length }} 条检查记录，并清理上传的临时副本。
+          监控目录与媒体库里的原字幕只删记录、不动文件；字体库与子集化记录不受影响。
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer></v-spacer>
+          <v-btn variant="text" @click="clearConfirm = false">取消</v-btn>
+          <v-btn color="error" variant="tonal" :loading="clearing" @click="clearAll">全部清空</v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
     <!-- 删除整组确认：上传的临时副本一并清理，监控/媒体库原字幕不动 -->
     <v-dialog v-model="groupConfirm" max-width="440">
       <v-card>
@@ -853,12 +911,6 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.zt-search {
-  max-width: 360px;
-}
-.zt-total {
-  opacity: 0.75;
-}
 .zt-tip {
   opacity: 0.6;
 }
@@ -866,10 +918,52 @@ onUnmounted(() => {
   font-size: 12px;
   opacity: 0.65;
 }
-.zt-list-card,
+.zt-list-card {
+  height: 640px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
 .zt-detail-card {
   height: 640px;
   overflow: auto;
+}
+.zt-list-body {
+  min-height: 60px;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+/* 列表卡片标题行：与子集化结果卡片保持同一套标题 / 筛选栏样式 */
+.zt-card-title-row {
+  display: flex;
+  align-items: center;
+}
+.zt-card-title-row .zt-title-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.zt-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+}
+.zt-filter-status {
+  width: 130px;
+  flex-shrink: 0;
+}
+.zt-filter-search {
+  flex: 1 1 auto;
+  min-width: 120px;
+}
+@media (max-width: 959.95px) {
+  .zt-card-title-row {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
 }
 /* ===== 分组抽屉：组头按状态着色，点击折叠/展开 ===== */
 .zt-group {
@@ -962,9 +1056,6 @@ onUnmounted(() => {
 }
 .zt-search-icon {
   cursor: pointer;
-}
-.zt-clear-row {
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
 }
 /* 全部字体：字体库已收录 → 绿光 */
 .zt-in-lib {

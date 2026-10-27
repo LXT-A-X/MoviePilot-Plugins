@@ -168,53 +168,61 @@
   white-space: nowrap;
 }
 
-.zt-card-title[data-v-f7c5e5ac] {
+.zt-card-title[data-v-284d98d5] {
   font-size: 15px;
   font-weight: 600;
 }
-.zt-missing-col[data-v-f7c5e5ac] {
+.zt-missing-col[data-v-284d98d5] {
   height: 560px;
   overflow: auto;
 }
-.zt-list-body[data-v-f7c5e5ac] {
+.zt-list-body[data-v-284d98d5] {
   min-height: 60px;
 }
-.zt-uploads[data-v-f7c5e5ac] {
+.zt-uploads[data-v-284d98d5] {
   max-height: 120px;
   overflow-y: auto;
   border: 1px solid var(--v-divider-color);
   border-radius: 4px;
 }
-.zt-empty[data-v-f7c5e5ac] {
+.zt-empty[data-v-284d98d5] {
   font-size: 13px;
   opacity: 0.6;
   text-align: center;
   line-height: 1.8;
 }
-.zt-font-name[data-v-f7c5e5ac] {
+.zt-font-name[data-v-284d98d5] {
   font-size: 14px;
   font-weight: 500;
 }
-.zt-font-meta[data-v-f7c5e5ac] {
+.zt-font-meta[data-v-284d98d5] {
   font-size: 12px;
   opacity: 0.7;
 }
-.zt-tip[data-v-f7c5e5ac] {
+.zt-tip[data-v-284d98d5] {
   opacity: 0.65;
 }
-.zt-target-select[data-v-f7c5e5ac] {
+.zt-target-select[data-v-284d98d5] {
   min-width: 220px;
   max-width: 320px;
   flex: 0 1 280px;
 }
-.zt-upload-chip[data-v-f7c5e5ac] {
+/* 描边在暗色/手机上 0.38 透明度几乎看不见，单独提高本下拉的边框对比度 */
+@media (max-width: 599.95px) {
+.zt-target-select[data-v-284d98d5] {
+    flex: 1 1 100%;
+    min-width: 0;
+    max-width: none;
+}
+}
+.zt-upload-chip[data-v-284d98d5] {
   cursor: pointer;
 }
-.zt-chip-target[data-v-f7c5e5ac] {
+.zt-chip-target[data-v-284d98d5] {
   opacity: 0.75;
   margin-left: 4px;
 }
-.zt-char-preview[data-v-f7c5e5ac] {
+.zt-char-preview[data-v-284d98d5] {
   font-family: monospace;
   opacity: 0.9;
   word-break: break-all;

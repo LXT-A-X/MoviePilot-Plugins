@@ -15,7 +15,7 @@ const mappings = ref([])
 const loading = ref(false)
 const expanded = ref({ check: false, subset: false })
 // 严格上传：可选目标缺失字体（人工映射）；不选则按字体内部名称/别名自动匹配
-const targetHint = ref('')
+const targetHint = ref(null)
 
 const uploadRef = ref(null)
 const uploading = ref(false)
@@ -304,7 +304,8 @@ function stopPolling() {
             density="compact"
             variant="outlined"
             hide-details
-            clearable
+            :clearable="!!targetHint"
+            no-data-text="暂无可选的缺失字体"
             class="zt-target-select"
           ></v-select>
           <v-btn
@@ -477,6 +478,7 @@ function stopPolling() {
             density="compact"
             variant="outlined"
             hide-details
+            no-data-text="暂无可选的缺失字体"
           ></v-select>
         </v-card-text>
         <v-card-actions>
@@ -536,6 +538,17 @@ function stopPolling() {
   min-width: 220px;
   max-width: 320px;
   flex: 0 1 280px;
+}
+/* 描边在暗色/手机上 0.38 透明度几乎看不见，单独提高本下拉的边框对比度 */
+.zt-target-select :deep(.v-field__outline) {
+  --v-field-border-opacity: 0.72;
+}
+@media (max-width: 599.95px) {
+  .zt-target-select {
+    flex: 1 1 100%;
+    min-width: 0;
+    max-width: none;
+  }
 }
 .zt-upload-chip {
   cursor: pointer;

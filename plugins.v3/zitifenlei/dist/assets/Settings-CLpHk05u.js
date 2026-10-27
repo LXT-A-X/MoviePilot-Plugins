@@ -2462,39 +2462,36 @@ const {createTextVNode:_createTextVNode$1,resolveComponent:_resolveComponent$1,w
 
 const _hoisted_1$1 = { class: "zt-check" };
 const _hoisted_2$1 = { class: "d-flex align-center flex-wrap mb-4" };
-const _hoisted_3$1 = { class: "text-body-2 zt-total" };
-const _hoisted_4$1 = {
+const _hoisted_3$1 = {
   key: 0,
   class: "zt-match-source mb-2"
 };
-const _hoisted_5$1 = {
-  key: 1,
+const _hoisted_4$1 = { class: "zt-title-text" };
+const _hoisted_5$1 = { class: "zt-filter-row" };
+const _hoisted_6$1 = {
+  key: 0,
   class: "zt-empty pa-6"
 };
-const _hoisted_6$1 = {
-  key: 2,
-  class: "zt-group-wrap pa-2"
+const _hoisted_7$1 = {
+  key: 1,
+  class: "zt-group-wrap"
 };
-const _hoisted_7$1 = ["onClick"];
-const _hoisted_8$1 = ["title"];
-const _hoisted_9$1 = { class: "zt-group-count" };
-const _hoisted_10$1 = { class: "zt-group-stats" };
-const _hoisted_11$1 = { class: "zt-group-actions" };
-const _hoisted_12$1 = {
-  key: 0,
-  class: "zt-group-body"
-};
+const _hoisted_8$1 = ["onClick"];
+const _hoisted_9$1 = ["title"];
+const _hoisted_10$1 = { class: "zt-group-count" };
+const _hoisted_11$1 = { class: "zt-group-stats" };
+const _hoisted_12$1 = { class: "zt-group-actions" };
 const _hoisted_13$1 = {
   key: 0,
-  class: "zt-loading-more pa-2 text-center"
+  class: "zt-group-body"
 };
 const _hoisted_14$1 = {
   key: 0,
   class: "zt-loading-more pa-2 text-center"
 };
 const _hoisted_15$1 = {
-  key: 3,
-  class: "zt-clear-row pa-3 d-flex justify-end"
+  key: 0,
+  class: "zt-loading-more pa-2 text-center"
 };
 const _hoisted_16$1 = {
   key: 1,
@@ -2547,8 +2544,14 @@ const props = __props;
 const emit = __emit;
 
 const records = ref$1([]);
-const total = ref$1(0);
 const search = ref$1('');
+const filterStatus = ref$1('');
+const statusFilterOptions = [
+  { title: '全部状态', value: '' },
+  { title: '待检查', value: 'pending' },
+  { title: '缺字体', value: 'missing' },
+  { title: '完整', value: 'ok' },
+];
 const loadingList = ref$1(false);
 
 // 左栏分组抽屉：一次取全量，按压缩包/上传批次/目录分组后前端渐进渲染
@@ -2570,6 +2573,7 @@ const uploadRef = ref$1(null);
 const uploading = ref$1(false);
 const deletingId = ref$1(null);
 const clearing = ref$1(false);
+const clearConfirm = ref$1(false);
 const checkingId = ref$1(null);
 // 全量扫描（字体监控目录字体直接入库）
 const scanning = ref$1(false);
@@ -2605,7 +2609,6 @@ async function loadRecords(reset = false, force = false) {
     });
     if (seq !== listReqSeq) return
     const list = data.list || [];
-    total.value = data.total || 0;
     matchSource.value = data.match_source || list[0]?.match_source || matchSource.value;
     records.value = list;
     if (reset) {
@@ -2656,9 +2659,16 @@ function groupStats(list) {
 function checkableOf(list) {
   return list.filter(r => r.status === 'pending' || r.status === 'missing')
 }
+// 状态筛选：完整含「ok」与「未验证字形（partial_check）」两种结论
+const filteredRecords = computed$1(() => {
+  const s = filterStatus.value;
+  if (!s) return records.value
+  if (s === 'ok') return records.value.filter(r => r.status === 'ok' || r.status === 'partial_check')
+  return records.value.filter(r => r.status === s)
+});
 const groupedRecords = computed$1(() => {
   const map = new Map();
-  for (const r of records.value) {
+  for (const r of filteredRecords.value) {
     const g = recordGroup(r);
     let item = map.get(g.key);
     if (!item) {
@@ -2725,6 +2735,11 @@ let searchTimer = null;
 watch$1(search, () => {
   if (searchTimer) clearTimeout(searchTimer);
   searchTimer = setTimeout(() => loadRecords(true), 300);
+});
+// 切换状态筛选：重新从第一组、第一批开始渲染
+watch$1(filterStatus, () => {
+  renderBudget.value = RENDER_STEP;
+  expandedGroups.value = new Set();
 });
 
 async function handleUpload(event) {
@@ -2918,6 +2933,7 @@ async function clearAll() {
     emit('notify', e.message || '清空失败');
   } finally {
     clearing.value = false;
+    clearConfirm.value = false;
   }
 }
 
@@ -2997,6 +3013,9 @@ return (_ctx, _cache) => {
   const _component_v_icon = _resolveComponent$1("v-icon");
   const _component_v_btn = _resolveComponent$1("v-btn");
   const _component_v_spacer = _resolveComponent$1("v-spacer");
+  const _component_v_card_title = _resolveComponent$1("v-card-title");
+  const _component_v_divider = _resolveComponent$1("v-divider");
+  const _component_v_select = _resolveComponent$1("v-select");
   const _component_v_text_field = _resolveComponent$1("v-text-field");
   const _component_v_progress_linear = _resolveComponent$1("v-progress-linear");
   const _component_v_chip = _resolveComponent$1("v-chip");
@@ -3005,13 +3024,11 @@ return (_ctx, _cache) => {
   const _component_v_list_item = _resolveComponent$1("v-list-item");
   const _component_v_list = _resolveComponent$1("v-list");
   const _component_v_progress_circular = _resolveComponent$1("v-progress-circular");
-  const _component_v_card_text = _resolveComponent$1("v-card-text");
   const _component_v_card = _resolveComponent$1("v-card");
   const _component_v_col = _resolveComponent$1("v-col");
   const _component_v_alert = _resolveComponent$1("v-alert");
-  const _component_v_divider = _resolveComponent$1("v-divider");
+  const _component_v_card_text = _resolveComponent$1("v-card-text");
   const _component_v_row = _resolveComponent$1("v-row");
-  const _component_v_card_title = _resolveComponent$1("v-card-title");
   const _component_v_card_actions = _resolveComponent$1("v-card-actions");
   const _component_v_dialog = _resolveComponent$1("v-dialog");
 
@@ -3030,12 +3047,12 @@ return (_ctx, _cache) => {
             start: "",
             size: "18"
           }, {
-            default: _withCtx$1(() => [...(_cache[4] || (_cache[4] = [
+            default: _withCtx$1(() => [...(_cache[8] || (_cache[8] = [
               _createTextVNode$1("mdi-upload", -1)
             ]))]),
             _: 1
           }),
-          _cache[5] || (_cache[5] = _createTextVNode$1(" 上传 ASS 字幕 ", -1))
+          _cache[9] || (_cache[9] = _createTextVNode$1(" 上传 ASS 字幕 ", -1))
         ]),
         _: 1
       }, 8, ["disabled", "loading"]),
@@ -3062,12 +3079,12 @@ return (_ctx, _cache) => {
             start: "",
             size: "18"
           }, {
-            default: _withCtx$1(() => [...(_cache[6] || (_cache[6] = [
+            default: _withCtx$1(() => [...(_cache[10] || (_cache[10] = [
               _createTextVNode$1("mdi-magnify-scan", -1)
             ]))]),
             _: 1
           }),
-          _cache[7] || (_cache[7] = _createTextVNode$1(" 检查 ", -1))
+          _cache[11] || (_cache[11] = _createTextVNode$1(" 检查 ", -1))
         ]),
         _: 1
       }, 8, ["disabled", "loading"]),
@@ -3086,31 +3103,19 @@ return (_ctx, _cache) => {
             start: "",
             size: "18"
           }, {
-            default: _withCtx$1(() => [...(_cache[8] || (_cache[8] = [
+            default: _withCtx$1(() => [...(_cache[12] || (_cache[12] = [
               _createTextVNode$1("mdi-magnify-scan", -1)
             ]))]),
             _: 1
           }),
-          _cache[9] || (_cache[9] = _createTextVNode$1(" 全量检查 ", -1))
+          _cache[13] || (_cache[13] = _createTextVNode$1(" 全量检查 ", -1))
         ]),
         _: 1
-      }, 8, ["disabled", "loading"]),
-      _createElementVNode$1("span", _hoisted_3$1, "共 " + _toDisplayString$1(total.value) + " 条记录", 1)
+      }, 8, ["disabled", "loading"])
     ]),
-    _cache[38] || (_cache[38] = _createElementVNode$1("div", { class: "zt-tip text-body-2 mb-2" }, " 上传字幕仅登记为「待检查」；点顶部「检查」一次性检查全部，或点左侧每组 / 每条的「检查」单独检查；缺字体的补字/入库请到「缺失字体」页 ", -1)),
-    _createVNode$1(_component_v_text_field, {
-      modelValue: search.value,
-      "onUpdate:modelValue": _cache[1] || (_cache[1] = $event => ((search).value = $event)),
-      placeholder: "搜索字幕文件名...",
-      density: "compact",
-      variant: "outlined",
-      "hide-details": "",
-      clearable: !!search.value,
-      class: "mb-3 zt-search",
-      "prepend-inner-icon": "mdi-magnify"
-    }, null, 8, ["modelValue", "clearable"]),
+    _cache[46] || (_cache[46] = _createElementVNode$1("div", { class: "zt-tip text-body-2 mb-2" }, " 上传字幕仅登记为「待检查」；点顶部「检查」一次性检查全部，或点左侧每组 / 每条的「检查」单独检查；缺字体的补字/入库请到「缺失字体」页 ", -1)),
     (matchSourceText.value)
-      ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_4$1, " 匹配基准：" + _toDisplayString$1(matchSourceText.value), 1))
+      ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_3$1, " 匹配基准：" + _toDisplayString$1(matchSourceText.value), 1))
       : _createCommentVNode$1("", true),
     _createVNode$1(_component_v_row, { "no-gutters": "" }, {
       default: _withCtx$1(() => [
@@ -3119,343 +3124,378 @@ return (_ctx, _cache) => {
           md: "5"
         }, {
           default: _withCtx$1(() => [
-            _createVNode$1(_component_v_card, {
-              class: "zt-card-bg zt-list-card",
-              onScroll: onRecordsScroll
-            }, {
+            _createVNode$1(_component_v_card, { class: "zt-card-bg zt-list-card" }, {
               default: _withCtx$1(() => [
-                _createVNode$1(_component_v_card_text, { class: "pa-0" }, {
+                _createVNode$1(_component_v_card_title, { class: "zt-card-title zt-card-title-row" }, {
                   default: _withCtx$1(() => [
-                    (loadingList.value)
-                      ? (_openBlock$1(), _createBlock$1(_component_v_progress_linear, {
-                          key: 0,
-                          indeterminate: "",
-                          color: "primary"
-                        }))
-                      : _createCommentVNode$1("", true),
-                    (!loadingList.value && !groupedRecords.value.length)
-                      ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_5$1, " 暂无检查记录，上传 ASS 字幕后点击「检查」对比字体库 "))
-                      : (_openBlock$1(), _createElementBlock$1("div", _hoisted_6$1, [
-                          (_openBlock$1(true), _createElementBlock$1(_Fragment$1, null, _renderList$1(visibleGroups.value, (g) => {
-                            return (_openBlock$1(), _createElementBlock$1("div", {
-                              key: g.key,
-                              class: _normalizeClass$1(["zt-group", `zt-group-${g.color}`])
+                    _createVNode$1(_component_v_icon, {
+                      start: "",
+                      size: "18"
+                    }, {
+                      default: _withCtx$1(() => [...(_cache[14] || (_cache[14] = [
+                        _createTextVNode$1("mdi-file-search-outline", -1)
+                      ]))]),
+                      _: 1
+                    }),
+                    _createElementVNode$1("span", _hoisted_4$1, "检查记录（" + _toDisplayString$1(filteredRecords.value.length) + "）", 1),
+                    _createVNode$1(_component_v_spacer),
+                    _createVNode$1(_component_v_btn, {
+                      size: "small",
+                      variant: "tonal",
+                      color: "error",
+                      disabled: !__props.enabled || !records.value.length,
+                      loading: clearing.value,
+                      title: "清空全部检查记录（同时删除上传的临时副本；监控目录与媒体库原字幕不动）",
+                      onClick: _cache[1] || (_cache[1] = $event => (clearConfirm.value = true))
+                    }, {
+                      default: _withCtx$1(() => [
+                        _createVNode$1(_component_v_icon, {
+                          start: "",
+                          size: "15"
+                        }, {
+                          default: _withCtx$1(() => [...(_cache[15] || (_cache[15] = [
+                            _createTextVNode$1("mdi-delete-sweep", -1)
+                          ]))]),
+                          _: 1
+                        }),
+                        _cache[16] || (_cache[16] = _createElementVNode$1("span", { class: "d-none d-sm-inline" }, "全部清空", -1))
+                      ]),
+                      _: 1
+                    }, 8, ["disabled", "loading"])
+                  ]),
+                  _: 1
+                }),
+                _createVNode$1(_component_v_divider),
+                _createElementVNode$1("div", _hoisted_5$1, [
+                  _createVNode$1(_component_v_select, {
+                    modelValue: filterStatus.value,
+                    "onUpdate:modelValue": _cache[2] || (_cache[2] = $event => ((filterStatus).value = $event)),
+                    items: statusFilterOptions,
+                    "item-title": "title",
+                    "item-value": "value",
+                    density: "compact",
+                    variant: "outlined",
+                    "hide-details": "",
+                    class: "zt-filter-status"
+                  }, null, 8, ["modelValue"]),
+                  _createVNode$1(_component_v_text_field, {
+                    modelValue: search.value,
+                    "onUpdate:modelValue": _cache[3] || (_cache[3] = $event => ((search).value = $event)),
+                    placeholder: "搜索字幕文件名…",
+                    density: "compact",
+                    variant: "outlined",
+                    "hide-details": "",
+                    clearable: !!search.value,
+                    "prepend-inner-icon": "mdi-magnify",
+                    class: "zt-filter-search"
+                  }, null, 8, ["modelValue", "clearable"])
+                ]),
+                _createVNode$1(_component_v_divider),
+                (loadingList.value)
+                  ? (_openBlock$1(), _createBlock$1(_component_v_progress_linear, {
+                      key: 0,
+                      indeterminate: "",
+                      color: "primary"
+                    }))
+                  : _createCommentVNode$1("", true),
+                _createElementVNode$1("div", {
+                  class: "zt-list-body pa-2",
+                  onScroll: onRecordsScroll
+                }, [
+                  (!loadingList.value && !groupedRecords.value.length)
+                    ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_6$1, _toDisplayString$1(filterStatus.value || search.value ? '暂无匹配的检查记录' : '暂无检查记录，上传 ASS 字幕后点击「检查」对比字体库'), 1))
+                    : (_openBlock$1(), _createElementBlock$1("div", _hoisted_7$1, [
+                        (_openBlock$1(true), _createElementBlock$1(_Fragment$1, null, _renderList$1(visibleGroups.value, (g) => {
+                          return (_openBlock$1(), _createElementBlock$1("div", {
+                            key: g.key,
+                            class: _normalizeClass$1(["zt-group", `zt-group-${g.color}`])
+                          }, [
+                            _createElementVNode$1("div", {
+                              class: "zt-group-head",
+                              onClick: $event => (toggleGroup(g))
                             }, [
-                              _createElementVNode$1("div", {
-                                class: "zt-group-head",
-                                onClick: $event => (toggleGroup(g))
-                              }, [
-                                _createVNode$1(_component_v_icon, { size: "18" }, {
-                                  default: _withCtx$1(() => [
-                                    _createTextVNode$1(_toDisplayString$1(g.expanded ? 'mdi-chevron-down' : 'mdi-chevron-right'), 1)
-                                  ]),
-                                  _: 2
-                                }, 1024),
-                                _createVNode$1(_component_v_icon, {
-                                  size: "16",
-                                  color: g.color === 'grey' ? undefined : g.color
-                                }, {
-                                  default: _withCtx$1(() => [
-                                    _createTextVNode$1(_toDisplayString$1(g.expanded ? 'mdi-folder-open' : 'mdi-folder'), 1)
-                                  ]),
-                                  _: 2
-                                }, 1032, ["color"]),
-                                _createElementVNode$1("span", {
-                                  class: "zt-group-name",
-                                  title: g.label
-                                }, _toDisplayString$1(g.label), 9, _hoisted_8$1),
-                                _createElementVNode$1("span", _hoisted_9$1, _toDisplayString$1(g.records.length), 1),
-                                _createElementVNode$1("span", _hoisted_10$1, [
-                                  (g.stats.ok)
-                                    ? (_openBlock$1(), _createBlock$1(_component_v_chip, {
-                                        key: 0,
-                                        color: "success",
-                                        size: "x-small",
-                                        variant: "tonal"
-                                      }, {
-                                        default: _withCtx$1(() => [
-                                          _createTextVNode$1("✓ " + _toDisplayString$1(g.stats.ok), 1)
-                                        ]),
-                                        _: 2
-                                      }, 1024))
-                                    : _createCommentVNode$1("", true),
-                                  (g.stats.missing)
-                                    ? (_openBlock$1(), _createBlock$1(_component_v_chip, {
-                                        key: 1,
-                                        color: "error",
-                                        size: "x-small",
-                                        variant: "tonal"
-                                      }, {
-                                        default: _withCtx$1(() => [
-                                          _createTextVNode$1("⚠ " + _toDisplayString$1(g.stats.missing), 1)
-                                        ]),
-                                        _: 2
-                                      }, 1024))
-                                    : _createCommentVNode$1("", true),
-                                  (g.stats.pending)
-                                    ? (_openBlock$1(), _createBlock$1(_component_v_chip, {
-                                        key: 2,
-                                        color: "warning",
-                                        size: "x-small",
-                                        variant: "tonal"
-                                      }, {
-                                        default: _withCtx$1(() => [
-                                          _createTextVNode$1("待 " + _toDisplayString$1(g.stats.pending), 1)
-                                        ]),
-                                        _: 2
-                                      }, 1024))
-                                    : _createCommentVNode$1("", true)
+                              _createVNode$1(_component_v_icon, { size: "18" }, {
+                                default: _withCtx$1(() => [
+                                  _createTextVNode$1(_toDisplayString$1(g.expanded ? 'mdi-chevron-down' : 'mdi-chevron-right'), 1)
                                 ]),
-                                _createElementVNode$1("span", _hoisted_11$1, [
-                                  _createVNode$1(_component_v_btn, {
-                                    size: "x-small",
-                                    variant: "tonal",
-                                    color: "success",
-                                    disabled: !__props.enabled || batchChecking.value || !!checkingId.value || !g.checkable.length,
-                                    loading: groupBusy.value === g.key,
-                                    title: "检查本组待检查 / 缺字体的字幕（已完整的跳过）",
-                                    onClick: _withModifiers($event => (checkGroup(g)), ["stop"])
-                                  }, {
-                                    default: _withCtx$1(() => [
-                                      _createVNode$1(_component_v_icon, {
-                                        start: "",
-                                        size: "14"
-                                      }, {
-                                        default: _withCtx$1(() => [...(_cache[10] || (_cache[10] = [
-                                          _createTextVNode$1("mdi-magnify-scan", -1)
-                                        ]))]),
-                                        _: 1
-                                      }),
-                                      _cache[11] || (_cache[11] = _createElementVNode$1("span", { class: "d-none d-lg-inline" }, "全部检查", -1))
-                                    ]),
-                                    _: 1
-                                  }, 8, ["disabled", "loading", "onClick"]),
-                                  _createVNode$1(_component_v_btn, {
-                                    size: "small",
-                                    variant: "text",
-                                    icon: "",
-                                    disabled: !__props.enabled || groupDeleting.value,
-                                    title: "删除本组全部记录（上传的临时副本一并清理，监控/媒体库原字幕不动）",
-                                    onClick: _withModifiers($event => (askDeleteGroup(g)), ["stop"])
-                                  }, {
-                                    default: _withCtx$1(() => [
-                                      _createVNode$1(_component_v_icon, {
-                                        size: "16",
-                                        color: "error"
-                                      }, {
-                                        default: _withCtx$1(() => [...(_cache[12] || (_cache[12] = [
-                                          _createTextVNode$1("mdi-close", -1)
-                                        ]))]),
-                                        _: 1
-                                      })
-                                    ]),
-                                    _: 1
-                                  }, 8, ["disabled", "onClick"])
-                                ])
-                              ], 8, _hoisted_7$1),
-                              (g.expanded)
-                                ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_12$1, [
-                                    _createVNode$1(_component_v_list, {
-                                      density: "compact",
-                                      class: "pa-0"
+                                _: 2
+                              }, 1024),
+                              _createVNode$1(_component_v_icon, {
+                                size: "16",
+                                color: g.color === 'grey' ? undefined : g.color
+                              }, {
+                                default: _withCtx$1(() => [
+                                  _createTextVNode$1(_toDisplayString$1(g.expanded ? 'mdi-folder-open' : 'mdi-folder'), 1)
+                                ]),
+                                _: 2
+                              }, 1032, ["color"]),
+                              _createElementVNode$1("span", {
+                                class: "zt-group-name",
+                                title: g.label
+                              }, _toDisplayString$1(g.label), 9, _hoisted_9$1),
+                              _createElementVNode$1("span", _hoisted_10$1, _toDisplayString$1(g.records.length), 1),
+                              _createElementVNode$1("span", _hoisted_11$1, [
+                                (g.stats.ok)
+                                  ? (_openBlock$1(), _createBlock$1(_component_v_chip, {
+                                      key: 0,
+                                      color: "success",
+                                      size: "x-small",
+                                      variant: "tonal"
                                     }, {
                                       default: _withCtx$1(() => [
-                                        (_openBlock$1(true), _createElementBlock$1(_Fragment$1, null, _renderList$1(g.visibleRecords, (rec) => {
-                                          return (_openBlock$1(), _createBlock$1(_component_v_list_item, {
-                                            key: rec.id,
-                                            active: selectedId.value === rec.id,
-                                            class: "zt-record-item",
-                                            onClick: $event => (loadDetail(rec.id))
-                                          }, {
-                                            prepend: _withCtx$1(() => [
-                                              _createVNode$1(_component_v_icon, {
-                                                color: rec.status === 'ok' || rec.status === 'partial_check' ? 'success' : (rec.status === 'pending' ? 'warning' : 'error'),
-                                                size: "18"
-                                              }, {
-                                                default: _withCtx$1(() => [
-                                                  _createTextVNode$1(_toDisplayString$1(rec.status === 'ok' || rec.status === 'partial_check' ? 'mdi-check-circle' : (rec.status === 'pending' ? 'mdi-clock-outline' : 'mdi-alert-circle')), 1)
-                                                ]),
-                                                _: 2
-                                              }, 1032, ["color"])
-                                            ]),
-                                            append: _withCtx$1(() => [
-                                              _createVNode$1(_component_v_btn, {
-                                                size: "x-small",
-                                                variant: "tonal",
-                                                color: rec.status === 'pending' ? 'success' : 'primary',
-                                                class: "mr-1",
-                                                disabled: !__props.enabled || batchChecking.value || !!checkingId.value,
-                                                loading: checkingId.value === rec.id,
-                                                title: rec.status === 'pending' ? '检查该字幕' : '重新检查该字幕',
-                                                onClick: _withModifiers($event => (checkRecord(rec.id)), ["stop"])
-                                              }, {
-                                                default: _withCtx$1(() => [
-                                                  _createVNode$1(_component_v_icon, {
-                                                    start: "",
-                                                    size: "14"
-                                                  }, {
-                                                    default: _withCtx$1(() => [...(_cache[17] || (_cache[17] = [
-                                                      _createTextVNode$1("mdi-magnify-scan", -1)
-                                                    ]))]),
-                                                    _: 1
-                                                  }),
-                                                  _cache[18] || (_cache[18] = _createTextVNode$1(" 检查 ", -1))
-                                                ]),
-                                                _: 1
-                                              }, 8, ["color", "disabled", "loading", "title", "onClick"]),
-                                              _createVNode$1(_component_v_btn, {
-                                                size: "small",
-                                                variant: "text",
-                                                icon: "",
-                                                color: "error",
-                                                disabled: !__props.enabled,
-                                                loading: deletingId.value === rec.id,
-                                                title: "删除该字幕（避免误传）",
-                                                onClick: _withModifiers($event => (deleteRecord(rec.id)), ["stop"])
-                                              }, {
-                                                default: _withCtx$1(() => [
-                                                  _createVNode$1(_component_v_icon, { size: "16" }, {
-                                                    default: _withCtx$1(() => [...(_cache[19] || (_cache[19] = [
-                                                      _createTextVNode$1("mdi-close", -1)
-                                                    ]))]),
-                                                    _: 1
-                                                  })
-                                                ]),
-                                                _: 1
-                                              }, 8, ["disabled", "loading", "onClick"])
-                                            ]),
-                                            default: _withCtx$1(() => [
-                                              _createVNode$1(_component_v_list_item_title, { class: "zt-record-name text-body-2" }, {
-                                                default: _withCtx$1(() => [
-                                                  _createTextVNode$1(_toDisplayString$1(rec.file_name), 1)
-                                                ]),
-                                                _: 2
-                                              }, 1024),
-                                              _createVNode$1(_component_v_list_item_subtitle, { class: "zt-record-meta" }, {
-                                                default: _withCtx$1(() => [
-                                                  _createTextVNode$1(_toDisplayString$1(rec.check_time) + " ", 1),
-                                                  (rec.status === 'pending')
+                                        _createTextVNode$1("✓ " + _toDisplayString$1(g.stats.ok), 1)
+                                      ]),
+                                      _: 2
+                                    }, 1024))
+                                  : _createCommentVNode$1("", true),
+                                (g.stats.missing)
+                                  ? (_openBlock$1(), _createBlock$1(_component_v_chip, {
+                                      key: 1,
+                                      color: "error",
+                                      size: "x-small",
+                                      variant: "tonal"
+                                    }, {
+                                      default: _withCtx$1(() => [
+                                        _createTextVNode$1("⚠ " + _toDisplayString$1(g.stats.missing), 1)
+                                      ]),
+                                      _: 2
+                                    }, 1024))
+                                  : _createCommentVNode$1("", true),
+                                (g.stats.pending)
+                                  ? (_openBlock$1(), _createBlock$1(_component_v_chip, {
+                                      key: 2,
+                                      color: "warning",
+                                      size: "x-small",
+                                      variant: "tonal"
+                                    }, {
+                                      default: _withCtx$1(() => [
+                                        _createTextVNode$1("待 " + _toDisplayString$1(g.stats.pending), 1)
+                                      ]),
+                                      _: 2
+                                    }, 1024))
+                                  : _createCommentVNode$1("", true)
+                              ]),
+                              _createElementVNode$1("span", _hoisted_12$1, [
+                                _createVNode$1(_component_v_btn, {
+                                  size: "x-small",
+                                  variant: "tonal",
+                                  color: "success",
+                                  disabled: !__props.enabled || batchChecking.value || !!checkingId.value || !g.checkable.length,
+                                  loading: groupBusy.value === g.key,
+                                  title: "检查本组待检查 / 缺字体的字幕（已完整的跳过）",
+                                  onClick: _withModifiers($event => (checkGroup(g)), ["stop"])
+                                }, {
+                                  default: _withCtx$1(() => [
+                                    _createVNode$1(_component_v_icon, {
+                                      start: "",
+                                      size: "14"
+                                    }, {
+                                      default: _withCtx$1(() => [...(_cache[17] || (_cache[17] = [
+                                        _createTextVNode$1("mdi-magnify-scan", -1)
+                                      ]))]),
+                                      _: 1
+                                    }),
+                                    _cache[18] || (_cache[18] = _createElementVNode$1("span", { class: "d-none d-lg-inline" }, "全部检查", -1))
+                                  ]),
+                                  _: 1
+                                }, 8, ["disabled", "loading", "onClick"]),
+                                _createVNode$1(_component_v_btn, {
+                                  size: "small",
+                                  variant: "text",
+                                  icon: "",
+                                  disabled: !__props.enabled || groupDeleting.value,
+                                  title: "删除本组全部记录（上传的临时副本一并清理，监控/媒体库原字幕不动）",
+                                  onClick: _withModifiers($event => (askDeleteGroup(g)), ["stop"])
+                                }, {
+                                  default: _withCtx$1(() => [
+                                    _createVNode$1(_component_v_icon, {
+                                      size: "16",
+                                      color: "error"
+                                    }, {
+                                      default: _withCtx$1(() => [...(_cache[19] || (_cache[19] = [
+                                        _createTextVNode$1("mdi-close", -1)
+                                      ]))]),
+                                      _: 1
+                                    })
+                                  ]),
+                                  _: 1
+                                }, 8, ["disabled", "onClick"])
+                              ])
+                            ], 8, _hoisted_8$1),
+                            (g.expanded)
+                              ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_13$1, [
+                                  _createVNode$1(_component_v_list, {
+                                    density: "compact",
+                                    class: "pa-0"
+                                  }, {
+                                    default: _withCtx$1(() => [
+                                      (_openBlock$1(true), _createElementBlock$1(_Fragment$1, null, _renderList$1(g.visibleRecords, (rec) => {
+                                        return (_openBlock$1(), _createBlock$1(_component_v_list_item, {
+                                          key: rec.id,
+                                          active: selectedId.value === rec.id,
+                                          class: "zt-record-item",
+                                          onClick: $event => (loadDetail(rec.id))
+                                        }, {
+                                          prepend: _withCtx$1(() => [
+                                            _createVNode$1(_component_v_icon, {
+                                              color: rec.status === 'ok' || rec.status === 'partial_check' ? 'success' : (rec.status === 'pending' ? 'warning' : 'error'),
+                                              size: "18"
+                                            }, {
+                                              default: _withCtx$1(() => [
+                                                _createTextVNode$1(_toDisplayString$1(rec.status === 'ok' || rec.status === 'partial_check' ? 'mdi-check-circle' : (rec.status === 'pending' ? 'mdi-clock-outline' : 'mdi-alert-circle')), 1)
+                                              ]),
+                                              _: 2
+                                            }, 1032, ["color"])
+                                          ]),
+                                          append: _withCtx$1(() => [
+                                            _createVNode$1(_component_v_btn, {
+                                              size: "x-small",
+                                              variant: "tonal",
+                                              color: rec.status === 'pending' ? 'success' : 'primary',
+                                              class: "mr-1",
+                                              disabled: !__props.enabled || batchChecking.value || !!checkingId.value,
+                                              loading: checkingId.value === rec.id,
+                                              title: rec.status === 'pending' ? '检查该字幕' : '重新检查该字幕',
+                                              onClick: _withModifiers($event => (checkRecord(rec.id)), ["stop"])
+                                            }, {
+                                              default: _withCtx$1(() => [
+                                                _createVNode$1(_component_v_icon, {
+                                                  start: "",
+                                                  size: "14"
+                                                }, {
+                                                  default: _withCtx$1(() => [...(_cache[24] || (_cache[24] = [
+                                                    _createTextVNode$1("mdi-magnify-scan", -1)
+                                                  ]))]),
+                                                  _: 1
+                                                }),
+                                                _cache[25] || (_cache[25] = _createTextVNode$1(" 检查 ", -1))
+                                              ]),
+                                              _: 1
+                                            }, 8, ["color", "disabled", "loading", "title", "onClick"]),
+                                            _createVNode$1(_component_v_btn, {
+                                              size: "small",
+                                              variant: "text",
+                                              icon: "",
+                                              color: "error",
+                                              disabled: !__props.enabled,
+                                              loading: deletingId.value === rec.id,
+                                              title: "删除该字幕（避免误传）",
+                                              onClick: _withModifiers($event => (deleteRecord(rec.id)), ["stop"])
+                                            }, {
+                                              default: _withCtx$1(() => [
+                                                _createVNode$1(_component_v_icon, { size: "16" }, {
+                                                  default: _withCtx$1(() => [...(_cache[26] || (_cache[26] = [
+                                                    _createTextVNode$1("mdi-close", -1)
+                                                  ]))]),
+                                                  _: 1
+                                                })
+                                              ]),
+                                              _: 1
+                                            }, 8, ["disabled", "loading", "onClick"])
+                                          ]),
+                                          default: _withCtx$1(() => [
+                                            _createVNode$1(_component_v_list_item_title, { class: "zt-record-name text-body-2" }, {
+                                              default: _withCtx$1(() => [
+                                                _createTextVNode$1(_toDisplayString$1(rec.file_name), 1)
+                                              ]),
+                                              _: 2
+                                            }, 1024),
+                                            _createVNode$1(_component_v_list_item_subtitle, { class: "zt-record-meta" }, {
+                                              default: _withCtx$1(() => [
+                                                _createTextVNode$1(_toDisplayString$1(rec.check_time) + " ", 1),
+                                                (rec.status === 'pending')
+                                                  ? (_openBlock$1(), _createBlock$1(_component_v_chip, {
+                                                      key: 0,
+                                                      size: "x-small",
+                                                      color: "warning",
+                                                      variant: "tonal",
+                                                      class: "ml-1"
+                                                    }, {
+                                                      default: _withCtx$1(() => [...(_cache[20] || (_cache[20] = [
+                                                        _createTextVNode$1(" 待检查 ", -1)
+                                                      ]))]),
+                                                      _: 1
+                                                    }))
+                                                  : (rec.missing_count > 0)
                                                     ? (_openBlock$1(), _createBlock$1(_component_v_chip, {
-                                                        key: 0,
+                                                        key: 1,
                                                         size: "x-small",
-                                                        color: "warning",
+                                                        color: "error",
                                                         variant: "tonal",
                                                         class: "ml-1"
                                                       }, {
-                                                        default: _withCtx$1(() => [...(_cache[13] || (_cache[13] = [
-                                                          _createTextVNode$1(" 待检查 ", -1)
-                                                        ]))]),
-                                                        _: 1
-                                                      }))
-                                                    : (rec.missing_count > 0)
+                                                        default: _withCtx$1(() => [
+                                                          _createTextVNode$1(" 缺 " + _toDisplayString$1(rec.missing_count) + " 个 ", 1)
+                                                        ]),
+                                                        _: 2
+                                                      }, 1024))
+                                                    : (rec.status === 'partial_check')
                                                       ? (_openBlock$1(), _createBlock$1(_component_v_chip, {
-                                                          key: 1,
+                                                          key: 2,
                                                           size: "x-small",
-                                                          color: "error",
+                                                          color: "warning",
                                                           variant: "tonal",
                                                           class: "ml-1"
                                                         }, {
-                                                          default: _withCtx$1(() => [
-                                                            _createTextVNode$1(" 缺 " + _toDisplayString$1(rec.missing_count) + " 个 ", 1)
-                                                          ]),
-                                                          _: 2
-                                                        }, 1024))
-                                                      : (rec.status === 'partial_check')
-                                                        ? (_openBlock$1(), _createBlock$1(_component_v_chip, {
-                                                            key: 2,
-                                                            size: "x-small",
-                                                            color: "warning",
-                                                            variant: "tonal",
-                                                            class: "ml-1"
-                                                          }, {
-                                                            default: _withCtx$1(() => [...(_cache[14] || (_cache[14] = [
-                                                              _createTextVNode$1(" 未验证字形 ", -1)
-                                                            ]))]),
-                                                            _: 1
-                                                          }))
-                                                        : (_openBlock$1(), _createBlock$1(_component_v_chip, {
-                                                            key: 3,
-                                                            size: "x-small",
-                                                            color: "success",
-                                                            variant: "tonal",
-                                                            class: "ml-1"
-                                                          }, {
-                                                            default: _withCtx$1(() => [...(_cache[15] || (_cache[15] = [
-                                                              _createTextVNode$1(" 完整 ", -1)
-                                                            ]))]),
-                                                            _: 1
-                                                          })),
-                                                  (rec.subsetted)
-                                                    ? (_openBlock$1(), _createBlock$1(_component_v_chip, {
-                                                        key: 4,
-                                                        size: "x-small",
-                                                        color: "info",
-                                                        variant: "tonal",
-                                                        class: "ml-1"
-                                                      }, {
-                                                        default: _withCtx$1(() => [...(_cache[16] || (_cache[16] = [
-                                                          _createTextVNode$1(" 已内嵌字体 ", -1)
-                                                        ]))]),
-                                                        _: 1
-                                                      }))
-                                                    : _createCommentVNode$1("", true)
-                                                ]),
-                                                _: 2
-                                              }, 1024)
-                                            ]),
-                                            _: 2
-                                          }, 1032, ["active", "onClick"]))
-                                        }), 128))
-                                      ]),
-                                      _: 2
-                                    }, 1024),
-                                    (g.truncated)
-                                      ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_13$1, " 还有 " + _toDisplayString$1(g.records.length - g.visibleRecords.length) + " 条，下拉加载… ", 1))
-                                      : _createCommentVNode$1("", true)
-                                  ]))
-                                : _createCommentVNode$1("", true)
-                            ], 2))
-                          }), 128)),
-                          (hasMoreRecords.value)
-                            ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_14$1, [
-                                _createVNode$1(_component_v_progress_circular, {
-                                  indeterminate: "",
-                                  size: "18",
-                                  color: "primary"
-                                })
-                              ]))
-                            : _createCommentVNode$1("", true)
-                        ])),
-                    (records.value.length)
-                      ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_15$1, [
-                          _createVNode$1(_component_v_btn, {
-                            color: "error",
-                            variant: "tonal",
-                            size: "small",
-                            disabled: !__props.enabled,
-                            loading: clearing.value,
-                            title: "清空全部检查记录（同时删除上传的临时副本；监控目录与媒体库原字幕不动）",
-                            onClick: clearAll
-                          }, {
-                            default: _withCtx$1(() => [
-                              _createVNode$1(_component_v_icon, {
-                                start: "",
-                                size: "16"
-                              }, {
-                                default: _withCtx$1(() => [...(_cache[20] || (_cache[20] = [
-                                  _createTextVNode$1("mdi-trash-can-outline", -1)
-                                ]))]),
-                                _: 1
-                              }),
-                              _cache[21] || (_cache[21] = _createTextVNode$1(" 清空全部 ", -1))
-                            ]),
-                            _: 1
-                          }, 8, ["disabled", "loading"])
-                        ]))
-                      : _createCommentVNode$1("", true)
-                  ]),
-                  _: 1
-                })
+                                                          default: _withCtx$1(() => [...(_cache[21] || (_cache[21] = [
+                                                            _createTextVNode$1(" 未验证字形 ", -1)
+                                                          ]))]),
+                                                          _: 1
+                                                        }))
+                                                      : (_openBlock$1(), _createBlock$1(_component_v_chip, {
+                                                          key: 3,
+                                                          size: "x-small",
+                                                          color: "success",
+                                                          variant: "tonal",
+                                                          class: "ml-1"
+                                                        }, {
+                                                          default: _withCtx$1(() => [...(_cache[22] || (_cache[22] = [
+                                                            _createTextVNode$1(" 完整 ", -1)
+                                                          ]))]),
+                                                          _: 1
+                                                        })),
+                                                (rec.subsetted)
+                                                  ? (_openBlock$1(), _createBlock$1(_component_v_chip, {
+                                                      key: 4,
+                                                      size: "x-small",
+                                                      color: "info",
+                                                      variant: "tonal",
+                                                      class: "ml-1"
+                                                    }, {
+                                                      default: _withCtx$1(() => [...(_cache[23] || (_cache[23] = [
+                                                        _createTextVNode$1(" 已内嵌字体 ", -1)
+                                                      ]))]),
+                                                      _: 1
+                                                    }))
+                                                  : _createCommentVNode$1("", true)
+                                              ]),
+                                              _: 2
+                                            }, 1024)
+                                          ]),
+                                          _: 2
+                                        }, 1032, ["active", "onClick"]))
+                                      }), 128))
+                                    ]),
+                                    _: 2
+                                  }, 1024),
+                                  (g.truncated)
+                                    ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_14$1, " 还有 " + _toDisplayString$1(g.records.length - g.visibleRecords.length) + " 条，下拉加载… ", 1))
+                                    : _createCommentVNode$1("", true)
+                                ]))
+                              : _createCommentVNode$1("", true)
+                          ], 2))
+                        }), 128)),
+                        (hasMoreRecords.value)
+                          ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_15$1, [
+                              _createVNode$1(_component_v_progress_circular, {
+                                indeterminate: "",
+                                size: "18",
+                                color: "primary"
+                              })
+                            ]))
+                          : _createCommentVNode$1("", true)
+                      ]))
+                ], 32)
               ]),
               _: 1
             })
@@ -3504,7 +3544,7 @@ return (_ctx, _cache) => {
                                         variant: "tonal",
                                         class: "ml-1"
                                       }, {
-                                        default: _withCtx$1(() => [...(_cache[22] || (_cache[22] = [
+                                        default: _withCtx$1(() => [...(_cache[27] || (_cache[27] = [
                                           _createTextVNode$1(" 已内嵌字体 ", -1)
                                         ]))]),
                                         _: 1
@@ -3520,7 +3560,7 @@ return (_ctx, _cache) => {
                                   density: "compact",
                                   class: "mb-3"
                                 }, {
-                                  default: _withCtx$1(() => [...(_cache[23] || (_cache[23] = [
+                                  default: _withCtx$1(() => [...(_cache[28] || (_cache[28] = [
                                     _createTextVNode$1(" 该字幕尚未检查，点击「检查」按钮对比字体库。 ", -1)
                                   ]))]),
                                   _: 1
@@ -3539,12 +3579,12 @@ return (_ctx, _cache) => {
                                       size: "16",
                                       class: "mr-1"
                                     }, {
-                                      default: _withCtx$1(() => [...(_cache[24] || (_cache[24] = [
+                                      default: _withCtx$1(() => [...(_cache[29] || (_cache[29] = [
                                         _createTextVNode$1("mdi-help-circle-outline", -1)
                                       ]))]),
                                       _: 1
                                     }),
-                                    _cache[25] || (_cache[25] = _createTextVNode$1(" 本次检查未完成字形级验证（字体名在库内但未逐字符比对 cmap 覆盖，常见于字体索引未构建、字幕无有效对白或解析异常）。 如需准确结论，请先确认字体库目录已配置并重建索引，再点击「检查」重新验证。 ", -1))
+                                    _cache[30] || (_cache[30] = _createTextVNode$1(" 本次检查未完成字形级验证（字体名在库内但未逐字符比对 cmap 覆盖，常见于字体索引未构建、字幕无有效对白或解析异常）。 如需准确结论，请先确认字体库目录已配置并重建索引，再点击「检查」重新验证。 ", -1))
                                   ]),
                                   _: 1
                                 }))
@@ -3562,12 +3602,12 @@ return (_ctx, _cache) => {
                                       size: "16",
                                       class: "mr-1"
                                     }, {
-                                      default: _withCtx$1(() => [...(_cache[26] || (_cache[26] = [
+                                      default: _withCtx$1(() => [...(_cache[31] || (_cache[31] = [
                                         _createTextVNode$1("mdi-sticker-check-outline", -1)
                                       ]))]),
                                       _: 1
                                     }),
-                                    _cache[27] || (_cache[27] = _createTextVNode$1(" 该字幕已内嵌（子集化）字体，播放时无需另行安装字体 ", -1))
+                                    _cache[32] || (_cache[32] = _createTextVNode$1(" 该字幕已内嵌（子集化）字体，播放时无需另行安装字体 ", -1))
                                   ]),
                                   _: 1
                                 }))
@@ -3582,12 +3622,12 @@ return (_ctx, _cache) => {
                                           size: "16",
                                           color: "success"
                                         }, {
-                                          default: _withCtx$1(() => [...(_cache[28] || (_cache[28] = [
+                                          default: _withCtx$1(() => [...(_cache[33] || (_cache[33] = [
                                             _createTextVNode$1("mdi-sticker-check-outline", -1)
                                           ]))]),
                                           _: 1
                                         }),
-                                        _cache[29] || (_cache[29] = _createElementVNode$1("span", { class: "zt-section-label" }, "该字幕已内嵌（子集化）字体，无需检查缺失字体", -1))
+                                        _cache[34] || (_cache[34] = _createElementVNode$1("span", { class: "zt-section-label" }, "该字幕已内嵌（子集化）字体，无需检查缺失字体", -1))
                                       ]))
                                     : (_openBlock$1(), _createElementBlock$1(_Fragment$1, { key: 1 }, [
                                         _createElementVNode$1("div", _hoisted_23$1, [
@@ -3596,7 +3636,7 @@ return (_ctx, _cache) => {
                                             size: "16",
                                             color: "error"
                                           }, {
-                                            default: _withCtx$1(() => [...(_cache[30] || (_cache[30] = [
+                                            default: _withCtx$1(() => [...(_cache[35] || (_cache[35] = [
                                               _createTextVNode$1("mdi-alert-decagram-outline", -1)
                                             ]))]),
                                             _: 1
@@ -3611,12 +3651,12 @@ return (_ctx, _cache) => {
                                                   size: "16",
                                                   class: "mr-1"
                                                 }, {
-                                                  default: _withCtx$1(() => [...(_cache[31] || (_cache[31] = [
+                                                  default: _withCtx$1(() => [...(_cache[36] || (_cache[36] = [
                                                     _createTextVNode$1("mdi-check-circle", -1)
                                                   ]))]),
                                                   _: 1
                                                 }),
-                                                _cache[32] || (_cache[32] = _createTextVNode$1(" 没有缺失字体 ", -1))
+                                                _cache[37] || (_cache[37] = _createTextVNode$1(" 没有缺失字体 ", -1))
                                               ]))
                                             : _createCommentVNode$1("", true),
                                           (_openBlock$1(true), _createElementBlock$1(_Fragment$1, null, _renderList$1(detail.value.missing_fonts || [], (f) => {
@@ -3639,7 +3679,7 @@ return (_ctx, _cache) => {
                                                   class: "ml-1 zt-search-icon",
                                                   onClick: $event => (goFontSearch(f))
                                                 }, {
-                                                  default: _withCtx$1(() => [...(_cache[33] || (_cache[33] = [
+                                                  default: _withCtx$1(() => [...(_cache[38] || (_cache[38] = [
                                                     _createTextVNode$1(" mdi-magnify ", -1)
                                                   ]))]),
                                                   _: 1
@@ -3655,7 +3695,7 @@ return (_ctx, _cache) => {
                                       start: "",
                                       size: "16"
                                     }, {
-                                      default: _withCtx$1(() => [...(_cache[34] || (_cache[34] = [
+                                      default: _withCtx$1(() => [...(_cache[39] || (_cache[39] = [
                                         _createTextVNode$1("mdi-format-font", -1)
                                       ]))]),
                                       _: 1
@@ -3677,7 +3717,7 @@ return (_ctx, _cache) => {
                                                 size: "14",
                                                 class: "mr-1 text-success"
                                               }, {
-                                                default: _withCtx$1(() => [...(_cache[35] || (_cache[35] = [
+                                                default: _withCtx$1(() => [...(_cache[40] || (_cache[40] = [
                                                   _createTextVNode$1("mdi-check-circle", -1)
                                                 ]))]),
                                                 _: 1
@@ -3705,8 +3745,60 @@ return (_ctx, _cache) => {
       _: 1
     }),
     _createVNode$1(_component_v_dialog, {
+      modelValue: clearConfirm.value,
+      "onUpdate:modelValue": _cache[5] || (_cache[5] = $event => ((clearConfirm).value = $event)),
+      "max-width": "440"
+    }, {
+      default: _withCtx$1(() => [
+        _createVNode$1(_component_v_card, null, {
+          default: _withCtx$1(() => [
+            _createVNode$1(_component_v_card_title, { class: "text-h6" }, {
+              default: _withCtx$1(() => [...(_cache[41] || (_cache[41] = [
+                _createTextVNode$1("清空全部检查记录？", -1)
+              ]))]),
+              _: 1
+            }),
+            _createVNode$1(_component_v_card_text, null, {
+              default: _withCtx$1(() => [
+                _createTextVNode$1(" 将删除全部 " + _toDisplayString$1(records.value.length) + " 条检查记录，并清理上传的临时副本。 监控目录与媒体库里的原字幕只删记录、不动文件；字体库与子集化记录不受影响。 ", 1)
+              ]),
+              _: 1
+            }),
+            _createVNode$1(_component_v_card_actions, null, {
+              default: _withCtx$1(() => [
+                _createVNode$1(_component_v_spacer),
+                _createVNode$1(_component_v_btn, {
+                  variant: "text",
+                  onClick: _cache[4] || (_cache[4] = $event => (clearConfirm.value = false))
+                }, {
+                  default: _withCtx$1(() => [...(_cache[42] || (_cache[42] = [
+                    _createTextVNode$1("取消", -1)
+                  ]))]),
+                  _: 1
+                }),
+                _createVNode$1(_component_v_btn, {
+                  color: "error",
+                  variant: "tonal",
+                  loading: clearing.value,
+                  onClick: clearAll
+                }, {
+                  default: _withCtx$1(() => [...(_cache[43] || (_cache[43] = [
+                    _createTextVNode$1("全部清空", -1)
+                  ]))]),
+                  _: 1
+                }, 8, ["loading"])
+              ]),
+              _: 1
+            })
+          ]),
+          _: 1
+        })
+      ]),
+      _: 1
+    }, 8, ["modelValue"]),
+    _createVNode$1(_component_v_dialog, {
       modelValue: groupConfirm.value,
-      "onUpdate:modelValue": _cache[3] || (_cache[3] = $event => ((groupConfirm).value = $event)),
+      "onUpdate:modelValue": _cache[7] || (_cache[7] = $event => ((groupConfirm).value = $event)),
       "max-width": "440"
     }, {
       default: _withCtx$1(() => [
@@ -3729,9 +3821,9 @@ return (_ctx, _cache) => {
                 _createVNode$1(_component_v_spacer),
                 _createVNode$1(_component_v_btn, {
                   variant: "text",
-                  onClick: _cache[2] || (_cache[2] = $event => (groupConfirm.value = false))
+                  onClick: _cache[6] || (_cache[6] = $event => (groupConfirm.value = false))
                 }, {
-                  default: _withCtx$1(() => [...(_cache[36] || (_cache[36] = [
+                  default: _withCtx$1(() => [...(_cache[44] || (_cache[44] = [
                     _createTextVNode$1("取消", -1)
                   ]))]),
                   _: 1
@@ -3742,7 +3834,7 @@ return (_ctx, _cache) => {
                   loading: groupDeleting.value,
                   onClick: confirmDeleteGroup
                 }, {
-                  default: _withCtx$1(() => [...(_cache[37] || (_cache[37] = [
+                  default: _withCtx$1(() => [...(_cache[45] || (_cache[45] = [
                     _createTextVNode$1("删除整组", -1)
                   ]))]),
                   _: 1
@@ -3761,7 +3853,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const Check = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-4bb9353c"]]);
+const Check = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-eab4065b"]]);
 
 const {createTextVNode:_createTextVNode,resolveComponent:_resolveComponent,withCtx:_withCtx,createVNode:_createVNode,createElementVNode:_createElementVNode,openBlock:_openBlock,createBlock:_createBlock,createCommentVNode:_createCommentVNode,renderList:_renderList,Fragment:_Fragment,createElementBlock:_createElementBlock,toDisplayString:_toDisplayString,normalizeClass:_normalizeClass} = await importShared('vue');
 

@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import { _ as _export_sfc, a as apiModule, S as Settings, C as Check, F as FontLibrary, D as Dashboard } from './Settings-BHIRa3bH.js';
+import { _ as _export_sfc, a as apiModule, S as Settings, C as Check, F as FontLibrary, D as Dashboard } from './Settings-CLpHk05u.js';
 
 const {createTextVNode:_createTextVNode$2,resolveComponent:_resolveComponent$2,withCtx:_withCtx$2,createVNode:_createVNode$2,createElementVNode:_createElementVNode$2,toDisplayString:_toDisplayString$2,Fragment:_Fragment$2,openBlock:_openBlock$2,createElementBlock:_createElementBlock$2,createCommentVNode:_createCommentVNode$2,createBlock:_createBlock$2,renderList:_renderList$2,withModifiers:_withModifiers,normalizeClass:_normalizeClass} = await importShared('vue');
 
@@ -1553,7 +1553,7 @@ const mappings = ref$1([]);
 const loading = ref$1(false);
 const expanded = ref$1({ check: false, subset: false });
 // 严格上传：可选目标缺失字体（人工映射）；不选则按字体内部名称/别名自动匹配
-const targetHint = ref$1('');
+const targetHint = ref$1(null);
 
 const uploadRef = ref$1(null);
 const uploading = ref$1(false);
@@ -1917,9 +1917,10 @@ return (_ctx, _cache) => {
                 density: "compact",
                 variant: "outlined",
                 "hide-details": "",
-                clearable: "",
+                clearable: !!targetHint.value,
+                "no-data-text": "暂无可选的缺失字体",
                 class: "zt-target-select"
-              }, null, 8, ["modelValue", "items"]),
+              }, null, 8, ["modelValue", "items", "clearable"]),
               _createVNode$1(_component_v_btn, {
                 color: "primary",
                 variant: "tonal",
@@ -2325,7 +2326,8 @@ return (_ctx, _cache) => {
                   label: "缺失目标字体",
                   density: "compact",
                   variant: "outlined",
-                  "hide-details": ""
+                  "hide-details": "",
+                  "no-data-text": "暂无可选的缺失字体"
                 }, null, 8, ["modelValue", "items"])
               ]),
               _: 1
@@ -2368,7 +2370,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const MissingFonts = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-f7c5e5ac"]]);
+const MissingFonts = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-284d98d5"]]);
 
 const {createTextVNode:_createTextVNode,resolveComponent:_resolveComponent,withCtx:_withCtx,createVNode:_createVNode,createElementVNode:_createElementVNode,renderList:_renderList,Fragment:_Fragment,openBlock:_openBlock,createElementBlock:_createElementBlock,toDisplayString:_toDisplayString,createBlock:_createBlock,createCommentVNode:_createCommentVNode,resolveDynamicComponent:_resolveDynamicComponent,KeepAlive:_KeepAlive,createSlots:_createSlots} = await importShared('vue');
 
