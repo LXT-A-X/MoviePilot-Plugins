@@ -202,11 +202,9 @@ _DEFAULT_CONFIG = {
     "hdr_brightness": False,
     "hdr_brightness_level": "",
     # ── 种子字体收集（只读下载器，按种子文件清单截取，不扫目录）──
-    # 总开关：开启后自动包含「字幕入库前收集闸门 + 整理完成兜底 + 定时兜底」
+    # 总开关：开启后只按「兜底扫描间隔」轮询下载器已完成种子，不挂 MP 整理事件
     "torrent_enabled": False,
-    # 整理完成兜底入口的启动延迟（秒）：等 MP 搬完文件；字幕事件触发的收集不吃这个延迟
-    "torrent_delay_sec": 60,
-    # 字幕入库子集化前的最长等待（秒）：超时照常子集，缺字记入结果可重试
+    # 内部等待上限（秒）：_ensure_torrent_collect(wait=True) 的兜底上限，正常扫描不等
     "torrent_wait_sec": 300,
     # 兜底扫描间隔（分钟）：定时任务每分钟唤醒一次，到点才真正扫描下载器
     "torrent_scan_interval_min": 30,
@@ -427,7 +425,7 @@ class Zitifenlei(_PluginBase):
     plugin_name = "字体分类管家"
     plugin_desc = "字体归档整理与 ASS 字幕字体检查插件：扫描/上传字体到字体库，检查字幕缺失字体。"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/zitifenlei.png"
-    plugin_version = "3.1.9"
+    plugin_version = "3.2.0"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "zitifenlei_"
@@ -496,8 +494,6 @@ class Zitifenlei(_PluginBase):
         self._torrent_sem = threading.BoundedSemaphore(2)
         # 定时兜底扫描互斥：上一轮没跑完不叠加
         self._torrent_poll_lock = threading.Lock()
-        # 整理完成兜底的延迟 Timer：hash -> Timer（同 hash 重复事件重置倒计时）
-        self._torrent_delay_timers: Dict[str, threading.Timer] = {}
         # 实时监控通知聚合缓冲：连续放入的字体/字幕在 short 窗口内合并成一条归类通知，
         # 避免「放 5 个字体发 5 条通知」的刷屏。窗口内有新事件则滑动重置，到期统一发送。
         self._notify_agg: Dict[str, Any] = {
@@ -743,15 +739,9 @@ class Zitifenlei(_PluginBase):
                     pass
             self._show_timers.clear()
             self._pending_shows.clear()
-            # 取消未到期的种子收集延迟计时器，并放行正在等待收集的字幕闸门
+            # 放行可能仍在等待收集的任务（停服后不再继续收集）
             try:
                 with self._torrent_jobs_lock:
-                    for t in self._torrent_delay_timers.values():
-                        try:
-                            t.cancel()
-                        except Exception:
-                            pass
-                    self._torrent_delay_timers.clear()
                     for job in self._torrent_jobs.values():
                         ev = job.get("event")
                         if ev is not None:
@@ -3750,35 +3740,6 @@ class Zitifenlei(_PluginBase):
         except Exception:
             pass
 
-    def _torrent_queue_delay(self, torrent_hash: str, downloader: str, source: str = "transfer") -> None:
-        """整理完成兜底：延迟 torrent_delay_sec 秒再收集（等 MP 搬完文件）。"""
-        if not self._torrent_enabled() or not torrent_hash:
-            return
-        delay = max(0, self._torrent_cfg_int("torrent_delay_sec", 60))
-        with self._torrent_jobs_lock:
-            timer = self._torrent_delay_timers.get(torrent_hash)
-            if timer:
-                try:
-                    timer.cancel()
-                except Exception:
-                    pass
-            timer = threading.Timer(
-                delay,
-                self._torrent_delay_timer_fire,
-                args=(torrent_hash, downloader, source),
-            )
-            timer.daemon = True
-            timer.start()
-            self._torrent_delay_timers[torrent_hash] = timer
-
-    def _torrent_delay_timer_fire(self, torrent_hash: str, downloader: str, source: str) -> None:
-        with self._torrent_jobs_lock:
-            self._torrent_delay_timers.pop(torrent_hash, None)
-        try:
-            self._ensure_torrent_collect(torrent_hash, downloader, source=source, wait=False)
-        except Exception as err:
-            _logger.debug("种子字体收集入队失败: %s", err)
-
     def _torrent_scan(self, downloader: str = "", hours: int = 0) -> Dict[str, Any]:
         """手动/定时扫描已完成种子：只处理基线之后完成的，逐个入队收集。"""
         if not self._torrent_enabled():
@@ -3928,13 +3889,11 @@ class Zitifenlei(_PluginBase):
         total: int,
         embedded: int,
         missing_map: Dict[str, str],
-        extra_lines: Optional[List[str]] = None,
     ) -> None:
         """汇总通知：missing_map = {归一化key: 展示名}（缺 N 种已按 key 去重）
 
         格式对齐单字幕通知：状态符号 + 结果行 + 明细换行。剧级聚合字体可能较多，
         缺失列表保持「最多 5 个 + 等 N 种」折叠，避免消息过长。
-        extra_lines：种子字体收集的补充说明（只在真有收集动作时传入）
         """
         try:
             if not self.get_resource_or_config("notify_enabled"):
@@ -3957,9 +3916,6 @@ class Zitifenlei(_PluginBase):
                     f"✅ 共 {total} 个字幕" + (f"，其中 {embedded} 个已内嵌字体" if embedded else ""),
                     "全部字幕已子集化（自带内嵌字体）" if all_embedded else "字幕字体齐全",
                 ]
-            for extra in extra_lines or []:
-                if extra:
-                    lines.append(extra)
             self._notify(f"《{show}》字幕检查完成", "\n".join(lines))
         except Exception:
             pass
@@ -3970,7 +3926,6 @@ class Zitifenlei(_PluginBase):
         tmdbid: str,
         title: str,
         file_list: List[str],
-        hashes: Optional[Dict[str, str]] = None,
     ) -> None:
         """聚合到期：处理本次新增的 ASS 字幕列表（由 on_transfer_complete 汇总传入）。
 
@@ -3978,9 +3933,8 @@ class Zitifenlei(_PluginBase):
         「入库后自动子集化」（auto_subset）开 → 对这批字幕做字体子集化并内嵌。
         两者相互独立：只开子集化时不产生检查记录/检查通知，只开检查时不做子集化。
 
-        hashes：本批字幕对应的下载种子（hash -> 下载器名）。种子收集开启时，
-        先等这些种子的字体截取完成（最多 torrent_wait_sec 秒），再检查/子集，
-        避免「字幕先到、字体还没入库」导致误判缺字。超时也继续，缺字记入结果可重试。
+        字体来源不在这里补：种子字体收集只走「定时/手动扫描下载器」，
+        不再挂 MP 整理事件（移动模式整理后源文件已不存在）。
         """
         with self._lock:
             self._show_timers.pop(key, None)
@@ -4002,33 +3956,6 @@ class Zitifenlei(_PluginBase):
             do_subset = bool(self.get_resource_or_config("auto_subset"))
             if not (do_check or do_subset):
                 return
-            # ── 种子字体收集闸门：先补字体，再检查/子集 ──
-            torrent_notes: List[str] = []
-            if self._torrent_enabled() and hashes:
-                for h, dl in list(hashes.items()):
-                    if self._stopping:
-                        break
-                    res = self._ensure_torrent_collect(str(h), str(dl or ""), source="inbound", wait=True)
-                    state = str(res.get("state") or "")
-                    if state == "timeout":
-                        torrent_notes.append(
-                            f"⚠ 种子字体收集超时（{res.get('reason') or '等待上限'}），"
-                            "收集仍在后台继续，缺字可稍后重试"
-                        )
-                    elif state == "failed" and res.get("reason"):
-                        torrent_notes.append(f"⚠ 种子字体收集失败：{res.get('reason')}")
-                    elif int(res.get("added") or 0) > 0 or int(res.get("pending") or 0) > 0:
-                        bits: List[str] = []
-                        if int(res.get("added") or 0) > 0:
-                            bits.append(f"补充 {int(res.get('added') or 0)} 个字体")
-                        if int(res.get("pending") or 0) > 0:
-                            bits.append(
-                                f"{int(res.get('pending') or 0)} 个已进待整理（确认后重试）"
-                            )
-                        torrent_notes.append(
-                            f"种子收集：{'，'.join(bits)}"
-                            f"（来自 {res.get('name') or str(h)[:8]}）"
-                        )
             if do_check:
                 total = 0
                 embedded = 0
@@ -4054,7 +3981,7 @@ class Zitifenlei(_PluginBase):
                     f"入库扫描 {title or key}: {total} 个字幕, {embedded} 个已内嵌, 缺 {len(missing_map)} 种字体",
                     "warning" if missing_map else "info",
                 )
-                self._notify_show_scan(title or key, total, embedded, missing_map, extra_lines=torrent_notes)
+                self._notify_show_scan(title or key, total, embedded, missing_map)
             # 入库自动子集化（设置开关 auto_subset 开启时）：独立于「入库自动检查字幕」，
             # 关闭检查开关不阻断子集化——对这批字幕做字体子集化并内嵌
             if do_subset:
@@ -4112,10 +4039,6 @@ class Zitifenlei(_PluginBase):
                 or str(self._safe_get(meta, "en_name") or "")
             )
             transferinfo = data.get("transferinfo") or {}
-            # 本次整理对应的种子：种子收集开启时，字幕一到就按 hash 截取字体（异步），
-            # 聚合到期再等它完成，保证子集化时字体已入库（不依赖视频/字幕事件先后顺序）
-            download_hash = str(data.get("download_hash") or "")
-            downloader = str(data.get("downloader") or "")
             # ── 收集本次新增的 ASS 字幕路径（只算转移后入库文件） ──
             # transferinfo.target_item 是转移后的字幕（媒体库内入库文件）；
             # fileitem / transferinfo.fileitem 是源字幕路径——link 模式下源文件仍
@@ -4142,38 +4065,29 @@ class Zitifenlei(_PluginBase):
                 self._db.add_log("字幕事件未解析到可用 ASS 字幕路径，跳过", "warning")
                 return
             key = tmdbid or title or str(Path(ass_paths[0]).parent)
-            # 字幕一到就先入队种子字体收集（不等视频整理事件，避免事件顺序不可控）
-            if download_hash and self._torrent_enabled():
-                try:
-                    self._ensure_torrent_collect(download_hash, downloader, source="inbound", wait=False)
-                except Exception as err:
-                    _logger.debug("种子字体收集入队失败: %s", err)
             with self._lock:
                 ctx = self._pending_shows.get(key)
                 if not isinstance(ctx, dict):
-                    ctx = {"files": [], "hashes": {}}
+                    ctx = {"files": []}
                     self._pending_shows[key] = ctx
                 cur = ctx["files"]
                 for p in ass_paths:
                     if p not in cur:
                         cur.append(p)
-                if download_hash:
-                    ctx["hashes"][download_hash] = downloader
                 timer = self._show_timers.get(key)
                 if timer:
                     timer.cancel()
                 timer = threading.Timer(
                     self._ass_finalize_delay,
                     self._run_show_scan,
-                    args=(key, tmdbid, title, list(cur), dict(ctx["hashes"])),
+                    args=(key, tmdbid, title, list(cur)),
                 )
                 timer.daemon = True
                 timer.start()
                 self._show_timers[key] = timer
             self._db.add_log(
                 f"入库字幕已排队（{title or key}）：{len(cur)} 个，{self._ass_finalize_delay} 秒聚合后统一处理，"
-                + ("种子字体收集已先行入队；" if (download_hash and self._torrent_enabled()) else "")
-                + "正在等待整部入库完毕…",
+                "正在等待整部入库完毕…",
                 "info",
             )
             _logger.info("入库扫描已排队: %s (%d 个字幕)，%ds 后统一处理", title or key, len(cur), self._ass_finalize_delay)
@@ -4192,26 +4106,6 @@ class Zitifenlei(_PluginBase):
             except Exception:
                 return False
         return self._db is not None
-
-    @eventmanager.register(EventType.TransferComplete)
-    def on_torrent_transfer_complete(self, event) -> None:
-        """整理完成兜底：纯字体包种子（没有字幕）不会触发字幕事件，靠这里延迟截取。
-
-        只入队、不阻塞事件总线；延迟 torrent_delay_sec 秒是为了避开 MP 正在搬文件的时刻。
-        """
-        try:
-            if not self._torrent_enabled():
-                return
-            data = getattr(event, "event_data", None) or {}
-            if not isinstance(data, dict):
-                return
-            torrent_hash = str(data.get("download_hash") or "")
-            downloader = str(data.get("downloader") or "")
-            if not torrent_hash:
-                return
-            self._torrent_queue_delay(torrent_hash, downloader, source="transfer")
-        except Exception as err:
-            _logger.debug("整理完成种子收集入队失败: %s", err)
 
     def _ok(self, data: Any, message: str = "success") -> Dict[str, Any]:
         return {"success": True, "message": message, "data": data}

@@ -68,7 +68,6 @@ def _plugin(tmp_path: Path):
             "lib_dir": str(lib),
             "torrent_enabled": True,
             "torrent_wait_sec": 5,
-            "torrent_delay_sec": 0,
             "torrent_max_file_mb": 64,
             "torrent_max_files": 50,
         }
@@ -409,20 +408,6 @@ def test_manual_scan_skips_history(tmp_path, monkeypatch):
     assert res["skipped"] == 1
     assert res["queued"] == 1
     assert queued == ["new" * 10]
-
-
-# ─── 检查通知：种子收集补充说明只写在检查通知里 ──────────────────────────
-
-
-def test_notify_show_scan_includes_torrent_note(tmp_path, monkeypatch):
-    plugin, _lib = _plugin(tmp_path)
-    plugin._config["notify_enabled"] = True
-    sent = []
-    monkeypatch.setattr(plugin, "post_message", lambda **kw: sent.append(kw) or True)
-    plugin._notify_show_scan(
-        "某剧", 2, 0, {"missing": "某字体"}, extra_lines=["种子收集：补充 3 个字体（来自 某种子）"]
-    )
-    assert sent and "种子收集：补充 3 个字体" in sent[0]["text"]
 
 
 # ─── DB：记录写入 / 幂等查询 / 清空 ──────────────────────────────────────

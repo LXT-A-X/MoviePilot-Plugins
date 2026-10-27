@@ -43,10 +43,8 @@ const DEFAULT_CONFIG = {
   subset_out_mode: 'copy',
   hdr_brightness: false,
   hdr_brightness_level: '',
-  // 种子字体收集：总开关 + 等待秒数 + 兜底扫描间隔 + 关键词/上限 + 收集去向
+  // 种子字体收集：总开关 + 兜底扫描间隔 + 关键词/上限 + 收集去向
   torrent_enabled: false,
-  torrent_delay_sec: 60,
-  torrent_wait_sec: 300,
   torrent_scan_interval_min: 30,
   torrent_keywords: 'font,fonts,字体',
   torrent_max_file_mb: 2048,
@@ -118,8 +116,6 @@ async function save() {
       const n = Number(v)
       return Number.isFinite(n) ? Math.min(max, Math.max(min, Math.round(n))) : d
     }
-    config.value.torrent_delay_sec = normInt(config.value.torrent_delay_sec, 60, 0, 3600)
-    config.value.torrent_wait_sec = normInt(config.value.torrent_wait_sec, 300, 0, 3600)
     config.value.torrent_scan_interval_min = normInt(config.value.torrent_scan_interval_min, 30, 1, 1440)
     config.value.torrent_max_file_mb = normInt(config.value.torrent_max_file_mb, 2048, 1, 40960)
     config.value.torrent_max_files = normInt(config.value.torrent_max_files, 500, 1, 5000)
@@ -489,12 +485,12 @@ watch(() => config.value.auto_subset, (v) => {
         <div class="zt-switch-row">
           <div class="flex-grow-1">
             <div class="zt-switch-title">启用种子字体收集</div>
-            <div class="zt-switch-desc">只读下载器：从下载完成的种子里按文件清单截取字体（不扫描下载目录、不改下载优先级、不删任何源文件）。开启后自动包含「字幕入库前收集闸门 + 整理完成兜底 + 按设定间隔的兜底扫描」，要停就关这个总开关</div>
+            <div class="zt-switch-desc">只读下载器：从下载完成的种子里按文件清单截取字体（不扫描下载目录、不改下载优先级、不删任何源文件）。开启后按设定间隔轮询下载器，不接 MP 整理事件，要停就关这个总开关</div>
           </div>
           <v-switch v-model="config.torrent_enabled" color="primary" hide-details></v-switch>
         </div>
         <v-row dense class="mt-2">
-          <v-col cols="12" sm="4">
+          <v-col cols="12" sm="6">
             <v-text-field
               v-model.number="config.torrent_scan_interval_min"
               type="number" min="1" max="1440"
@@ -504,28 +500,6 @@ watch(() => config.value.auto_subset, (v) => {
               persistent-hint
             ></v-text-field>
           </v-col>
-          <v-col cols="12" sm="4">
-            <v-text-field
-              v-model.number="config.torrent_delay_sec"
-              type="number" min="0" max="3600"
-              label="启动延迟（秒）"
-              density="compact" variant="outlined"
-              hint="整理完成后等这么久再截取，避开 MP 搬文件；字幕事件触发的收集不等这个延迟"
-              persistent-hint
-            ></v-text-field>
-          </v-col>
-          <v-col cols="12" sm="4">
-            <v-text-field
-              v-model.number="config.torrent_wait_sec"
-              type="number" min="0" max="3600"
-              label="子集前最长等待（秒）"
-              density="compact" variant="outlined"
-              hint="字幕入库子集化前最多等这么久；超时照常子集，缺字记入结果可重试"
-              persistent-hint
-            ></v-text-field>
-          </v-col>
-        </v-row>
-        <v-row dense class="mt-2">
           <v-col cols="12" sm="6">
             <v-text-field
               v-model="config.torrent_keywords"
@@ -535,7 +509,9 @@ watch(() => config.value.auto_subset, (v) => {
               persistent-hint
             ></v-text-field>
           </v-col>
-          <v-col cols="6" sm="3">
+        </v-row>
+        <v-row dense class="mt-2">
+          <v-col cols="12" sm="6">
             <v-text-field
               v-model.number="config.torrent_max_file_mb"
               type="number" min="1" max="40960"
@@ -544,7 +520,7 @@ watch(() => config.value.auto_subset, (v) => {
               hide-details
             ></v-text-field>
           </v-col>
-          <v-col cols="6" sm="3">
+          <v-col cols="12" sm="6">
             <v-text-field
               v-model.number="config.torrent_max_files"
               type="number" min="1" max="5000"
