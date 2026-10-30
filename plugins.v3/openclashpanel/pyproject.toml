@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "moviepilot-openclashpanel"
+version = "0.1.0"
+description = "MoviePilot V3 插件：OpenClash 控制面板（状态/切节点/切模式/测速/刷新订阅）"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.setuptools]
+py-modules = []

@@ -99,3 +99,35 @@ MoviePilot 插件仓库，兼容 **V2 与 V3**，收录实用插件。
 4. 启用插件
 
 **详细使用说明见 [字体分类管家使用手册（V3）](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v3/zitifenlei/README.md) / [V2 版](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v2/zitifenlei/%E4%BD%BF%E7%94%A8%E6%89%8B%E5%86%8C.md)**
+
+<!-- 以下内容追加到仓库根 README.md，原有内容不动 -->
+
+### 插件列表（追加一行）
+
+| [OpenClash 控制面板](#openclash-控制面板-openclashpanel) | MoviePilot 内管理 OpenClash/Mihomo：状态、策略组切换、测速、访问检查、服务管理、TG 命令、仪表盘 | - | ✅ 1.12.0 |
+
+---
+
+## OpenClash 控制面板 (OpenClashPanel)
+
+在 MoviePilot 里直接查看和管理 **OpenClash / Mihomo**：状态总览、策略组与节点切换、延迟测速、访问检查、服务管理（需 OpenWrt 登录）、日志查看；支持 TG 按钮命令与仪表盘组件。
+
+**功能特性：**
+
+* **状态总览**：内核版本、规则模式、运行模式、连接数、内存/CPU/负载、上下行速率与累计流量
+* **策略组**：按 OpenClash 配置文件顺序排列（与 zashboard 一致），节点切换、单项/整组测速（进度 + 成功/超时统计），Smart 智能组只读
+* **访问检查**：内核（与官方一致）/ MP 网络 / OpenClash 代理三视角，逐站加载、30 秒自动采集
+* **OpenWrt 管理**（可选，填 LuCI 地址/用户名/密码）：启动/停止/重启、运行模式（基础/增强 TUN/混合 MIX）、切换配置、更新订阅、清缓存、区域绕过/域名嗅探/DNS 代理/流媒体解锁
+* **TG 命令**：`/oc_status`、`/oc_check`、`/oc_node`（分页按钮选组/节点）、`/oc_mode`、`/oc_refresh`、`/oc_help`
+* **仪表盘**：全宽组件（状态 + 访问检查 + 策略组/节点）
+* **日志**：插件日志 + 内核实时日志
+
+**安装方式：**
+
+1. 在 MoviePilot 插件市场添加本仓库地址
+2. 搜索「OpenClash 控制面板」并安装（V3 版为 1.12.0）
+3. 在插件设置里填写 OpenClash API 地址（`http://<路由器IP>:9090`）与 Dashboard 密码；需要服务管理时再填 OpenWrt 地址/用户名/密码
+4. 保存后刷新插件页
+
+**详细使用说明见 [OpenClash 控制面板使用手册](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v3/openclashpanel/README.md)**
+
