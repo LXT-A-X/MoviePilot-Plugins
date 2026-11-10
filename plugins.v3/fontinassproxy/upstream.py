@@ -57,7 +57,7 @@ def rewrite_location(location: str) -> str:
     """把重定向 Location 里的绝对 URL 转成相对路径，让浏览器在当前反代下继续。
 
     场景：客户端经内置反代（8097）访问 Emby 根路径，Emby 302 指向自己的绝对地址
-    （http://192.168.2.15:8096/web/index.html）。若原样透传，浏览器会跳出反代直连
+    （http://192.168.1.10:8096/web/index.html）。若原样透传，浏览器会跳出反代直连
     8096，产生混合域黑屏。转成相对 /web/index.html 后一切资源都走当前反代。
     """
     if not location:
