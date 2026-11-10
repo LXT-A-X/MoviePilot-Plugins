@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import shutil
+import tempfile
 import threading
 import time
 import uuid
@@ -226,6 +227,12 @@ _ARCH_DUP = -2            # 字体库已存在（或源文件已收录）：跳�
 _ARCH_DUP_DELETED = -3    # 同上跳过，且已删除监控目录残留的重复源文件
 _ARCH_DUP_DEL_FAILED = -4  # 同上跳过，但删除重复源文件失败
 
+# 字体监控目录压缩包（v3.2.3）：处理成功后记录「路径+大小+mtime」指纹，
+# 避免全量扫描/重启后反复解压同一个大包；只保留最近若干条。
+_ARCHIVE_DONE_SETTING = "monitored_archive_done"
+_ARCHIVE_DONE_LIMIT = 300
+_ARCHIVE_MAX_MEMBERS = 500  # 与上传解压一致：一个包最多 500 个成员
+
 
 def _path_within(path: Path, base: Path) -> bool:
     """路径组件级判断 path 是否位于 base 目录内。
@@ -425,7 +432,7 @@ class Zitifenlei(_PluginBase):
     plugin_name = "字体分类管家"
     plugin_desc = "字体归档整理与 ASS 字幕字体检查插件：扫描/上传字体到字体库，检查字幕缺失字体。"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/zitifenlei.png"
-    plugin_version = "3.2.2"
+    plugin_version = "3.2.3"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "zitifenlei_"
@@ -1365,6 +1372,28 @@ class Zitifenlei(_PluginBase):
                 # 先标记再处理：后续同一文件的重复事件直接跳过（双观察者并发安全）
                 self._processed_recent[key] = now
             try:
+                # v3.2.3 目录类型门禁：按「文件所在目录」决定允许的类型——
+                # 放错目录直接跳过并写日志（不再出现「字体目录里的字幕被当字幕检查」
+                # 或「字幕目录里的字体被归档」），也不进失败重试队列。
+                kind = self._watch_dir_kind(p)
+                is_font = is_font_file(p.name)
+                is_ass = is_ass_file(p.name)
+                is_arch = arch.is_any_archive(p.name)
+                _dir_allows = {
+                    "missing": is_font,
+                    "lib": is_font,
+                    "subset": is_ass,
+                    "input": is_font or is_arch,
+                    "ass": is_ass,
+                }
+                if kind in _dir_allows and not _dir_allows[kind]:
+                    self._log_dir_mismatch(p, kind, is_font, is_ass, is_arch)
+                    success = True
+                    return
+                # 字体监控目录里的压缩包：安全解压后逐个归档（大字体包上传受限时的替代通道）
+                if kind == "input" and is_arch:
+                    success = self._handle_font_archive(p)
+                    return
                 # 缺失字体专用目录：先稳定等待，再逐 face 严格校验（不与普通归档重复处理）
                 missing_dir_cfg = self.get_resource_or_config("missing_font_dir") or ""
                 if (
@@ -1843,6 +1872,7 @@ class Zitifenlei(_PluginBase):
           dup_deleted: 移动模式下实际删除的重复源文件数
           delete_failed: 删除重复源文件失败数
           pending: 进入「待确认」的数量（目录自动收集关闭）
+          archives: [本次处理过的字体压缩包文件名]（v3.2.3，靠指纹去重不会重复解压）
         """
         stats: Dict[str, Any] = {
             "added": [],
@@ -1851,6 +1881,7 @@ class Zitifenlei(_PluginBase):
             "dup_deleted": 0,
             "delete_failed": 0,
             "pending": 0,
+            "archives": [],
         }
         if not directory.is_dir():
             return stats
@@ -1863,25 +1894,229 @@ class Zitifenlei(_PluginBase):
                 pass
             if self._is_system_hidden_path(f):
                 continue
-            if not f.is_file() or not is_font_file(f.name):
+            if not f.is_file():
                 continue
-            ret = self._archive_font_file(f, source=source, force_pending=force_pending)
-            if ret is not None and ret > 0:
-                stats["added"].append(f.name)
-            elif ret == _ARCH_PENDING:
-                stats["pending"] += 1
-            elif ret == _ARCH_DUP:
-                stats["skipped"].append(f.name)
-            elif ret == _ARCH_DUP_DELETED:
-                stats["skipped"].append(f.name)
-                stats["dup_deleted"] += 1
-            elif ret == _ARCH_DUP_DEL_FAILED:
-                stats["skipped"].append(f.name)
-                stats["delete_failed"] += 1
-            else:
-                # None=未配置库目录/复制/写库异常等失败
-                stats["failed"] += 1
+            if is_font_file(f.name):
+                ret = self._archive_font_file(f, source=source, force_pending=force_pending)
+                if ret is not None and ret > 0:
+                    stats["added"].append(f.name)
+                elif ret == _ARCH_PENDING:
+                    stats["pending"] += 1
+                elif ret == _ARCH_DUP:
+                    stats["skipped"].append(f.name)
+                elif ret == _ARCH_DUP_DELETED:
+                    stats["skipped"].append(f.name)
+                    stats["dup_deleted"] += 1
+                elif ret == _ARCH_DUP_DEL_FAILED:
+                    stats["skipped"].append(f.name)
+                    stats["delete_failed"] += 1
+                else:
+                    # None=未配置库目录/复制/写库异常等失败
+                    stats["failed"] += 1
+            elif source in ("auto", "scan") and arch.is_any_archive(f.name):
+                # 字体监控目录里的压缩包（v3.2.3）：扫描/全量检查时也解压归档；
+                # 包内字体逐个走 _archive_font_file，解压结果计入 added/skipped/failed。
+                if self._handle_font_archive(f):
+                    stats["archives"].append(f.name)
+                else:
+                    stats["failed"] += 1
         return stats
+
+    # ─── 监控目录类型 / 目录内压缩包（v3.2.3）────────────────
+    _WATCH_DIR_LABELS = {
+        "missing": "缺失字体接收目录",
+        "lib": "字体库目录",
+        "subset": "ASS 自动子集化目录",
+        "input": "字体监控目录",
+        "ass": "ASS 字幕检查目录",
+    }
+    _WATCH_DIR_EXPECT = {
+        "missing": "字体文件",
+        "lib": "字体文件",
+        "subset": ".ass 字幕",
+        "input": "字体文件或字体压缩包(.zip/.7z/.rar)",
+        "ass": ".ass 字幕",
+    }
+
+    def _watch_dir_kind(self, path: Path) -> str:
+        """判断文件属于哪个配置目录：missing / lib / subset / input / ass；都不属于返回 ""。
+
+        目录可能嵌套（例如字体库目录配在字体监控目录里面），按「更具体/更严格」优先：
+        缺失字体接收目录 > 字体库目录 > ASS 自动子集化目录 > 字体监控目录 > ASS 字幕检查目录。
+        监控事件按「所在目录」决定允许的文件类型，而不是只看后缀——放错目录直接跳过。
+        """
+        try:
+            for kind, key in (
+                ("missing", "missing_font_dir"),
+                ("lib", "lib_dir"),
+                ("subset", "subset_dir"),
+                ("input", "input_dir"),
+                ("ass", "ass_dir"),
+            ):
+                base = str(self.get_resource_or_config(key) or "").strip()
+                if base and _path_within(path, Path(base)):
+                    return kind
+        except Exception:
+            pass
+        return ""
+
+    def _log_dir_mismatch(
+        self, p: Path, kind: str, is_font: bool, is_ass: bool, is_arch: bool
+    ) -> None:
+        """放错目录的文件：只对字体/字幕/压缩包记日志，其它杂项（.txt/.url/缩略图等）静默跳过。"""
+        if not (is_font or is_ass or is_arch) or self._db is None:
+            return
+        label = self._WATCH_DIR_LABELS.get(kind, kind)
+        expect = self._WATCH_DIR_EXPECT.get(kind, "")
+        try:
+            self._db.add_log(
+                f"目录类型不匹配，已跳过: {p.name}（{label}只处理{expect}）",
+                "info",
+            )
+        except Exception:
+            pass
+
+    def _archive_signature(self, path: Path) -> str:
+        """压缩包处理指纹：路径 + 大小 + mtime，用于避免重复解压同一个包。"""
+        try:
+            st = path.stat()
+            return f"{path.resolve()}|{st.st_size}|{st.st_mtime_ns}"
+        except Exception:
+            return str(path)
+
+    def _archive_done_list(self) -> List[str]:
+        if self._db is None:
+            return []
+        try:
+            raw = self._db.get_setting(_ARCHIVE_DONE_SETTING, "") or ""
+        except Exception:
+            raw = ""
+        try:
+            data = json.loads(raw) if raw else []
+            return [str(item) for item in data] if isinstance(data, list) else []
+        except Exception:
+            return []
+
+    def _mark_archive_done(self, sig: str) -> None:
+        if self._db is None:
+            return
+        try:
+            done = self._archive_done_list()
+            if sig in done:
+                return
+            done.append(sig)
+            self._db.set_setting(
+                _ARCHIVE_DONE_SETTING,
+                json.dumps(done[-_ARCHIVE_DONE_LIMIT:], ensure_ascii=False),
+            )
+        except Exception:
+            pass
+
+    def _handle_font_archive(self, archive_path: Path) -> bool:
+        """处理「字体监控目录」里的压缩包：安全解压后把里面的字体逐个归档。
+
+        - 上传受反向代理 413/大文件限制时，把字体包直接丢进字体监控目录即可；
+        - 复用上传同款安全解压（只解一层、防 Zip Slip、成员/体积上限、后缀白名单）；
+        - 处理成功后记录指纹，全量扫描/重启不会重复解压；
+        - 返回 True=本次已处理完（含跳过/失败已写日志，不再重试）；
+          返回 False=仍在写入等可重试原因，交给监控重试机制。
+        """
+        name = archive_path.name
+        if not arch.is_any_archive(name) or self._db is None:
+            return True
+        suffix = Path(name).suffix or "该格式"
+        if not arch.is_archive(name):
+            self._db.add_log(
+                f"监控压缩包跳过 {name}: 未检测到可解 {suffix} 的解压工具"
+                "（可在「仪表盘 → 依赖 → 解压工具」点「安装/修复解压工具」）",
+                "warning",
+            )
+            return True
+        sig = self._archive_signature(archive_path)
+        if sig in self._archive_done_list():
+            return True
+        if not _wait_file_stable(archive_path):
+            self._db.add_log(f"监控压缩包 {name}: 仍在写入，稍后重试", "info")
+            return False
+        try:
+            size = archive_path.stat().st_size
+        except Exception as err:
+            self._db.add_log(f"监控压缩包 {name}: 读取大小失败 {err}", "warning")
+            return True
+        if size > MAX_UPLOAD_TOTAL_BYTES:
+            self._db.add_log(
+                f"监控压缩包 {name}: 超过单次处理总量上限"
+                f"（{MAX_UPLOAD_TOTAL_BYTES // (1024 * 1024)}MB），已跳过",
+                "warning",
+            )
+            return True
+        tmp_root = Path(self._tmp_dir) if self._tmp_dir else Path(tempfile.gettempdir())
+        try:
+            tmp_root.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        dest = tmp_root / f"watch_archive_{uuid.uuid4().hex}"
+        try:
+            result = arch.extract_archive(
+                archive_path,
+                dest,
+                FONT_EXTENSIONS,
+                max_members=_ARCHIVE_MAX_MEMBERS,
+                max_total_bytes=MAX_UPLOAD_TOTAL_BYTES,
+                max_member_bytes=max_font_file_bytes(),
+            )
+            fonts = [Path(item.path) for item in result.files]
+            if not fonts:
+                detail = "；".join(
+                    f"{member}: {reason}"
+                    for member, reason in (result.skipped + result.errors)[:5]
+                )
+                self._db.add_log(
+                    f"监控压缩包 {name}: 解出 0 个字体" + (f"（{detail}）" if detail else ""),
+                    "warning",
+                )
+                self._mark_archive_done(sig)
+                return True
+            added = 0
+            dup = 0
+            pending = 0
+            failed = 0
+            added_names: List[str] = []
+            for font in fonts:
+                ret = self._archive_font_file(font, source="monitor_archive")
+                if ret is not None and ret > 0:
+                    added += 1
+                    added_names.append(font.name)
+                elif ret == _ARCH_PENDING:
+                    pending += 1
+                elif ret in (_ARCH_DUP, _ARCH_DUP_DELETED, _ARCH_DUP_DEL_FAILED):
+                    dup += 1
+                else:
+                    failed += 1
+            self._mark_archive_done(sig)
+            self._db.add_log(
+                f"监控压缩包 {name}: 解出 {len(fonts)} 个字体"
+                f"（归档 {added}，跳过 {dup + pending}，失败 {failed}）",
+                "info" if not failed else "warning",
+            )
+            if added:
+                try:
+                    with self._lock:
+                        self._notify_agg["fonts"].extend(added_names)
+                        if not self._notify_agg.get("archive_mode"):
+                            self._notify_agg["archive_mode"] = (
+                                self.get_resource_or_config("archive_mode") or "copy"
+                            )
+                    self._schedule_index_rebuild()
+                    self._queue_agg_notify()
+                except Exception:
+                    pass
+            return True
+        except Exception as err:
+            self._db.add_log(f"监控压缩包处理失败 {name}: {err}", "error")
+            return False
+        finally:
+            shutil.rmtree(dest, ignore_errors=True)
 
     # ─── 内部工具 ────────────────────────────────────────
     @staticmethod

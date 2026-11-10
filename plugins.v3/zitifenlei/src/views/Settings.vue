@@ -326,6 +326,10 @@ watch(() => config.value.auto_subset, (v) => {
         目录配置
       </v-card-title>
       <v-card-text>
+        <div class="zt-hint mb-3">
+          监控按「目录类型」严格处理：字体监控目录只收字体/字体压缩包，字幕目录只收 .ass；
+          放错目录的文件会跳过并写入「最近操作日志」，不会误归档或误检查。
+        </div>
         <v-text-field
           v-model="config.input_dir"
           label="字体监控目录"
@@ -333,7 +337,7 @@ watch(() => config.value.auto_subset, (v) => {
           density="compact"
           variant="outlined"
           class="mb-3"
-          hint="新字体放这里自动归档进字体库"
+          hint="新字体或字体压缩包（.zip/.7z/.rar，自动安全解压后逐个归档）放这里即自动入库"
           persistent-hint
         ></v-text-field>
         <v-text-field
@@ -353,7 +357,7 @@ watch(() => config.value.auto_subset, (v) => {
           density="compact"
           variant="outlined"
           class="mb-3 mt-5"
-          hint="放入字幕自动检查缺字体（不产出子集化成品的目录）"
+          hint="放入 .ass 自动检查缺字体（只收字幕；放错类型的文件会跳过）"
           persistent-hint
         ></v-text-field>
         <v-text-field
