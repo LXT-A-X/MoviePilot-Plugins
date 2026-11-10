@@ -1,133 +1,231 @@
-MoviePilot 插件仓库，兼容 **V2 与 V3**，收录实用插件。
+# MoviePilot 插件仓库（LXT-A-X）
 
-**仓库地址：** `https://github.com/LXT-A-X/MoviePilot-Plugins`
+> 适配 **MoviePilot V2 / V3** 的插件合集：字体与字幕处理、Emby 演职人员中文化、OpenClash 控制面板、MKV 工具箱。
+> 每个插件都有独立的详细使用手册，见下方「插件列表」与各插件目录下的 `README.md`。
+
+**仓库地址：** <https://github.com/LXT-A-X/MoviePilot-Plugins>
+
+---
+
+## 目录
+
+- [仓库结构](#仓库结构)
+- [快速安装](#快速安装)
+- [插件列表](#插件列表)
+- [插件详情](#插件详情)
+  - [字幕字体代理 FontInAssProxy](#字幕字体代理-fontinassproxy)
+  - [Emby 演职人员中文化 EmbyPeopleLocalize](#emby-演职人员中文化-embypeoplelocalize)
+  - [字体分类管家 Zitifenlei](#字体分类管家-zitifenlei)
+  - [OpenClash 控制面板 OpenClashPanel](#openclash-控制面板-openclashpanel)
+  - [MKV 工具箱 MkvToolkit](#mkv-工具箱-mkvtoolkit)
+- [通用说明](#通用说明)
+- [常见问题](#常见问题)
+- [致谢与声明](#致谢与声明)
+
+---
+
+## 仓库结构
+
+```text
+MoviePilot-Plugins/
+├── package.v2.json        # V2 插件市场索引（MoviePilot V2 读取）
+├── package.v3.json        # V3 插件市场索引（MoviePilot V3 读取）
+├── icons/                 # 插件市场卡片图标
+├── plugins.v2/            # 适用于 MoviePilot V2 的插件源码
+│   ├── embypeoplelocalize/
+│   └── zitifenlei/
+└── plugins.v3/            # 适用于 MoviePilot V3 的插件源码（含前端 dist）
+    ├── embypeoplelocalize/
+    ├── fontinassproxy/
+    ├── mkvtoolkit/
+    ├── openclashpanel/
+    └── zitifenlei/
+```
+
+- **V3 插件**：依赖 MoviePilot V3 稳定 SDK（`app.sdk.*`），前端使用 Module Federation 联邦加载，安装时由宿主自动安装 `pyproject.toml` 声明的依赖。
+- **V2 插件**：面向旧版 MoviePilot V2，功能相近但界面与配置项不同；V3 宿主请安装 `plugins.v3/` 对应版本。
+
+## 快速安装
+
+1. 打开 **MoviePilot → 插件市场 / 插件仓库**，添加本仓库地址：
+   `https://github.com/LXT-A-X/MoviePilot-Plugins`
+2. 在插件市场中搜索插件名称（如「字体分类管家」），确认版本与你的 MoviePilot 主版本匹配（V2 / V3）后安装。
+3. 安装完成后进入插件「设置」页按手册配置目录/服务地址等参数，保存并**启用插件**。
+4. 部分插件需要容器内的外部工具或端口（如字体插件的 7z/unar 解压、字幕代理的 8097 反代端口、MKV 工具箱的 mkvmerge），具体见各插件手册的「前置条件」。
+
+> **更新**：插件更新同样在插件市场完成。GitHub raw 索引有 CDN 缓存，刚发布的版本可能需要等待 1~5 分钟或重启 MoviePilot 后才会出现在市场里。
 
 ## 插件列表
 
-| 插件 | 说明 | V2 | V3 |
-| --- | --- | --- | --- |
-| [字幕字体代理](#字幕字体代理-fontinassproxy) | 反代 Emby/Jellyfin 字幕流，实时子集化并嵌入字体 | \- | ✅ 3.1.2 |
-| [Emby 演职人员中文化](#emby-演职人员中文化-embypeoplelocalize) | 大模型翻译 Emby 人名为中文 | ✅ 1.3.11 | ✅ 4.7.10 |
-| [字体分类管家](#字体分类管家-zitifenlei) | 字体归档整理 + ASS 字幕检查 + 子集化 | ✅ 1.2.24 | ✅ 3.2.3 |
+| 插件 | 一句话说明 | V2 版本 | V3 版本 | 详细手册 |
+| --- | --- | --- | --- | --- |
+| **字幕字体代理** FontInAssProxy | 反代 Emby/Jellyfin 字幕流，实时子集化字体并内嵌进 ASS | — | ✅ 3.1.2 | [V3 手册](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v3/fontinassproxy/README.md) |
+| **Emby 演职人员中文化** EmbyPeopleLocalize | 用 LLM 把 Emby 演职人员姓名与角色名翻译成简体中文并写回 nfo | ✅ 1.3.11 | ✅ 4.7.13 | [V3 手册](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v3/embypeoplelocalize/README.md) |
+| **字体分类管家** Zitifenlei | 字体归档整理 + ASS 字幕缺字体检查 + 字体子集化内嵌 | ✅ 1.2.24 | ✅ 3.2.3 | [V3 手册](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v3/zitifenlei/README.md) · [V2 手册](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v2/zitifenlei/%E4%BD%BF%E7%94%A8%E6%89%8B%E5%86%8C.md) |
+| **OpenClash 控制面板** OpenClashPanel | MoviePilot 内查看/管理 OpenClash·Mihomo：状态、策略组、测速、访问检查、OpenWrt 管理 | — | ✅ 1.12.0 | [V3 手册](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v3/openclashpanel/README.md) |
+| **MKV 工具箱** MkvToolkit | MKV 容器层编辑：字幕内封、音轨增删排序、字体附件、章节标题，支持队列/历史回滚 | — | ✅ 0.1.51 | [V3 手册](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v3/mkvtoolkit/README.md) |
 
-> V2 插件位于 `plugins.v2/`，适用于 MoviePilot V2；V3 专属版位于 `plugins.v3/`（依赖稳定 SDK），适用于 MoviePilot V3，安装时请选择匹配你 MoviePilot 主版本的版本。
-
----
-
-## 字幕字体代理 (FontInAssProxy)
-
-反代 Emby/Jellyfin 字幕流，把字幕用到的字体实时**子集化**并以内嵌字体（`[Fonts]` 段）写回 ASS，让任何设备（电视 / 播放器 / 未装字体的环境）都能正确显示特效字幕。
-
-**功能特性：**
-
-* **实时子集化注入**：播放时抓取字幕 → 解析字体 → 只内嵌需要的字形
-* **uharfbuzz 引擎**：C 实现子集化（约 140x 提速），失败自动回退 fontTools
-* **内置反代端口**：默认 `8097`，免 nginx
-* **精准匹配**：内部名 > 文件名分层，容器格式 ttf>ttc>otf>otc，中文/拼音/日文多编码识别
-* **双层缓存**：内存 LRU + 磁盘（默认保留 1 天，每 4 小时清理）
-* **已有子集自动跳过**：已内嵌 `[Fonts]` 的字幕直接透传
-
-**安装方式：**
-
-1. 在 MoviePilot 插件市场添加本仓库地址
-2. 搜索 "字幕字体代理" 并安装（V3 版为 3.1.2）
-3. 配置 Emby 地址与字体目录
-4. 可选：启用内置反代端口（免 nginx）
-
-**详细使用说明见 [字幕字体代理使用手册](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v3/fontinassproxy/README.md)**
+> 版本号与 `package.v2.json` / `package.v3.json` 索引保持一致；「—」表示该版本暂无此插件。
 
 ---
 
-## Emby 演职人员中文化 (EmbyPeopleLocalize)
+## 插件详情
 
-利用大模型（LLM）把 Emby 里的**演职人员姓名**（演员 / 声优 / 导演 / 编剧 / 制片）与**角色名**翻译成规范简体中文，并写回媒体库的 `nfo` 文件。
+### 字幕字体代理 FontInAssProxy
 
-它不只是「翻一次」，而是一套**带账本、可对账、可回滚**的流水线：直接读写本地 nfo、翻译记录独立入库、人名池全局复用、失效进观察期、限流熔断不烧额度、人工修正永不被 AI 覆盖。
+**V3 3.1.2 · 适用 MoviePilot V3**
 
-**功能特性：**
+反代 Emby/Jellyfin 的字幕请求：取到字幕后解析它引用的字体，从字体库中做**子集化**并把子集以内嵌 `[Fonts]` 段写回 ASS 返回。播放端不需要安装任何字体，电视盒子/NAS 播放器上的特效字幕也能正常显示。
 
-* **NFO 本地文件模式**：直接读写 `tvshow.nfo` / `movie.nfo` / `episode.nfo`，省请求、不怕 Emby 重刮覆盖
-* **人名池全局复用**：同一个人名只翻一次、跨全部作品复用，几乎不重复消耗 AI 额度
-* **人工修正优先级最高**：手工改过的译文重跑扫描不会被 AI 覆盖（来源 `manual`）
-* **四条自动入口**：Webhook 入库 / NFO 扫描·探测库入库 / 拉取人名 / 人工修改，互不重复
-* **失效观察期**：目录/集消失先进观察期（默认 24h），期间重新入库按稳定身份自动恢复且不重问 AI，超期才判真删
-* **限流与熔断**：请求间隔 + TPM 令牌预算限速，限速 / 配额 / 认证分级暂停与自动恢复，失败词条可重试
-* **可选 TMDB 辅助**：拉取时用 TMDB 中文别名补译（不依赖 AI）；用 TMDB credits 回填空缺的第二排英文角色名
-* **按类型与人数精细控制**：演员 / 客串 / 导演 / 编剧 / 制片分别开关 + 每个文件翻前 N 人；第一排 / 第二排分别开关
-* **完整账本**：翻译记录可查、可导出 / 导入 JSON、可批量写回、单条重扫 / 重翻 / 人工编辑
-* **设置页可视化**：媒体库勾选、路径映射（Emby Path → 本机 MP 路径）、只读文件浏览与路径预检
+**核心特性**
 
-**安装方式：**
+- **实时子集化注入**：播放时按需内嵌，不改变原字幕文件；已含 `[Fonts]` 的字幕直接透传。
+- **uharfbuzz 子集化引擎**：C 实现高速子集化，失败自动回退 fontTools。
+- **内置反代端口**：默认 `8097`，不依赖 nginx；支持 WebSocket 透传。
+- **精准字体匹配**：字体内部名优先、文件名兜底；容器格式 ttf > ttc > otf > otc；中/日/拼音多编码别名识别。
+- **双层缓存**：内存 LRU + 磁盘缓存（默认保留 1 天、每 4 小时清理），限制总量防止占满磁盘。
+- **安全边界**：只做字幕读取与字体库读取，不改媒体文件；匿名入口已移除，仅内置反代提供服务。
 
-1. 在 MoviePilot 插件市场添加本仓库地址
-2. 搜索 "Emby 演职人员中文化" 并安装（V3 版为 4.6.111）
-3. 在插件「设置」页配置 LLM（或使用 MoviePilot 系统 LLM 配置）与要处理的媒体库，点「测试连接」验证
-4. 仪表盘点「NFO 扫描」跑一次，或打开「Webhook 入库后自动翻译」
+**安装要点**：插件市场安装后在设置页填写 Emby/Jellyfin 地址、字体库目录与反代端口，保存启用即可。依赖 `uharfbuzz` 由插件自动安装。
 
-**与官方「演职人员刮削」(personmeta) 的关系：**
-
-本插件已**缝合官方「演职人员刮削」**的能力：在设置页打开「人名池 → **拉取时用 TMDB 刮削补译**」后，会按条目的 TMDB ID 取**中文别名**（繁体在拉取环节即繁转简）→ 演员中文名入池并随同步流程统一写回 Emby，同时把**中文简介与头像**即时写回 Emby（简介含锁定，避免被重新刮削覆盖）。
-
-* **开启后可停用 personmeta 插件** —— 该能力已由本插件覆盖，两者同时开启也不会冲突；
-* 该能力**不依赖 AI**：TMDB 查询不经 LLM，AI 总开关关闭时同样可用；
-* 若**不开启**，本插件只做「翻译 + 写回」，可与 personmeta 并存（中文名 / 简介 / 头像仍由 personmeta 负责）。
-
-**详细使用说明见 [Emby 演职人员中文化使用手册](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v3/embypeoplelocalize/README.md)**
+📖 **完整手册（配置项 / 接口 / FAQ）：** [plugins.v3/fontinassproxy/README.md](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v3/fontinassproxy/README.md)
 
 ---
 
-## 字体分类管家 (Zitifenlei)
+### Emby 演职人员中文化 EmbyPeopleLocalize
 
-字体归档整理与 ASS 字幕字体检查插件：帮你把散落的字体文件整理进字体库、检查每部剧的字幕缺不缺字体，并用 assfonts 把需要的字体直接内嵌进字幕，让任何播放器都能正确显示，不再出现乱码/方块字。
+**V2 1.3.11 / V3 4.7.13 · 适用 MoviePilot V2 / V3**
 
-**功能特性：**
+用大模型（LLM）把 Emby 里的**演职人员姓名**（演员/声优/导演/编剧/制片）与**角色名**翻译成规范简体中文，并写回媒体库的 `nfo` 文件。它不是"翻一次就完"，而是一套带账本、可对账、可回滚的流水线。
 
-* **字体归档**：扫描或上传字体到字体库，按「厂商 → 格式 → 名称」自动整理归档（支持 ttf / otf / ttc / woff / woff2），自动识别厂商（思源/Google/森泽/华文等）
-* **字幕检查**：解析 ASS 字幕引用的字体清单，对照字体库自动判缺失/齐全/已内嵌
-* **子集化**：把字幕用到的字体精简内嵌进字幕文件，成品可直接下载；可选 HDR 字幕亮度压暗
-* **目录监控**：监控「字体监控目录」「ASS 字幕目录」「ASS 目录监控子集」三个目录，放入即自动处理
-* **种子字体收集**：开启总开关后，按设定间隔（分钟，可调）轮询下载器已完成的种子，从文件清单里截取字体与字体包（zip/7z/rar）；只读下载器、不删种子、不扫下载目录，不接 MP 整理事件，历史种子不回溯；7z/rar 解压依赖容器内工具（7z/7zz/unar/unrar/bsdtar），未装时可在「仪表盘 → 依赖 → 解压工具」点「安装/修复解压工具」一键安装
-* **MoviePilot 入库联动**：MP 整理入库的剧集字幕自动检查字体或自动子集化，完成后发送通知
-* **缺失字体闭环**：检查/子集化发现的缺失字体统一收集，上传补齐后一键归类入库，索引自动重建，无需手动干预
-* **残缺字体兼容**：对内部结构损坏的非标准 TTC 字体自动拆 face、重建 cmap，正常字体零影响
+**核心特性**
 
-**安装方式：**
+- **NFO 本地文件模式**：直接读写 `tvshow.nfo` / `movie.nfo` / `episode.nfo`，不依赖 Emby API 逐条回写。
+- **人名池全局复用**：同一个人名只翻译一次，跨作品复用，显著节省 AI 额度。
+- **人工修正优先**：手工改过的译文重跑扫描不会被 AI 覆盖。
+- **多条自动入口**：Webhook 入库、NFO 扫描/探测库、拉取人名、人工修改，入口互不重复。
+- **失效观察期**：目录/剧集消失先进观察期（默认 24h），期间重新入库按稳定身份恢复且不重复问 AI。
+- **限流与熔断**：请求间隔 + TPM 预算限速，限速/配额/认证分级暂停与自动恢复。
+- **可选 TMDB 辅助**：中文别名补译、credits 回填第二排角色名，不依赖 AI。
+- **精细范围控制**：演员/客串/导演/编剧/制片分别开关 + 每个文件翻前 N 人；第一排/第二排分别控制。
+- **完整账本**：翻译记录可查、可导出/导入、可批量写回、单条重扫/重翻/人工编辑。
 
-1. 在 MoviePilot 插件市场添加本仓库地址
-2. 搜索 "字体分类管家" 并安装（V2 1.2.24 / V3 3.2.3）
-3. 在插件「设置」页配置字体库目录与监控目录（详见 [V3 使用手册](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v3/zitifenlei/README.md) / [V2 使用手册](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v2/zitifenlei/%E4%BD%BF%E7%94%A8%E6%89%8B%E5%86%8C.md)）
-4. 启用插件
+**安装要点**：配置 LLM（或复用 MoviePilot 系统 LLM）与要处理的媒体库（含 Emby 路径 → 本机路径映射），先在仪表盘点「NFO 扫描」跑一次，再按需开启 Webhook 自动翻译。
 
-**详细使用说明见 [字体分类管家使用手册（V3）](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v3/zitifenlei/README.md) / [V2 版](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v2/zitifenlei/%E4%BD%BF%E7%94%A8%E6%89%8B%E5%86%8C.md)**
-
-<!-- 以下内容追加到仓库根 README.md，原有内容不动 -->
-
-### 插件列表（追加一行）
-
-| [OpenClash 控制面板](#openclash-控制面板-openclashpanel) | MoviePilot 内管理 OpenClash/Mihomo：状态、策略组切换、测速、访问检查、服务管理、TG 命令、仪表盘 | - | ✅ 1.12.0 |
+📖 **完整手册（V3）：** [plugins.v3/embypeoplelocalize/README.md](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v3/embypeoplelocalize/README.md)
+V2 版安装 `plugins.v2/embypeoplelocalize` 对应版本，功能相近，设置页与界面以 V2 版为准。
 
 ---
 
-## OpenClash 控制面板 (OpenClashPanel)
+### 字体分类管家 Zitifenlei
 
-在 MoviePilot 里直接查看和管理 **OpenClash / Mihomo**：状态总览、策略组与节点切换、延迟测速、访问检查、服务管理（需 OpenWrt 登录）、日志查看；支持 TG 按钮命令与仪表盘组件。
+**V2 1.2.24 / V3 3.2.3 · 适用 MoviePilot V2 / V3**
 
-**功能特性：**
+字体归档整理与 ASS 字幕字体处理插件：把散落的字体扫描/上传进字体库，按「厂商 → 格式 → 名称」自动归档；检查每部剧的字幕缺不缺字体；并用 HarfBuzz（V3）/ assfonts（V2）把字幕用到的字体**子集化内嵌**进字幕，让任何播放器都能正确显示。
 
-* **状态总览**：内核版本、规则模式、运行模式、连接数、内存/CPU/负载、上下行速率与累计流量
-* **策略组**：按 OpenClash 配置文件顺序排列（与 zashboard 一致），节点切换、单项/整组测速（进度 + 成功/超时统计），Smart 智能组只读
-* **访问检查**：内核（与官方一致）/ MP 网络 / OpenClash 代理三视角，逐站加载、30 秒自动采集
-* **OpenWrt 管理**（可选，填 LuCI 地址/用户名/密码）：启动/停止/重启、运行模式（基础/增强 TUN/混合 MIX）、切换配置、更新订阅、清缓存、区域绕过/域名嗅探/DNS 代理/流媒体解锁
-* **TG 命令**：`/oc_status`、`/oc_check`、`/oc_node`（分页按钮选组/节点）、`/oc_mode`、`/oc_refresh`、`/oc_help`
-* **仪表盘**：全宽组件（状态 + 访问检查 + 策略组/节点）
-* **日志**：插件日志 + 内核实时日志
+**核心特性**
 
-**安装方式：**
+- **字体归档**：支持 ttf/otf/ttc/otc/woff/woff2，自动识别厂商（思源/Google、森泽 MO、华文 ST、方正等），同名去重、索引自动增量更新。
+- **字幕检查**：解析 ASS 实际引用的字体，按字形级（cmap）对照字体库，区分「字体齐全 / 已内嵌 / 缺字体」；检查记录按压缩包/上传批次/字幕目录分组。
+- **子集化**：只内嵌用到的字形，支持 HDR 字幕亮度压暗；V3 内置 uharfbuzz 独立工作进程，病态字体不影响主进程。
+- **目录监控**：字体监控目录、ASS 字幕检查目录、ASS 自动子集化目录三条链路；**V3 3.2.3 起字体监控目录直接支持字体压缩包（zip/7z/rar）自动解压归档**，并按目录类型严格处理——放错目录的文件会跳过并记录日志。
+- **种子字体收集**：只读轮询下载器已完成种子，从文件清单截取字体/字体包（zip/7z/rar）自动入库，不删种子、不扫下载目录。
+- **MoviePilot 入库联动**：剧集入库后自动检查字幕或自动子集化（二选一），按需发送系统通知。
+- **缺失字体闭环**：检查/子集化发现的缺失字体统一收集，上传或放入接收目录后严格校验（名称命中 + 字形覆盖）→ 一键归类入库 → 索引重建 → 重试子集化。
+- **兼容性**：V3 版支持解压工具一键安装（容器内 apt/apk 装 unar）；对残缺 TTC 自动拆 face/修复 cmap。
 
-1. 在 MoviePilot 插件市场添加本仓库地址
-2. 搜索「OpenClash 控制面板」并安装（V3 版为 1.12.0）
-3. 在插件设置里填写 OpenClash API 地址（`http://<路由器IP>:9090`）与 Dashboard 密码；需要服务管理时再填 OpenWrt 地址/用户名/密码
-4. 保存后刷新插件页
+**安装要点**：V3 版在设置页配置「字体库目录 / 字体监控目录 / ASS 字幕目录」后启用；先点字体库页「全量检查」归档存量字体，再点子集化页「全部重建」构建索引。
 
-**详细使用说明见 [OpenClash 控制面板使用手册](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v3/openclashpanel/README.md)**
+📖 **完整手册（V3）：** [plugins.v3/zitifenlei/README.md](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v3/zitifenlei/README.md)
+V2 版手册：[plugins.v2/zitifenlei/使用手册.md](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v2/zitifenlei/%E4%BD%BF%E7%94%A8%E6%89%8B%E5%86%8C.md)
 
+---
+
+### OpenClash 控制面板 OpenClashPanel
+
+**V3 1.12.0 · 适用 MoviePilot V3**
+
+在 MoviePilot 里直接查看和管理 **OpenClash / Mihomo**：状态总览、策略组与节点切换、延迟测速、访问检查（内核 / MP / OpenClash 三视角）、插件与内核日志，可选 OpenWrt 服务管理；支持 Telegram 分页按钮命令与仪表盘全宽组件。
+
+**核心特性**
+
+- **状态总览**：内核版本、规则模式、运行模式、连接数、内存/CPU/负载、上下行速率与累计流量。
+- **策略组**：按 OpenClash 配置文件顺序排列（与 zashboard 一致），支持节点切换、单项/整组测速（进度与成功/超时统计），Smart 智能组只读。
+- **访问检查**：内核视角（与官方一致）/ MP 网络视角 / OpenClash 代理视角，逐站加载、30 秒自动采集。
+- **OpenWrt 管理（可选）**：填 LuCI 地址/用户名/密码后，可启动/停止/重启、切换运行模式（基础/增强 TUN/混合 MIX）、切换配置、更新订阅、清缓存、区域绕过/域名嗅探/DNS 代理/流媒体解锁等。
+- **TG 命令**：`/oc_status`、`/oc_check`、`/oc_node`（分页按钮选组/节点）、`/oc_mode`、`/oc_refresh`、`/oc_help`。
+- **仪表盘组件**：全宽卡片（状态 + 访问检查 + 策略组/节点）。
+- **日志**：插件日志 + 内核实时日志。
+
+**安装要点**：填写 OpenClash API 地址（`http://<路由器IP>:9090`）与 Dashboard 密码；需要服务管理时再填 OpenWrt LuCI 地址与账号。修改类操作需要 MoviePilot 管理员权限。
+
+📖 **完整手册（配置项 / 接口 / FAQ）：** [plugins.v3/openclashpanel/README.md](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v3/openclashpanel/README.md)
+
+---
+
+### MKV 工具箱 MkvToolkit
+
+**V3 0.1.51 · 要求 MoviePilot ≥ 3.2.0**
+
+在 MoviePilot 里做 **MKV 容器层编辑**：字幕内封、音轨增删/排序/标签、字体附件、章节与标题修改。基于 `mkvmerge` + `mkvpropedit`（可选 `ffmpeg` 引擎），带预览确认、任务队列、历史回滚与手机端操作。
+
+**核心特性**
+
+- **字幕内封**：把外挂字幕（ASS/SRT 等）封装进 MKV，支持多字幕轨、语言/标题/默认轨标记、编码与延迟设置。
+- **音轨编辑**：音轨增删、排序、语言/名称/默认轨/强制轨标记、同步偏移。
+- **字体附件**：把字体文件作为 MKV 附件写入，供内嵌 ASS 字幕使用。
+- **章节与标题**：读取/编辑章节与容器标题。
+- **预览与确认**：执行前生成操作计划（命令 + 输出 + 备份 + 磁盘空间检查）供确认，避免误操作。
+- **队列与历史**：批量任务队列、并发控制、失败重试；历史记录支持回滚与中断恢复。
+- **多套引擎**：自动探测/一键安装 mkvmerge、mkvpropedit；支持 apt / AppImage / 手动路径三种安装方式。
+- **手机端可用**：文件树、文件选择与轨道编辑界面适配移动端。
+
+**安装要点**：插件要求 MoviePilot **≥ 3.2.0**（`system_version` 限制），并在容器内准备 `mkvmerge`/`mkvpropedit`（可在插件设置页一键安装或指定路径）。文件操作限于配置的媒体路径白名单内，修改前会生成备份。
+
+📖 **完整手册（配置项 / 场景 / FAQ）：** [plugins.v3/mkvtoolkit/README.md](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v3/mkvtoolkit/README.md)
+
+---
+
+## 通用说明
+
+### 依赖安装
+
+- V3 插件在安装时会按插件目录的 `pyproject.toml`（或 `requirements.txt`）自动安装 Python 依赖；安装失败时可到插件「仪表盘 → 依赖」里点「重新安装」。
+- 需要系统工具/外部二进制的插件（字体插件的 7z/unar、MKV 工具箱的 mkvmerge、OpenClash 的 API 等）请参照各自手册的「前置条件」；字体插件与 MKV 工具箱均提供设置页一键安装入口。
+
+### 权限与数据
+
+- 修改类接口（保存配置、清库、安装依赖、改文件等）需要 **MoviePilot 管理员** 权限；只读查看接口登录即可。
+- 插件数据保存在 MoviePilot 的 `config/plugins/<插件ID>/` 下（数据库、日志、临时文件等），备份 MoviePilot 配置目录即可一并备份。
+- 插件不会主动上传/收集用户数据；日志可能包含本地文件路径等排障信息，反馈问题前请注意脱敏。
+
+### 隐私与安全
+
+- 仓库内不含任何个人账号、密码、令牌、内网地址等敏感信息。
+- 插件所需的 Emby/Jellyfin/OpenClash/LuCI 账号密码、LLM API Key 等均保存在 MoviePilot 自身的配置中，不会写进插件代码或日志明文（具体存储方式见各插件手册的「安全与权限」）。
+- 请勿在公开场合贴出包含真实地址、账号或令牌的插件日志。
+
+## 常见问题
+
+**Q：插件市场里搜不到 / 看不到新版本？**
+确认已在插件市场添加本仓库地址；GitHub raw 索引有 CDN 缓存，新版本发布后可能需要等待几分钟，或重启 MoviePilot 再刷新市场。
+
+**Q：V2 和 V3 版本怎么选？**
+看你的 MoviePilot 主版本：V2 宿主装 `plugins.v2/` 对应版本，V3 宿主装 `plugins.v3/` 对应版本；两代插件不通用。
+
+**Q：依赖安装失败怎么办？**
+到插件「仪表盘 → 依赖」查看失败项并点「重新安装」；容器网络受限时请配置 MoviePilot 的 pip 代理（`PIP_PROXY`）。系统工具类依赖请按各插件手册操作。
+
+**Q：插件更新后页面还是旧界面？**
+前端为联邦模块，浏览器/PWA 有缓存：强制刷新页面，或关闭 PWA 后重新打开；必要时重启 MoviePilot。
+
+## 致谢与声明
+
+- 感谢 [MoviePilot](https://github.com/jxxghp/MoviePilot) 提供插件框架与插件市场。
+- 各插件使用的第三方组件（如 uharfbuzz、fontTools、assfonts、mkvmerge、7-Zip/unar、Emby/Jellyfin 等）版权归其各自作者所有，使用时请遵守对应许可证。
+- 本仓库插件代码由 **LXT-A-X** 编写与维护，仅供个人学习与自用；使用中产生的媒体文件与数据请自行备份。
+- 问题反馈与功能建议：<https://github.com/LXT-A-X/MoviePilot-Plugins/issues>
+
+---
+
+> 各插件的详细配置、接口、FAQ 与更新日志，请进入对应插件目录查看 `README.md`。
