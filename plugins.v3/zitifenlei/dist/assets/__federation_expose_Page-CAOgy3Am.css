@@ -179,41 +179,41 @@
   white-space: nowrap;
 }
 
-.zt-card-title[data-v-e47c64b1] {
+.zt-card-title[data-v-45072c83] {
   font-size: 15px;
   font-weight: 600;
 }
-.zt-missing-col[data-v-e47c64b1] {
+.zt-missing-col[data-v-45072c83] {
   height: 560px;
   overflow: auto;
 }
-.zt-list-body[data-v-e47c64b1] {
+.zt-list-body[data-v-45072c83] {
   min-height: 60px;
 }
-.zt-uploads[data-v-e47c64b1] {
+.zt-uploads[data-v-45072c83] {
   max-height: 120px;
   overflow-y: auto;
   border: 1px solid var(--v-divider-color);
   border-radius: 4px;
 }
-.zt-empty[data-v-e47c64b1] {
+.zt-empty[data-v-45072c83] {
   font-size: 13px;
   opacity: 0.6;
   text-align: center;
   line-height: 1.8;
 }
-.zt-font-name[data-v-e47c64b1] {
+.zt-font-name[data-v-45072c83] {
   font-size: 14px;
   font-weight: 500;
 }
-.zt-font-meta[data-v-e47c64b1] {
+.zt-font-meta[data-v-45072c83] {
   font-size: 12px;
   opacity: 0.7;
 }
-.zt-tip[data-v-e47c64b1] {
+.zt-tip[data-v-45072c83] {
   opacity: 0.65;
 }
-.zt-target-select[data-v-e47c64b1] {
+.zt-target-select[data-v-45072c83] {
   min-width: 220px;
   max-width: 320px;
   flex: 0 1 280px;
@@ -221,24 +221,24 @@
 /* 描边在暗色/手机上 0.38 透明度几乎看不见，单独提高本下拉的边框对比度。
    注意：构建时 postcss 会剔除选择器里含 “.v-” 的规则（Vuetify 样式由宿主提供），
    所以这里用属性选择器 [class*="v-field__outline"]，避免我们的覆盖被一起删掉。 */
-.zt-target-select[data-v-e47c64b1] [class*="v-field__outline"] {
+.zt-target-select[data-v-45072c83] [class*="v-field__outline"] {
   --v-field-border-opacity: 0.9;
 }
 @media (max-width: 599.95px) {
-.zt-target-select[data-v-e47c64b1] {
+.zt-target-select[data-v-45072c83] {
     flex: 1 1 100%;
     min-width: 0;
     max-width: none;
 }
 }
-.zt-upload-chip[data-v-e47c64b1] {
+.zt-upload-chip[data-v-45072c83] {
   cursor: pointer;
 }
-.zt-chip-target[data-v-e47c64b1] {
+.zt-chip-target[data-v-45072c83] {
   opacity: 0.75;
   margin-left: 4px;
 }
-.zt-char-preview[data-v-e47c64b1] {
+.zt-char-preview[data-v-45072c83] {
   font-family: monospace;
   opacity: 0.9;
   word-break: break-all;

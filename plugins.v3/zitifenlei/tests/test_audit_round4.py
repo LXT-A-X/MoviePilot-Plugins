@@ -494,7 +494,7 @@ def test_missing_dir_rejects_unrelated_and_accepts_match(tmp_path, monkeypatch):
         monkeypatch.setattr(
             plugin,
             "_evaluate_font_for_targets",
-            lambda _p, _t, _h="": {"ok": False, "reason": "与当前缺失字体不匹配"},
+            lambda _p, _t, _h="", **_kw: {"ok": False, "reason": "与当前缺失字体不匹配"},
         )
         archived = []
         monkeypatch.setattr(plugin, "_archive_font_file", lambda p, source="auto": archived.append(str(p)) or 1)
@@ -509,7 +509,7 @@ def test_missing_dir_rejects_unrelated_and_accepts_match(tmp_path, monkeypatch):
         monkeypatch.setattr(
             plugin,
             "_evaluate_font_for_targets",
-            lambda _p, _t, _h="": {"ok": True, "matched": "NoSuchFont", "covered_chars": "中", "reason": ""},
+            lambda _p, _t, _h="", **_kw: {"ok": True, "matched": "NoSuchFont", "covered_chars": "中", "reason": ""},
         )
         assert plugin._handle_missing_dir_font(matched) is True
         assert archived == [str(matched)]

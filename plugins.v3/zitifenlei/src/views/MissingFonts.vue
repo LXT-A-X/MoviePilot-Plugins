@@ -305,7 +305,7 @@ function stopPolling() {
             :items="targetOptions"
             item-title="title"
             item-value="name"
-            label="目标缺失字体（可选）"
+            label="目标缺失字体（留空=自动匹配）"
             density="compact"
             variant="outlined"
             hide-details

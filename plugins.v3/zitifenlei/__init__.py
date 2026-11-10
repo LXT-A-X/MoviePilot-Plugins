@@ -425,7 +425,7 @@ class Zitifenlei(_PluginBase):
     plugin_name = "字体分类管家"
     plugin_desc = "字体归档整理与 ASS 字幕字体检查插件：扫描/上传字体到字体库，检查字幕缺失字体。"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/zitifenlei.png"
-    plugin_version = "3.2.1"
+    plugin_version = "3.2.2"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "zitifenlei_"
@@ -1572,7 +1572,9 @@ class Zitifenlei(_PluginBase):
         except Exception as err:
             self._db.add_log(f"缺失字体目录校验失败（读取缺失目标异常）: {err}", "warning")
             return False
-        verdict = self._evaluate_font_for_targets(file_path, targets) if targets else {
+        verdict = self._evaluate_font_for_targets(
+            file_path, targets, file_name=file_path.name
+        ) if targets else {
             "ok": False,
             "reason": "当前没有缺失字体目标（缺失列表为空）",
             "name": "",
@@ -6839,6 +6841,7 @@ class Zitifenlei(_PluginBase):
         path: Path,
         targets: Dict[str, Dict[str, Any]],
         target_hint: str = "",
+        file_name: str = "",
     ) -> Dict[str, Any]:
         """严格校验上传字体：同一 face 必须同时「名称命中缺失目标」且「真实覆盖缺失字符」。
 
@@ -6879,6 +6882,15 @@ class Zitifenlei(_PluginBase):
         if not faces:
             return {"ok": False, "reason": "字体缺少可用的名称信息（name 表为空）"}
         hint_key = normalize_font_key(target_hint) if target_hint else ""
+        # 文件名（去后缀）也作为匹配键：很多中文字体内部只有英文名/拼音，ASS 却写中文名，
+        # 这时上传的文件名往往就是 ASS 用的名字；不纳入匹配会逼用户手动映射。
+        # 仅当调用方传了原始文件名时参与（临时文件名带前缀，不能直接用 path.stem）。
+        extra_keys: set = set()
+        stem = Path(file_name or "").stem
+        if stem and not file_name.startswith("."):
+            stem_key = normalize_font_key(stem)
+            if stem_key:
+                extra_keys.add(stem_key)
         if hint_key and hint_key not in targets:
             return {"ok": False, "reason": f"人工指定的目标「{target_hint}」不在当前缺失列表中"}
         match_kind = "manual" if hint_key else "name"
@@ -6908,7 +6920,7 @@ class Zitifenlei(_PluginBase):
                     uncovered_keys.append(hint_key)
         else:
             for face, keys in faces:
-                for key in keys:
+                for key in (keys | extra_keys):
                     if key not in targets:
                         continue
                     if key not in matched_keys:
@@ -7167,7 +7179,9 @@ class Zitifenlei(_PluginBase):
                 tmp_path = Path(entry["path"])
                 if not tmp_path.is_file():
                     continue
-                verdict = self._evaluate_font_for_targets(tmp_path, targets, target_hint)
+                verdict = self._evaluate_font_for_targets(
+                    tmp_path, targets, target_hint, file_name=safe_name
+                )
                 if not verdict.get("ok"):
                     arch.safe_unlink(tmp_path, self._tmp_dir, exts=FONT_EXTENSIONS)
                     rejected.append(
@@ -7214,6 +7228,15 @@ class Zitifenlei(_PluginBase):
                         f"人工映射: {safe_name}（{item['name']}）→ 缺失字体「{item['matched']}」",
                         "warning",
                     )
+                else:
+                    # 自动匹配也写日志，避免日志里只有「人工映射」让人误以为必须手动映射
+                    try:
+                        self._db.add_log(
+                            f"自动匹配: {safe_name}（{item['name']}）→ 缺失字体「{item['matched']}」",
+                            "info",
+                        )
+                    except Exception:
+                        pass
                 item["created_at"] = time.time()
                 with self._missing_uploads_lock:
                     self._missing_uploads[str(tmp_path)] = item
@@ -7447,7 +7470,10 @@ class Zitifenlei(_PluginBase):
                         continue
                     # 入库前复核：仍须命中缺失目标且覆盖缺失字符（人工映射按其目标复核）
                     hint = item.get("matched", "") if item.get("match_kind") == "manual" else ""
-                    verdict = self._evaluate_font_for_targets(src, targets, hint)
+                    verdict = self._evaluate_font_for_targets(
+                        src, targets, hint,
+                        file_name=str(item.get("file_name") or src.name),
+                    )
                     if not verdict.get("ok"):
                         failed.append(f"{item.get('file_name', '')}（{verdict.get('reason') or '未通过缺失校验'}）")
                         continue
@@ -7683,7 +7709,9 @@ class Zitifenlei(_PluginBase):
                 tmp_path = Path(entry["path"])
                 if not tmp_path.is_file():
                     continue
-                verdict = self._evaluate_font_for_targets(tmp_path, targets, target_hint)
+                verdict = self._evaluate_font_for_targets(
+                    tmp_path, targets, target_hint, file_name=safe_name
+                )
                 if not verdict.get("ok"):
                     arch.safe_unlink(tmp_path, self._tmp_dir, exts=FONT_EXTENSIONS)
                     rejected.append(
@@ -7720,6 +7748,14 @@ class Zitifenlei(_PluginBase):
                     try:
                         self._db.set_manual_font_mapping(
                             item["name"], item["matched"], file_sha256=item["sha256"], note="检查页人工指定目标"
+                        )
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        self._db.add_log(
+                            f"自动匹配: {safe_name}（{item['name']}）→ 缺失字体「{item['matched']}」",
+                            "info",
                         )
                     except Exception:
                         pass

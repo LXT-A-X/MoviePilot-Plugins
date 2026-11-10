@@ -1931,7 +1931,7 @@ return (_ctx, _cache) => {
                 items: targetOptions.value,
                 "item-title": "title",
                 "item-value": "name",
-                label: "目标缺失字体（可选）",
+                label: "目标缺失字体（留空=自动匹配）",
                 density: "compact",
                 variant: "outlined",
                 "hide-details": "",
@@ -2388,7 +2388,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const MissingFonts = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-e47c64b1"]]);
+const MissingFonts = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-45072c83"]]);
 
 const {createTextVNode:_createTextVNode,resolveComponent:_resolveComponent,withCtx:_withCtx,createVNode:_createVNode,createElementVNode:_createElementVNode,renderList:_renderList,Fragment:_Fragment,openBlock:_openBlock,createElementBlock:_createElementBlock,toDisplayString:_toDisplayString,createBlock:_createBlock,createCommentVNode:_createCommentVNode,resolveDynamicComponent:_resolveDynamicComponent,KeepAlive:_KeepAlive,createSlots:_createSlots} = await importShared('vue');
 
