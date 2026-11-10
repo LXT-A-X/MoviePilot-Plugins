@@ -1,6 +1,7 @@
 <script setup>
 import { computed, watch, onActivated, onDeactivated, onMounted, onUnmounted, ref } from 'vue'
 import apiModule from '../api/fontManager.js'
+import { DESKTOP_ACCEPT_FONT, formatNotes, uploadAcceptFor } from '../utils/uploadAccept.js'
 
 const props = defineProps({
   api: { type: Object, default: () => ({}) },
@@ -431,6 +432,7 @@ async function handleUpload(event) {
   // 大量文件一次请求易触发网关请求体限制（410/413），改为分批顺序上传，每批 3 个
   const BATCH = 3
   let total = 0
+  const notes = []
   uploading.value = true
   try {
     for (let i = 0; i < files.length; i += BATCH) {
@@ -449,9 +451,12 @@ async function handleUpload(event) {
       } else {
         const item = body?.data ?? body
         total += (item?.count ?? chunk.length)
+        if (Array.isArray(item?.notes)) notes.push(...item.notes)
       }
     }
     emit('notify', `已加入待确认列表 ${total} 个字体`, 'success')
+    const noteText = formatNotes(notes)
+    if (noteText) emit('notify', `部分文件被跳过：${noteText}`, 'warning')
     loadPending()
   } catch (e) {
     emit('notify', e.message || '上传失败')
@@ -739,7 +744,7 @@ onUnmounted(() => {
       <input
         ref="uploadRef"
         type="file"
-        accept=".ttf,.otf,.ttc,.otc,.woff,.woff2,.zip,.7z,.rar"
+        :accept="uploadAcceptFor(DESKTOP_ACCEPT_FONT)"
         multiple
         style="display: none"
         @change="handleUpload"

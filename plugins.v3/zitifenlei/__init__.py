@@ -425,7 +425,7 @@ class Zitifenlei(_PluginBase):
     plugin_name = "字体分类管家"
     plugin_desc = "字体归档整理与 ASS 字幕字体检查插件：扫描/上传字体到字体库，检查字幕缺失字体。"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/zitifenlei.png"
-    plugin_version = "3.2.0"
+    plugin_version = "3.2.1"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "zitifenlei_"
@@ -4164,19 +4164,32 @@ class Zitifenlei(_PluginBase):
                 "impact": "依赖宿主运行环境",
             }
         )
-        # 解压工具：zip 内置恒可用；7z/rar 需要系统工具（p7zip / unar / unrar / bsdtar）
+        # 解压工具：zip 内置恒可用；7z/rar 需要系统工具（7z/7zz/unar/unrar/bsdtar）
         try:
             tools = tq.describe_extract_tools(refresh=True)
         except Exception:
-            tools = {"seven_zip": False, "rar": False, "tools": []}
+            tools = {"seven_zip": False, "rar": False, "tools": [], "can_install": False}
         _tool_names = "、".join(tools.get("tools") or []) or "未检测到"
+        _missing = []
+        if not tools.get("seven_zip"):
+            _missing.append(".7z")
+        if not tools.get("rar"):
+            _missing.append(".rar")
+        _impact = (
+            "未安装时只能解 .zip，.7z/.rar 的上传与种子字体收集会被跳过；"
+            "可在本页点「安装解压工具」在容器内自动安装 unar"
+            if _missing
+            else "zip 内置；解压工具已就绪，可解 .7z/.rar"
+        )
         items.append(
             {
                 "key": "extract_tools",
                 "name": "解压工具（7z / rar）",
-                "ok": bool(tools.get("seven_zip") or tools.get("rar")),
-                "detail": f"zip 内置；已检测到：{_tool_names}",
-                "impact": "未安装时只能解 .zip，.7z/.rar 的上传与种子字体收集会被跳过（容器内装 p7zip 后重启插件）",
+                "ok": bool(tools.get("seven_zip") and tools.get("rar")),
+                "detail": f"zip 内置；已检测到：{_tool_names}"
+                + (f"；缺少 {'/'.join(_missing)} 支持" if _missing else ""),
+                "impact": _impact,
+                "can_install": bool(tools.get("can_install")),
             }
         )
         ok_count = sum(1 for i in items if i["ok"])
@@ -4261,6 +4274,40 @@ class Zitifenlei(_PluginBase):
             return self._err(f"安装 {pkg} 失败（exit={proc.returncode}）：{output[-400:]}")
         note = "；需重启插件/容器后生效" if pkg != "uharfbuzz" else "（已热加载）"
         return self._ok({"package": pkg, "output": output}, f"{pkg} 安装完成{note}")
+
+    # ─── API：解压工具（.7z/.rar 上传与种子收集依赖）────────────
+    def api_archive_tools_status(self) -> Dict[str, Any]:
+        """解压工具探测状态：是否支持 .7z/.rar、已检测到哪些工具、能否一键安装。"""
+        try:
+            state = arch.describe_extract_state(refresh=True)
+        except Exception as err:
+            return self._err(f"探测解压工具失败: {err}")
+        return self._ok(state, "解压工具状态")
+
+    async def api_archive_tools_install(self, request: Request = None) -> Dict[str, Any]:
+        """在容器内一键安装解压工具（apt-get/apk），用于 .rar/.7z 上传与种子字体收集。
+
+        安装是同步重活（apt 可能跑几分钟），放线程池执行，避免阻塞整个 MoviePilot 事件循环。
+        """
+        if not self._enabled:
+            return self._err("插件已停用，请先在设置中启用")
+        try:
+            res = await asyncio.to_thread(arch.install_extract_tools)
+        except Exception as err:
+            return self._err(f"安装解压工具失败: {err}")
+        ok = bool(res.get("ok"))
+        try:
+            if self._db is not None:
+                self._db.add_log(
+                    f"安装解压工具: {'成功' if ok else '失败'}（{res.get('message') or ''}）",
+                    "info" if ok else "error",
+                )
+        except Exception:
+            pass
+        message = str(res.get("message") or ("安装完成" if ok else "安装失败"))
+        if ok:
+            return self._ok(res, message)
+        return self._err(message)
 
     # ─── API：统计 ──────────────────────────────────────
     def _input_dir_signature(self, input_dir: Path) -> str:
@@ -5146,14 +5193,22 @@ class Zitifenlei(_PluginBase):
         total_bytes = 0
         for upload in uploads:
             file_name = getattr(upload, "filename", "") or ""
-            safe_name = Path(file_name).name
+            # 部分手机浏览器会给文件名带首尾空白（"字体.zip "），不 strip 会误判后缀
+            safe_name = Path(file_name.strip()).name
             if not safe_name:
+                # 部分手机浏览器/微信内置浏览器给出空文件名或 content:// 地址，
+                # 以前这里静默 continue，用户只看到"没有可上传的文件"却不知道原因。
+                notes.append(
+                    f"{file_name or '（浏览器未提供文件名）'}: 无法识别文件名，已跳过"
+                    "（可换用系统浏览器，或先把文件另存到「下载」再上传）"
+                )
                 continue
             if arch.is_any_archive(safe_name):
                 if not arch.is_archive(safe_name):
                     notes.append(
                         f"{safe_name}: 未检测到 {Path(safe_name).suffix or '该格式'} 的解压工具，"
-                        "暂不支持该压缩包（.zip 可直接上传）"
+                        "暂不支持该压缩包（.zip 可直接上传；"
+                        "也可在「仪表盘 → 依赖 → 解压工具」点「安装解压工具」自动安装 .7z/.rar 支持）"
                     )
                     continue
                 zip_path = base / f"{prefix}_{uuid.uuid4().hex}_{safe_name}"
@@ -5170,20 +5225,27 @@ class Zitifenlei(_PluginBase):
                     )
                     continue
                 if not written:
+                    notes.append(f"{safe_name}: 压缩包内容为空（0 字节），已跳过")
                     continue
                 dest = base / f"_unzip_{uuid.uuid4().hex}"
-                result = arch.extract_archive(
-                    zip_path,
-                    dest,
-                    exts,
-                    max_members=500,
-                    max_total_bytes=MAX_UPLOAD_TOTAL_BYTES,
-                    max_member_bytes=member_limit,
-                )
                 try:
-                    zip_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
+                    result = arch.extract_archive(
+                        zip_path,
+                        dest,
+                        exts,
+                        max_members=500,
+                        max_total_bytes=MAX_UPLOAD_TOTAL_BYTES,
+                        max_member_bytes=member_limit,
+                    )
+                except Exception as err:
+                    # 解压工具本身异常不该让整个上传接口 500，回一条可读提示继续处理其它文件
+                    notes.append(f"{safe_name}: 解压异常 {err}")
+                    result = arch.ExtractResult()
+                finally:
+                    try:
+                        zip_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
                 for item in result.files:
                     if len(files) >= MAX_UPLOAD_FILES:
                         notes.append(f"{safe_name}: 单次最多处理 {MAX_UPLOAD_FILES} 个文件，其余已忽略")
@@ -5206,6 +5268,9 @@ class Zitifenlei(_PluginBase):
                     notes.append(f"{safe_name}: 压缩包内没有可处理的文件")
                 continue
             if Path(safe_name).suffix.lower() not in exts:
+                notes.append(
+                    f"{safe_name}: 后缀不在支持范围（{', '.join(exts)}）"
+                )
                 continue
             if len(files) >= MAX_UPLOAD_FILES:
                 notes.append(f"单次最多处理 {MAX_UPLOAD_FILES} 个文件，其余已忽略")
@@ -5222,6 +5287,7 @@ class Zitifenlei(_PluginBase):
                 )
                 continue
             if not written:
+                notes.append(f"{safe_name}: 文件内容为空（0 字节），已跳过")
                 continue
             if total_bytes + written > MAX_UPLOAD_TOTAL_BYTES:
                 arch.safe_unlink(tmp_path, base, exts=exts)
@@ -5231,6 +5297,15 @@ class Zitifenlei(_PluginBase):
             files.append(
                 {"file_name": safe_name, "path": str(tmp_path), "size": written, "from_archive": ""}
             )
+        # 跳过原因写进插件日志：用户能在「仪表盘 → 最近操作日志」看到为什么没传上，
+        # 而不是只看到一句"没有可上传的文件"。
+        if notes:
+            try:
+                if self._db is not None:
+                    for note in notes[:8]:
+                        self._db.add_log(f"上传跳过: {note}", "warning")
+            except Exception:
+                pass
         return files, notes
 
     def api_pending_list(self) -> Dict[str, Any]:
@@ -5300,9 +5375,9 @@ class Zitifenlei(_PluginBase):
 
         done = await asyncio.to_thread(_preview_sync)
         if not done:
-            msg = "没有可上传的有效字体文件（需字体后缀或 .zip 压缩包，且内容非空）"
+            msg = "没有可上传的有效字体文件（需字体后缀或 .zip/.7z/.rar 压缩包，且内容非空）"
             if notes:
-                msg += "；" + "；".join(notes[:3])
+                msg += "；" + "；".join(notes[:5])
             return self._err(msg)
         tail = f"，压缩包内 {len(done)} 个文件已展开" if any(e.get("from_archive") for e in files) else ""
         return self._ok(
@@ -5847,9 +5922,9 @@ class Zitifenlei(_PluginBase):
                 }
             )
         if not done:
-            msg = "没有可上传的有效 ASS 文件（需 .ass 后缀或 .zip 压缩包，且内容非空）"
+            msg = "没有可上传的有效 ASS 文件（需 .ass 后缀或 .zip/.7z/.rar 压缩包，且内容非空）"
             if notes:
-                msg += "；" + "；".join(notes[:3])
+                msg += "；" + "；".join(notes[:5])
             return self._err(msg)
         return self._ok(
             {"count": len(done), "items": done, "notes": notes},
@@ -6438,9 +6513,9 @@ class Zitifenlei(_PluginBase):
             pid = self._db.add_subset_pending(safe_name, str(tmp_path), source="upload")
             done.append({"id": pid, "file_name": safe_name})
         if not done:
-            msg = "没有可上传的字幕文件（需 .ass 后缀或 .zip 压缩包，且内容非空）"
+            msg = "没有可上传的字幕文件（需 .ass 后缀或 .zip/.7z/.rar 压缩包，且内容非空）"
             if notes:
-                msg += "；" + "；".join(notes[:3])
+                msg += "；" + "；".join(notes[:5])
             return self._err(msg)
         return self._ok(
             {"count": len(done), "items": done, "notes": notes},
@@ -7150,12 +7225,17 @@ class Zitifenlei(_PluginBase):
 
         await asyncio.to_thread(_missing_upload_sync)
         if not done:
+            # 以前这里把 notes（压缩包跳过/解压失败原因）丢掉，用户只看到一句通用错误，
+            # 分不清是"没选文件""rar 解压工具缺失"还是"后缀不对"，排障全靠猜。
+            note_text = ("；" + "；".join(notes[:5])) if notes else ""
             if rejected:
                 detail = "；".join(f"{r['file_name']}: {r['reason']}" for r in rejected[:3])
-                return self._err(f"没有字体通过缺失校验（{detail}）")
+                return self._err(f"没有字体通过缺失校验（{detail}）{note_text}")
             if not targets:
-                return self._err("当前没有缺失字体，请先在「检查」页检查字幕生成缺失列表")
-            return self._err("没有可上传的字体文件（需字体后缀或 .zip 压缩包，且内容非空）")
+                return self._err("当前没有缺失字体，请先在「检查」页检查字幕生成缺失列表" + note_text)
+            return self._err(
+                "没有可上传的字体文件（需字体后缀或 .zip/.7z/.rar 压缩包，且内容非空）" + note_text
+            )
         message = f"已上传 {len(done)} 个字体（已通过缺失匹配校验），可点击「归类」入库"
         if rejected:
             message += f"；{len(rejected)} 个未通过校验"
@@ -7659,12 +7739,15 @@ class Zitifenlei(_PluginBase):
 
         await asyncio.to_thread(_verify_sync)
         if not accepted:
+            note_text = ("；" + "；".join(notes[:5])) if notes else ""
             if rejected:
                 detail = "；".join(f"{r['file_name']}: {r['reason']}" for r in rejected[:3])
-                return self._err(f"字体未通过缺失校验（{detail}）")
+                return self._err(f"字体未通过缺失校验（{detail}）{note_text}")
             if not targets:
-                return self._err("当前没有缺失字体，请先对字幕执行「检查」生成缺失列表")
-            return self._err("没有可上传的字体文件（需字体后缀或 .zip 压缩包，且内容非空）")
+                return self._err("当前没有缺失字体，请先对字幕执行「检查」生成缺失列表" + note_text)
+            return self._err(
+                "没有可上传的字体文件（需字体后缀或 .zip/.7z/.rar 压缩包，且内容非空）" + note_text
+            )
         first = dict(accepted[0])
         first.update(
             {"count": len(accepted), "items": accepted, "rejected": rejected, "notes": notes}
@@ -8075,6 +8158,8 @@ class Zitifenlei(_PluginBase):
         apis = [
             {"path": "/deps/check", "endpoint": self.api_deps_check, "methods": ["GET"], "auth": "bear", "summary": "检测运行依赖是否安装"},
             {"path": "/deps/install", "endpoint": self.api_deps_install, "methods": ["POST"], "auth": "bear", "summary": "重新安装运行依赖（pip）"},
+            {"path": "/archive/tools", "endpoint": self.api_archive_tools_status, "methods": ["GET"], "auth": "bear", "summary": "解压工具探测状态（7z/rar 能力）"},
+            {"path": "/archive/tools/install", "endpoint": self.api_archive_tools_install, "methods": ["POST"], "auth": "bear", "summary": "一键安装解压工具（apt/apk）"},
             {"path": "/task/status", "endpoint": self.api_task_status, "methods": ["GET"], "auth": "bear", "summary": "后台任务状态（供前端拦截停用插件）"},
             {"path": "/stats", "endpoint": self.api_stats, "methods": ["GET"], "auth": "bear", "summary": "仪表盘统计"},
             {"path": "/vendors", "endpoint": self.api_vendors, "methods": ["GET"], "auth": "bear", "summary": "厂商分布"},

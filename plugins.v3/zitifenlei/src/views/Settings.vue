@@ -155,6 +155,8 @@ const torrentStatus = ref({ downloaders: [], tools: {}, baseline_text: '', runni
 const torrentRecords = ref([])
 const torrentBusy = ref(false)
 const torrentClearing = ref(false)
+// 一键安装容器内解压工具（.7z/.rar 上传与种子字体收集都依赖它）
+const archiveToolInstalling = ref(false)
 
 const TORRENT_STATUS_TEXT = { done: '完成', empty: '无字体', failed: '失败', partial: '部分成功' }
 const recordStatusText = (s) => TORRENT_STATUS_TEXT[s] || s || ''
@@ -208,6 +210,21 @@ async function scanTorrents() {
     emit('notify', e.message || '检查下载器失败')
   } finally {
     torrentBusy.value = false
+  }
+}
+
+// 一键在容器内安装解压工具（apt/apk 安装 unar/7zip）；容器重建/更新镜像后需要重新安装
+async function installArchiveTools() {
+  if (archiveToolInstalling.value) return
+  archiveToolInstalling.value = true
+  try {
+    const res = await apiModule.post(props.api, '/archive/tools/install', {})
+    emit('notify', res?.message || '解压工具安装完成', 'success')
+    await loadTorrentStatus()
+  } catch (e) {
+    emit('notify', e.message || '安装解压工具失败')
+  } finally {
+    archiveToolInstalling.value = false
   }
 }
 
@@ -539,10 +556,20 @@ watch(() => config.value.auto_subset, (v) => {
         </div>
         <div class="zt-hint">
           下载器：{{ torrentDownloaderText }}<br>
-          解压能力：{{ torrentToolText }}（7z/rar 需容器内安装 p7zip/unar，未装时只解 zip）<br>
+          解压能力：{{ torrentToolText }}<span v-if="torrentStatus.tools.hint"> · {{ torrentStatus.tools.hint }}</span><br>
           基线：{{ torrentStatus.baseline_text || '未设置' }}（只处理基线之后完成的种子，历史不碰）<span v-if="torrentStatus.running"> · 正在收集 {{ torrentStatus.running }} 个</span>
         </div>
         <div class="d-flex flex-wrap ga-2 mt-2">
+          <v-btn
+            size="small" color="warning" variant="tonal"
+            :loading="archiveToolInstalling"
+            :disabled="torrentStatus.tools.can_install === false"
+            title="在容器内用 apt/apk 安装/修复 unar（可解 .7z/.rar）；容器重建后需要重新安装"
+            @click="installArchiveTools"
+          >
+            <v-icon start size="16">mdi-archive-arrow-up-outline</v-icon>
+            安装/修复解压工具
+          </v-btn>
           <v-btn
             size="small" color="primary" variant="tonal"
             :loading="torrentBusy" :disabled="!config.torrent_enabled"

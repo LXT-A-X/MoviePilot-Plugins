@@ -1,45 +1,46 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import { _ as _export_sfc, a as apiModule, S as Settings, C as Check, F as FontLibrary, D as Dashboard } from './Settings-J_qUXFnn.js';
+import { _ as _export_sfc, u as uploadAcceptFor, a as DESKTOP_ACCEPT_ASS, b as apiModule, f as formatNotes, c as DESKTOP_ACCEPT_FONT, S as Settings, C as Check, F as FontLibrary, D as Dashboard } from './Settings-6voMsliI.js';
 
-const {createTextVNode:_createTextVNode$2,resolveComponent:_resolveComponent$2,withCtx:_withCtx$2,createVNode:_createVNode$2,createElementVNode:_createElementVNode$2,toDisplayString:_toDisplayString$2,Fragment:_Fragment$2,openBlock:_openBlock$2,createElementBlock:_createElementBlock$2,createCommentVNode:_createCommentVNode$2,createBlock:_createBlock$2,renderList:_renderList$2,withModifiers:_withModifiers,normalizeClass:_normalizeClass} = await importShared('vue');
+const {createTextVNode:_createTextVNode$2,resolveComponent:_resolveComponent$2,withCtx:_withCtx$2,createVNode:_createVNode$2,unref:_unref$1,createElementVNode:_createElementVNode$2,toDisplayString:_toDisplayString$2,Fragment:_Fragment$2,openBlock:_openBlock$2,createElementBlock:_createElementBlock$2,createCommentVNode:_createCommentVNode$2,createBlock:_createBlock$2,renderList:_renderList$2,withModifiers:_withModifiers,normalizeClass:_normalizeClass} = await importShared('vue');
 
 
 const _hoisted_1$2 = { class: "zt-subset" };
 const _hoisted_2$2 = { class: "zt-topbar" };
-const _hoisted_3$2 = { class: "zt-status-hint text-body-2" };
-const _hoisted_4$2 = {
+const _hoisted_3$2 = ["accept"];
+const _hoisted_4$2 = { class: "zt-status-hint text-body-2" };
+const _hoisted_5$2 = {
   key: 1,
   class: "zt-empty pa-6"
 };
-const _hoisted_5$2 = {
+const _hoisted_6$2 = {
   key: 2,
   class: "zt-list-body"
 };
-const _hoisted_6$2 = { class: "zt-title-text" };
-const _hoisted_7$2 = { class: "zt-title-actions" };
-const _hoisted_8$2 = { class: "zt-filter-row" };
-const _hoisted_9$2 = {
+const _hoisted_7$2 = { class: "zt-title-text" };
+const _hoisted_8$2 = { class: "zt-title-actions" };
+const _hoisted_9$2 = { class: "zt-filter-row" };
+const _hoisted_10$2 = {
   key: 0,
   class: "zt-empty pa-6"
 };
-const _hoisted_10$2 = ["onClick"];
-const _hoisted_11$1 = { class: "zt-group-name" };
-const _hoisted_12$1 = { class: "zt-group-count" };
-const _hoisted_13$1 = { class: "zt-group-stats" };
-const _hoisted_14$1 = { class: "zt-group-actions" };
-const _hoisted_15$1 = {
+const _hoisted_11$1 = ["onClick"];
+const _hoisted_12$1 = { class: "zt-group-name" };
+const _hoisted_13$1 = { class: "zt-group-count" };
+const _hoisted_14$1 = { class: "zt-group-stats" };
+const _hoisted_15$1 = { class: "zt-group-actions" };
+const _hoisted_16$1 = {
   key: 0,
   class: "zt-group-body"
 };
-const _hoisted_16$1 = {
+const _hoisted_17$1 = {
   key: 3,
   class: "ml-2"
 };
-const _hoisted_17$1 = {
+const _hoisted_18$1 = {
   key: 0,
   class: "zt-loading-more pa-2 text-center"
 };
-const _hoisted_18$1 = {
+const _hoisted_19$1 = {
   key: 1,
   class: "zt-loading-more pa-2 text-center"
 };
@@ -323,6 +324,7 @@ async function handleUpload(event) {
   if (!files.length) return
   const BATCH = 5;
   let total = 0;
+  const notes = [];
   uploading.value = true;
   try {
     for (let i = 0; i < files.length; i += BATCH) {
@@ -340,9 +342,12 @@ async function handleUpload(event) {
         break
       } else {
         total += (body?.data?.count ?? chunk.length);
+        if (Array.isArray(body?.data?.notes)) notes.push(...body.data.notes);
       }
     }
     emit('notify', `已加入待处理 ${total} 个字幕`, 'success');
+    const noteText = formatNotes(notes);
+    if (noteText) emit('notify', `部分文件被跳过：${noteText}`, 'warning');
     loadPending();
   } catch (e) {
     emit('notify', e.message || '上传失败');
@@ -699,11 +704,11 @@ return (_ctx, _cache) => {
         ref_key: "uploadRef",
         ref: uploadRef,
         type: "file",
-        accept: ".ass,.ASS,.zip,.7z,.rar",
+        accept: _unref$1(uploadAcceptFor)(_unref$1(DESKTOP_ACCEPT_ASS)),
         multiple: "",
         style: {"display":"none"},
         onChange: handleUpload
-      }, null, 544),
+      }, null, 40, _hoisted_3$2),
       _createVNode$2(_component_v_btn, {
         color: "primary",
         disabled: !__props.enabled || scanning.value || !pendingList.value.length,
@@ -746,7 +751,7 @@ return (_ctx, _cache) => {
         _: 1
       }, 8, ["disabled"]),
       _createVNode$2(_component_v_spacer),
-      _createElementVNode$2("span", _hoisted_3$2, [
+      _createElementVNode$2("span", _hoisted_4$2, [
         _createVNode$2(_component_v_icon, {
           size: 15,
           color: indexRebuilding.value ? 'info' : (indexReady.value ? 'success' : 'warning')
@@ -839,12 +844,12 @@ return (_ctx, _cache) => {
                     }))
                   : _createCommentVNode$2("", true),
                 (!loadingPending.value && !pendingList.value.length)
-                  ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_4$2, [...(_cache[21] || (_cache[21] = [
+                  ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_5$2, [...(_cache[21] || (_cache[21] = [
                       _createTextVNode$2(" 暂无待处理字幕", -1),
                       _createElementVNode$2("br", null, null, -1),
                       _createElementVNode$2("span", { class: "zt-empty-sub" }, "上传字幕，或设置开启「入库后自动子集化」+「目录自动收集」关闭时自动收集", -1)
                     ]))]))
-                  : (_openBlock$2(), _createElementBlock$2("div", _hoisted_5$2, [
+                  : (_openBlock$2(), _createElementBlock$2("div", _hoisted_6$2, [
                       _createVNode$2(_component_v_list, {
                         density: "compact",
                         class: "pa-0"
@@ -931,9 +936,9 @@ return (_ctx, _cache) => {
                       ]))]),
                       _: 1
                     }),
-                    _createElementVNode$2("span", _hoisted_6$2, "结果（" + _toDisplayString$2(recordTotal.value) + "）", 1),
+                    _createElementVNode$2("span", _hoisted_7$2, "结果（" + _toDisplayString$2(recordTotal.value) + "）", 1),
                     _createVNode$2(_component_v_spacer),
-                    _createElementVNode$2("div", _hoisted_7$2, [
+                    _createElementVNode$2("div", _hoisted_8$2, [
                       _createVNode$2(_component_v_btn, {
                         size: "small",
                         variant: "tonal",
@@ -1008,7 +1013,7 @@ return (_ctx, _cache) => {
                   _: 1
                 }),
                 _createVNode$2(_component_v_divider),
-                _createElementVNode$2("div", _hoisted_8$2, [
+                _createElementVNode$2("div", _hoisted_9$2, [
                   _createVNode$2(_component_v_select, {
                     modelValue: filterStatus.value,
                     "onUpdate:modelValue": _cache[3] || (_cache[3] = $event => ((filterStatus).value = $event)),
@@ -1045,7 +1050,7 @@ return (_ctx, _cache) => {
                   onScroll: onRecordsScroll
                 }, [
                   (!loadingRecords.value && !groupedRecords.value.length)
-                    ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_9$2, [
+                    ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_10$2, [
                         _createTextVNode$2(" 暂无" + _toDisplayString$2(filterStatus.value || recordSearch.value ? '匹配' : '') + "处理结果", 1),
                         _cache[31] || (_cache[31] = _createElementVNode$2("br", null, null, -1)),
                         _cache[32] || (_cache[32] = _createElementVNode$2("span", { class: "zt-empty-sub" }, "处理完成后结果与输出文件在这里展示，可下载", -1))
@@ -1075,9 +1080,9 @@ return (_ctx, _cache) => {
                           ]),
                           _: 2
                         }, 1032, ["color"]),
-                        _createElementVNode$2("span", _hoisted_11$1, _toDisplayString$2(g.label), 1),
-                        _createElementVNode$2("span", _hoisted_12$1, _toDisplayString$2(g.records.length), 1),
-                        _createElementVNode$2("span", _hoisted_13$1, [
+                        _createElementVNode$2("span", _hoisted_12$1, _toDisplayString$2(g.label), 1),
+                        _createElementVNode$2("span", _hoisted_13$1, _toDisplayString$2(g.records.length), 1),
+                        _createElementVNode$2("span", _hoisted_14$1, [
                           (g.stats.success)
                             ? (_openBlock$2(), _createBlock$2(_component_v_chip, {
                                 key: 0,
@@ -1131,7 +1136,7 @@ return (_ctx, _cache) => {
                               }, 1024))
                             : _createCommentVNode$2("", true)
                         ]),
-                        _createElementVNode$2("span", _hoisted_14$1, [
+                        _createElementVNode$2("span", _hoisted_15$1, [
                           _createVNode$2(_component_v_btn, {
                             size: "x-small",
                             variant: "tonal",
@@ -1177,9 +1182,9 @@ return (_ctx, _cache) => {
                             _: 1
                           }, 8, ["disabled", "onClick"])
                         ])
-                      ], 8, _hoisted_10$2),
+                      ], 8, _hoisted_11$1),
                       (g.expanded)
-                        ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_15$1, [
+                        ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_16$1, [
                             _createVNode$2(_component_v_list, {
                               density: "compact",
                               class: "pa-0"
@@ -1274,7 +1279,7 @@ return (_ctx, _cache) => {
                                                   _createTextVNode$2("—")
                                                 ], 64)),
                                           (r.created_at)
-                                            ? (_openBlock$2(), _createElementBlock$2("span", _hoisted_16$1, _toDisplayString$2(r.created_at), 1))
+                                            ? (_openBlock$2(), _createElementBlock$2("span", _hoisted_17$1, _toDisplayString$2(r.created_at), 1))
                                             : _createCommentVNode$2("", true)
                                         ]),
                                         _: 2
@@ -1287,14 +1292,14 @@ return (_ctx, _cache) => {
                               _: 2
                             }, 1024),
                             (g.truncated)
-                              ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_17$1, " 还有 " + _toDisplayString$2(g.records.length - g.visibleRecords.length) + " 条，下拉加载… ", 1))
+                              ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_18$1, " 还有 " + _toDisplayString$2(g.records.length - g.visibleRecords.length) + " 条，下拉加载… ", 1))
                               : _createCommentVNode$2("", true)
                           ]))
                         : _createCommentVNode$2("", true)
                     ], 2))
                   }), 128)),
                   (hasMoreRecords.value)
-                    ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_18$1, [
+                    ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_19$1, [
                         _createVNode$2(_component_v_btn, {
                           size: "small",
                           variant: "text",
@@ -1485,9 +1490,9 @@ return (_ctx, _cache) => {
 }
 
 };
-const Subset = /*#__PURE__*/_export_sfc(_sfc_main$2, [['__scopeId',"data-v-5601f6bd"]]);
+const Subset = /*#__PURE__*/_export_sfc(_sfc_main$2, [['__scopeId',"data-v-32a6e38c"]]);
 
-const {createTextVNode:_createTextVNode$1,resolveComponent:_resolveComponent$1,withCtx:_withCtx$1,createVNode:_createVNode$1,toDisplayString:_toDisplayString$1,createElementVNode:_createElementVNode$1,openBlock:_openBlock$1,createBlock:_createBlock$1,createCommentVNode:_createCommentVNode$1,renderList:_renderList$1,Fragment:_Fragment$1,createElementBlock:_createElementBlock$1} = await importShared('vue');
+const {createTextVNode:_createTextVNode$1,resolveComponent:_resolveComponent$1,withCtx:_withCtx$1,createVNode:_createVNode$1,toDisplayString:_toDisplayString$1,createElementVNode:_createElementVNode$1,openBlock:_openBlock$1,createBlock:_createBlock$1,createCommentVNode:_createCommentVNode$1,renderList:_renderList$1,Fragment:_Fragment$1,createElementBlock:_createElementBlock$1,unref:_unref} = await importShared('vue');
 
 
 const _hoisted_1$1 = { class: "zt-missing" };
@@ -1504,34 +1509,35 @@ const _hoisted_7$1 = {
   class: "zt-chip-target"
 };
 const _hoisted_8$1 = { class: "d-flex flex-wrap gap-2 align-center" };
-const _hoisted_9$1 = {
+const _hoisted_9$1 = ["accept"];
+const _hoisted_10$1 = {
   key: 1,
   class: "zt-empty pa-6"
 };
-const _hoisted_10$1 = {
+const _hoisted_11 = {
   key: 2,
   class: "zt-list-body"
 };
-const _hoisted_11 = { class: "zt-char-preview" };
-const _hoisted_12 = {
+const _hoisted_12 = { class: "zt-char-preview" };
+const _hoisted_13 = {
   key: 0,
   class: "text-center pa-2"
-};
-const _hoisted_13 = {
-  key: 1,
-  class: "zt-empty pa-6"
 };
 const _hoisted_14 = {
+  key: 1,
+  class: "zt-empty pa-6"
+};
+const _hoisted_15 = {
   key: 2,
   class: "zt-list-body"
 };
-const _hoisted_15 = {
+const _hoisted_16 = {
   key: 0,
   class: "text-center pa-2"
 };
-const _hoisted_16 = { class: "text-body-2 mb-3" };
-const _hoisted_17 = { key: 0 };
-const _hoisted_18 = {
+const _hoisted_17 = { class: "text-body-2 mb-3" };
+const _hoisted_18 = { key: 0 };
+const _hoisted_19 = {
   key: 0,
   class: "zt-font-meta mb-3"
 };
@@ -1601,6 +1607,7 @@ async function handleUpload(event) {
   const BATCH = 3;
   let total = 0;
   const rejected = [];
+  const notes = [];
   uploading.value = true;
   try {
     for (let i = 0; i < files.length; i += BATCH) {
@@ -1620,6 +1627,7 @@ async function handleUpload(event) {
       } else {
         total += (body?.data?.count ?? 0);
         for (const r of body?.data?.rejected || []) rejected.push(r);
+        if (Array.isArray(body?.data?.notes)) notes.push(...body.data.notes);
       }
     }
     if (total) {
@@ -1629,6 +1637,8 @@ async function handleUpload(event) {
       const detail = rejected.slice(0, 3).map(r => `${r.file_name}：${r.reason}`).join('；');
       emit('notify', `${rejected.length} 个字体未通过校验：${detail}`, 'warning');
     }
+    const noteText = formatNotes(notes);
+    if (noteText) emit('notify', `部分文件被跳过：${noteText}`, 'warning');
     if (!total && !rejected.length) emit('notify', '没有字体通过缺失校验', 'warning');
     await loadUploads();
     await loadSummary();
@@ -1955,11 +1965,11 @@ return (_ctx, _cache) => {
                 ref_key: "uploadRef",
                 ref: uploadRef,
                 type: "file",
-                accept: ".ttf,.otf,.ttc,.otc,.woff,.woff2,.zip,.7z,.rar",
+                accept: _unref(uploadAcceptFor)(_unref(DESKTOP_ACCEPT_FONT)),
                 multiple: "",
                 style: {"display":"none"},
                 onChange: handleUpload
-              }, null, 544),
+              }, null, 40, _hoisted_9$1),
               _createVNode$1(_component_v_btn, {
                 color: "success",
                 variant: "tonal",
@@ -2048,8 +2058,8 @@ return (_ctx, _cache) => {
                     }))
                   : _createCommentVNode$1("", true),
                 (!loading.value && !(summary.value.check || []).length)
-                  ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_9$1, " 检查页无缺失字体 "))
-                  : (_openBlock$1(), _createElementBlock$1("div", _hoisted_10$1, [
+                  ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_10$1, " 检查页无缺失字体 "))
+                  : (_openBlock$1(), _createElementBlock$1("div", _hoisted_11, [
                       _createVNode$1(_component_v_list, {
                         density: "compact",
                         class: "pa-0"
@@ -2084,7 +2094,7 @@ return (_ctx, _cache) => {
                                     (f.chars)
                                       ? (_openBlock$1(), _createElementBlock$1(_Fragment$1, { key: 0 }, [
                                           _createTextVNode$1(" · 缺 " + _toDisplayString$1(f.codepoints_count || 0) + " 字符：", 1),
-                                          _createElementVNode$1("span", _hoisted_11, _toDisplayString$1(f.chars), 1)
+                                          _createElementVNode$1("span", _hoisted_12, _toDisplayString$1(f.chars), 1)
                                         ], 64))
                                       : (f.glyph)
                                         ? (_openBlock$1(), _createElementBlock$1(_Fragment$1, { key: 1 }, [
@@ -2102,7 +2112,7 @@ return (_ctx, _cache) => {
                         _: 1
                       }),
                       ((summary.value.check || []).length > PREVIEW_N)
-                        ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_12, [
+                        ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_13, [
                             _createVNode$1(_component_v_btn, {
                               size: "small",
                               variant: "tonal",
@@ -2154,8 +2164,8 @@ return (_ctx, _cache) => {
                     }))
                   : _createCommentVNode$1("", true),
                 (!loading.value && !(summary.value.subset || []).length)
-                  ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_13, " 子集化无缺失字体 "))
-                  : (_openBlock$1(), _createElementBlock$1("div", _hoisted_14, [
+                  ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_14, " 子集化无缺失字体 "))
+                  : (_openBlock$1(), _createElementBlock$1("div", _hoisted_15, [
                       _createVNode$1(_component_v_list, {
                         density: "compact",
                         class: "pa-0"
@@ -2198,7 +2208,7 @@ return (_ctx, _cache) => {
                         _: 1
                       }),
                       ((summary.value.subset || []).length > PREVIEW_N)
-                        ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_15, [
+                        ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_16, [
                             _createVNode$1(_component_v_btn, {
                               size: "small",
                               variant: "tonal",
@@ -2316,14 +2326,14 @@ return (_ctx, _cache) => {
             }),
             _createVNode$1(_component_v_card_text, null, {
               default: _withCtx$1(() => [
-                _createElementVNode$1("div", _hoisted_16, [
+                _createElementVNode$1("div", _hoisted_17, [
                   _createTextVNode$1(" 字体：" + _toDisplayString$1(remapItem.value?.file_name) + " ", 1),
                   (remapItem.value?.name)
-                    ? (_openBlock$1(), _createElementBlock$1("span", _hoisted_17, "（内部名：" + _toDisplayString$1(remapItem.value.name) + "）", 1))
+                    ? (_openBlock$1(), _createElementBlock$1("span", _hoisted_18, "（内部名：" + _toDisplayString$1(remapItem.value.name) + "）", 1))
                     : _createCommentVNode$1("", true)
                 ]),
                 (remapItem.value?.covered_chars)
-                  ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_18, " 当前覆盖字符：" + _toDisplayString$1(remapItem.value.covered_chars), 1))
+                  ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_19, " 当前覆盖字符：" + _toDisplayString$1(remapItem.value.covered_chars), 1))
                   : _createCommentVNode$1("", true),
                 _createVNode$1(_component_v_select, {
                   modelValue: remapTarget.value,
@@ -2378,7 +2388,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const MissingFonts = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-aa214945"]]);
+const MissingFonts = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-e47c64b1"]]);
 
 const {createTextVNode:_createTextVNode,resolveComponent:_resolveComponent,withCtx:_withCtx,createVNode:_createVNode,createElementVNode:_createElementVNode,renderList:_renderList,Fragment:_Fragment,openBlock:_openBlock,createElementBlock:_createElementBlock,toDisplayString:_toDisplayString,createBlock:_createBlock,createCommentVNode:_createCommentVNode,resolveDynamicComponent:_resolveDynamicComponent,KeepAlive:_KeepAlive,createSlots:_createSlots} = await importShared('vue');
 

@@ -283,12 +283,5 @@ def pick_candidates(
 
 
 def describe_extract_tools(refresh: bool = False) -> Dict[str, Any]:
-    """当前环境解压能力摘要（设置页状态行 / 依赖检测共用）。"""
-    tools = arch.detect_extract_tools(refresh=refresh)
-    return {
-        "zip": True,
-        "seven_zip": bool(tools.get("7z") or tools.get("7za") or tools.get("unar")),
-        "rar": any(tools.get(k) for k in ("7z", "7za", "unar", "unrar", "bsdtar")),
-        "tools": sorted(tools.keys()),
-        "extensions": list(arch.archive_extensions()),
-    }
+    """当前环境解压能力摘要（设置页状态行 / 依赖检测 / 上传提示共用）。"""
+    return arch.describe_extract_state(refresh=refresh)

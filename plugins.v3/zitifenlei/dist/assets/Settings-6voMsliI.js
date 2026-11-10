@@ -159,6 +159,8 @@ const deps = ref$3({ items: [], ok_count: 0, total: 0 });
 const depsDialog = ref$3(false);
 const depsLoading = ref$3(false);
 const installingKey = ref$3('');
+// 解压工具（.7z/.rar）一键安装中
+const installingExtract = ref$3(false);
 
 let refreshTimer = null;
 function startPolling() {
@@ -198,6 +200,21 @@ async function installDep(d) {
     emit('notify', e.message || `${d.name} 安装失败`, 'error');
   } finally {
     installingKey.value = '';
+  }
+}
+
+// 在容器内一键安装解压工具（apt/apk 安装 unar/7zip），用于上传 .7z/.rar 与种子字体收集
+async function installArchiveTools() {
+  if (installingExtract.value) return
+  installingExtract.value = true;
+  try {
+    const res = await apiModule.post(props.api, '/archive/tools/install', {});
+    emit('notify', res?.message || '解压工具安装完成', 'success');
+    await loadDeps();
+  } catch (e) {
+    emit('notify', e.message || '安装解压工具失败', 'error');
+  } finally {
+    installingExtract.value = false;
   }
 }
 
@@ -425,7 +442,7 @@ return (_ctx, _cache) => {
                                     variant: "tonal",
                                     color: "primary",
                                     loading: installingKey.value === d.key,
-                                    disabled: !!installingKey.value,
+                                    disabled: !!installingKey.value || installingExtract.value,
                                     title: "通过 pip 重新安装该依赖",
                                     onClick: $event => (installDep(d))
                                   }, {
@@ -443,6 +460,32 @@ return (_ctx, _cache) => {
                                     ]),
                                     _: 1
                                   }, 8, ["loading", "disabled", "onClick"]))
+                                : _createCommentVNode$3("", true),
+                              (d.key === 'extract_tools' && d.can_install !== false)
+                                ? (_openBlock$3(), _createBlock$3(_component_v_btn, {
+                                    key: 1,
+                                    size: "small",
+                                    variant: "tonal",
+                                    color: "warning",
+                                    loading: installingExtract.value,
+                                    disabled: !!installingKey.value || installingExtract.value,
+                                    title: "在容器内用 apt/apk 安装 unar/7zip（需要容器联网，镜像更新后需重装）",
+                                    onClick: installArchiveTools
+                                  }, {
+                                    default: _withCtx$3(() => [
+                                      _createVNode$3(_component_v_icon, {
+                                        start: "",
+                                        size: "14"
+                                      }, {
+                                        default: _withCtx$3(() => [...(_cache[13] || (_cache[13] = [
+                                          _createTextVNode$3("mdi-archive-arrow-up-outline", -1)
+                                        ]))]),
+                                        _: 1
+                                      }),
+                                      _cache[14] || (_cache[14] = _createTextVNode$3(" 安装解压工具 ", -1))
+                                    ]),
+                                    _: 1
+                                  }, 8, ["loading", "disabled"]))
                                 : _createCommentVNode$3("", true)
                             ]),
                             default: _withCtx$3(() => [
@@ -476,7 +519,7 @@ return (_ctx, _cache) => {
                       ]),
                       _: 1
                     })),
-                _cache[13] || (_cache[13] = _createElementVNode$3("div", { class: "zt-deps-hint text-body-2" }, " 依赖由 MoviePilot 安装插件时按 requirements.txt 自动安装；缺失时可点「重新安装」用 pip 补齐 （uharfbuzz 安装后立即生效，fontTools/watchdog 需重启插件）。 ", -1))
+                _cache[15] || (_cache[15] = _createElementVNode$3("div", { class: "zt-deps-hint text-body-2" }, " 依赖由 MoviePilot 安装插件时按 requirements.txt 自动安装；缺失时可点「重新安装」用 pip 补齐 （uharfbuzz 安装后立即生效，fontTools/watchdog 需重启插件）。 ", -1))
               ]),
               _: 1
             })
@@ -499,7 +542,7 @@ return (_ctx, _cache) => {
                 _createVNode$3(_component_v_card_text, { class: "text-center pa-4" }, {
                   default: _withCtx$3(() => [
                     _createElementVNode$3("div", _hoisted_6$3, _toDisplayString$3(stats.value.total), 1),
-                    _cache[14] || (_cache[14] = _createElementVNode$3("div", { class: "zt-stat-label" }, "字体文件数", -1))
+                    _cache[16] || (_cache[16] = _createElementVNode$3("div", { class: "zt-stat-label" }, "字体文件数", -1))
                   ]),
                   _: 1
                 })
@@ -520,7 +563,7 @@ return (_ctx, _cache) => {
                 _createVNode$3(_component_v_card_text, { class: "text-center pa-4" }, {
                   default: _withCtx$3(() => [
                     _createElementVNode$3("div", _hoisted_7$3, _toDisplayString$3(stats.value.pending), 1),
-                    _cache[15] || (_cache[15] = _createElementVNode$3("div", { class: "zt-stat-label" }, "待整理", -1))
+                    _cache[17] || (_cache[17] = _createElementVNode$3("div", { class: "zt-stat-label" }, "待整理", -1))
                   ]),
                   _: 1
                 })
@@ -541,7 +584,7 @@ return (_ctx, _cache) => {
                 _createVNode$3(_component_v_card_text, { class: "text-center pa-4" }, {
                   default: _withCtx$3(() => [
                     _createElementVNode$3("div", _hoisted_8$3, _toDisplayString$3(stats.value.subset ?? stats.value.archived), 1),
-                    _cache[16] || (_cache[16] = _createElementVNode$3("div", { class: "zt-stat-label" }, "最近子集化数量", -1))
+                    _cache[18] || (_cache[18] = _createElementVNode$3("div", { class: "zt-stat-label" }, "最近子集化数量", -1))
                   ]),
                   _: 1
                 })
@@ -562,7 +605,7 @@ return (_ctx, _cache) => {
                 _createVNode$3(_component_v_card_text, { class: "text-center pa-4" }, {
                   default: _withCtx$3(() => [
                     _createElementVNode$3("div", _hoisted_9$3, _toDisplayString$3(stats.value.error), 1),
-                    _cache[17] || (_cache[17] = _createElementVNode$3("div", { class: "zt-stat-label" }, "缺失字体", -1))
+                    _cache[19] || (_cache[19] = _createElementVNode$3("div", { class: "zt-stat-label" }, "缺失字体", -1))
                   ]),
                   _: 1
                 })
@@ -590,12 +633,12 @@ return (_ctx, _cache) => {
                       start: "",
                       size: "18"
                     }, {
-                      default: _withCtx$3(() => [...(_cache[18] || (_cache[18] = [
+                      default: _withCtx$3(() => [...(_cache[20] || (_cache[20] = [
                         _createTextVNode$3("mdi-chart-bar", -1)
                       ]))]),
                       _: 1
                     }),
-                    _cache[19] || (_cache[19] = _createTextVNode$3(" 厂商分布 ", -1)),
+                    _cache[21] || (_cache[21] = _createTextVNode$3(" 厂商分布 ", -1)),
                     (vendors.value.length)
                       ? (_openBlock$3(), _createElementBlock$3("span", _hoisted_10$3, _toDisplayString$3(vendors.value.length) + " 家", 1))
                       : _createCommentVNode$3("", true)
@@ -651,12 +694,12 @@ return (_ctx, _cache) => {
                       start: "",
                       size: "18"
                     }, {
-                      default: _withCtx$3(() => [...(_cache[20] || (_cache[20] = [
+                      default: _withCtx$3(() => [...(_cache[22] || (_cache[22] = [
                         _createTextVNode$3("mdi-folder-outline", -1)
                       ]))]),
                       _: 1
                     }),
-                    _cache[21] || (_cache[21] = _createTextVNode$3(" 目录健康度 ", -1))
+                    _cache[23] || (_cache[23] = _createTextVNode$3(" 目录健康度 ", -1))
                   ]),
                   _: 1
                 }),
@@ -705,12 +748,12 @@ return (_ctx, _cache) => {
               start: "",
               size: "18"
             }, {
-              default: _withCtx$3(() => [...(_cache[22] || (_cache[22] = [
+              default: _withCtx$3(() => [...(_cache[24] || (_cache[24] = [
                 _createTextVNode$3("mdi-text-box-outline", -1)
               ]))]),
               _: 1
             }),
-            _cache[23] || (_cache[23] = _createTextVNode$3(" 最近操作日志 ", -1))
+            _cache[25] || (_cache[25] = _createTextVNode$3(" 最近操作日志 ", -1))
           ]),
           _: 1
         }),
@@ -758,56 +801,90 @@ return (_ctx, _cache) => {
 }
 
 };
-const Dashboard = /*#__PURE__*/_export_sfc(_sfc_main$3, [['__scopeId',"data-v-37337687"]]);
+const Dashboard = /*#__PURE__*/_export_sfc(_sfc_main$3, [['__scopeId',"data-v-8b08c949"]]);
 
-const {createTextVNode:_createTextVNode$2,resolveComponent:_resolveComponent$2,withCtx:_withCtx$2,createVNode:_createVNode$2,createElementVNode:_createElementVNode$2,toDisplayString:_toDisplayString$2,openBlock:_openBlock$2,createBlock:_createBlock$2,createCommentVNode:_createCommentVNode$2,createElementBlock:_createElementBlock$2,renderList:_renderList$2,Fragment:_Fragment$2,normalizeStyle:_normalizeStyle,withModifiers:_withModifiers$1,vModelText:_vModelText,withDirectives:_withDirectives} = await importShared('vue');
+/**
+ * 上传文件选择器的 accept 配置。
+ *
+ * 背景：只写扩展名（.rar/.7z 等）时，手机系统文件选择器会按 MIME 过滤——
+ * 压缩包常被识别成 application/x-rar-compressed / application/vnd.rar /
+ * application/octet-stream 等，不在 accept 里就会「能看到文件但灰色点不动」，
+ * 用户反馈的「手机压缩包无法上传」正是这个原因。
+ *
+ * 处理方式：桌面保留扩展名过滤（方便选文件）；手机/平板直接不设 accept，
+ * 文件选择器不再按 MIME 过滤，任何格式都能选中。后端会校验后缀并给出明确提示。
+ */
+const DESKTOP_ACCEPT_FONT = '.ttf,.otf,.ttc,.otc,.woff,.woff2,.zip,.7z,.rar';
+const DESKTOP_ACCEPT_ASS = '.ass,.ASS,.zip,.7z,.rar';
+
+/** 是否是手机/平板浏览器（安卓、iOS、鸿蒙等）。 */
+function isMobileUploadDevice() {
+  if (typeof navigator === 'undefined') return false
+  return /Android|iPhone|iPad|iPod|HarmonyOS|Mobile/i.test(navigator.userAgent || '')
+}
+
+/** 手机不设 accept（避免 MIME 过滤导致压缩包灰色不可选）；桌面保留类型过滤。 */
+function uploadAcceptFor(desktopAccept) {
+  return isMobileUploadDevice() ? undefined : desktopAccept
+}
+
+/** 把后端返回的 notes（压缩包跳过/解压失败原因）转成一条可读提示；没有则返回空串。 */
+function formatNotes(notes, max = 3) {
+  if (!Array.isArray(notes) || !notes.length) return ''
+  const shown = notes.slice(0, max);
+  const tail = notes.length > max ? `；等 ${notes.length} 条` : '';
+  return shown.join('；') + tail
+}
+
+const {createTextVNode:_createTextVNode$2,resolveComponent:_resolveComponent$2,withCtx:_withCtx$2,createVNode:_createVNode$2,unref:_unref$1,createElementVNode:_createElementVNode$2,toDisplayString:_toDisplayString$2,openBlock:_openBlock$2,createBlock:_createBlock$2,createCommentVNode:_createCommentVNode$2,createElementBlock:_createElementBlock$2,renderList:_renderList$2,Fragment:_Fragment$2,normalizeStyle:_normalizeStyle,withModifiers:_withModifiers$1,vModelText:_vModelText,withDirectives:_withDirectives} = await importShared('vue');
 
 
 const _hoisted_1$2 = { class: "zt-font-library" };
 const _hoisted_2$2 = { class: "zt-topbar" };
-const _hoisted_3$2 = { class: "zt-total text-body-2" };
-const _hoisted_4$2 = { class: "pa-3 pb-2" };
-const _hoisted_5$2 = { class: "zt-dir-count" };
-const _hoisted_6$2 = {
+const _hoisted_3$2 = ["accept"];
+const _hoisted_4$2 = { class: "zt-total text-body-2" };
+const _hoisted_5$2 = { class: "pa-3 pb-2" };
+const _hoisted_6$2 = { class: "zt-dir-count" };
+const _hoisted_7$2 = {
   key: 0,
   class: "zt-empty pa-6"
 };
-const _hoisted_7$2 = {
+const _hoisted_8$2 = {
   key: 1,
   class: "pa-4"
 };
-const _hoisted_8$2 = { class: "d-flex align-center mb-3" };
-const _hoisted_9$2 = { class: "flex-grow-1" };
-const _hoisted_10$2 = { class: "zt-detail-title zt-font-name" };
-const _hoisted_11$2 = { class: "zt-detail-meta" };
-const _hoisted_12$2 = { class: "zt-meta-grid mb-3" };
-const _hoisted_13$2 = { class: "zt-meta-item" };
-const _hoisted_14$2 = { class: "zt-meta-value" };
-const _hoisted_15$2 = { class: "zt-meta-item" };
-const _hoisted_16$2 = { class: "zt-meta-value" };
-const _hoisted_17$2 = { class: "zt-meta-item" };
-const _hoisted_18$2 = { class: "zt-meta-value" };
-const _hoisted_19$2 = { class: "zt-meta-item" };
-const _hoisted_20$2 = { class: "zt-meta-value" };
-const _hoisted_21$2 = { class: "zt-section-label mb-2" };
-const _hoisted_22$2 = { class: "zt-preview-sample" };
-const _hoisted_23$2 = {
+const _hoisted_9$2 = { class: "d-flex align-center mb-3" };
+const _hoisted_10$2 = { class: "flex-grow-1" };
+const _hoisted_11$2 = { class: "zt-detail-title zt-font-name" };
+const _hoisted_12$2 = { class: "zt-detail-meta" };
+const _hoisted_13$2 = { class: "zt-meta-grid mb-3" };
+const _hoisted_14$2 = { class: "zt-meta-item" };
+const _hoisted_15$2 = { class: "zt-meta-value" };
+const _hoisted_16$2 = { class: "zt-meta-item" };
+const _hoisted_17$2 = { class: "zt-meta-value" };
+const _hoisted_18$2 = { class: "zt-meta-item" };
+const _hoisted_19$2 = { class: "zt-meta-value" };
+const _hoisted_20$2 = { class: "zt-meta-item" };
+const _hoisted_21$2 = { class: "zt-meta-value" };
+const _hoisted_22$2 = { class: "zt-section-label mb-2" };
+const _hoisted_23$2 = { class: "zt-preview-sample" };
+const _hoisted_24$2 = {
   key: 1,
   class: "zt-empty pa-4"
 };
-const _hoisted_24$2 = { class: "zt-preview-controls mt-2" };
-const _hoisted_25$2 = { class: "d-flex pa-3 flex-wrap" };
-const _hoisted_26$2 = {
+const _hoisted_25$2 = { class: "zt-preview-controls mt-2" };
+const _hoisted_26$2 = { class: "d-flex pa-3 flex-wrap" };
+const _hoisted_27$2 = {
   key: 1,
   class: "zt-empty"
 };
-const _hoisted_27$2 = {
+const _hoisted_28$2 = {
   key: 2,
   class: "zt-preview-body"
 };
-const _hoisted_28$2 = { class: "zt-preview-name mb-2" };
-const _hoisted_29$1 = { class: "zt-preview-family mb-3" };
-const _hoisted_30$1 = { class: "zt-preview-controls mb-3" };
+const _hoisted_29$2 = { class: "zt-preview-name mb-2" };
+const _hoisted_30$1 = { class: "zt-preview-family mb-3" };
+const _hoisted_31$1 = { class: "zt-preview-controls mb-3" };
 
 const {computed: computed$2,watch: watch$2,onActivated: onActivated$1,onDeactivated: onDeactivated$1,onMounted: onMounted$2,onUnmounted: onUnmounted$1,ref: ref$2} = await importShared('vue');
 
@@ -1247,6 +1324,7 @@ async function handleUpload(event) {
   // 大量文件一次请求易触发网关请求体限制（410/413），改为分批顺序上传，每批 3 个
   const BATCH = 3;
   let total = 0;
+  const notes = [];
   uploading.value = true;
   try {
     for (let i = 0; i < files.length; i += BATCH) {
@@ -1265,9 +1343,12 @@ async function handleUpload(event) {
       } else {
         const item = body?.data ?? body;
         total += (item?.count ?? chunk.length);
+        if (Array.isArray(item?.notes)) notes.push(...item.notes);
       }
     }
     emit('notify', `已加入待确认列表 ${total} 个字体`, 'success');
+    const noteText = formatNotes(notes);
+    if (noteText) emit('notify', `部分文件被跳过：${noteText}`, 'warning');
     loadPending();
   } catch (e) {
     emit('notify', e.message || '上传失败');
@@ -1587,11 +1668,11 @@ return (_ctx, _cache) => {
         ref_key: "uploadRef",
         ref: uploadRef,
         type: "file",
-        accept: ".ttf,.otf,.ttc,.otc,.woff,.woff2,.zip,.7z,.rar",
+        accept: _unref$1(uploadAcceptFor)(_unref$1(DESKTOP_ACCEPT_FONT)),
         multiple: "",
         style: {"display":"none"},
         onChange: handleUpload
-      }, null, 544),
+      }, null, 40, _hoisted_3$2),
       _createVNode$2(_component_v_btn, {
         variant: "tonal",
         disabled: !__props.enabled || scanning.value,
@@ -1693,7 +1774,7 @@ return (_ctx, _cache) => {
         _: 1
       }, 8, ["disabled"]),
       _createVNode$2(_component_v_spacer),
-      _createElementVNode$2("span", _hoisted_3$2, "共 " + _toDisplayString$2(allFonts.value.length) + " 个字体", 1)
+      _createElementVNode$2("span", _hoisted_4$2, "共 " + _toDisplayString$2(allFonts.value.length) + " 个字体", 1)
     ]),
     _createVNode$2(_component_v_row, {
       "no-gutters": "",
@@ -1714,7 +1795,7 @@ return (_ctx, _cache) => {
               default: _withCtx$2(() => [
                 _createVNode$2(_component_v_card_text, { class: "pa-0" }, {
                   default: _withCtx$2(() => [
-                    _createElementVNode$2("div", _hoisted_4$2, [
+                    _createElementVNode$2("div", _hoisted_5$2, [
                       _createVNode$2(_component_v_text_field, {
                         modelValue: search.value,
                         "onUpdate:modelValue": _cache[3] || (_cache[3] = $event => ((search).value = $event)),
@@ -1797,7 +1878,7 @@ return (_ctx, _cache) => {
                                           }, 1024)
                                         ]),
                                         append: _withCtx$2(() => [
-                                          _createElementVNode$2("span", _hoisted_5$2, _toDisplayString$2(node.dir.total_fonts ?? node.dir.fonts.length), 1)
+                                          _createElementVNode$2("span", _hoisted_6$2, _toDisplayString$2(node.dir.total_fonts ?? node.dir.fonts.length), 1)
                                         ]),
                                         default: _withCtx$2(() => [
                                           _createVNode$2(_component_v_list_item_title, { class: "zt-dir-name" }, {
@@ -1892,12 +1973,12 @@ return (_ctx, _cache) => {
                 _createVNode$2(_component_v_card_text, { class: "pa-0" }, {
                   default: _withCtx$2(() => [
                     (!selectedFont.value)
-                      ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_6$2, " 点击左侧字体查看详情与预览 "))
-                      : (_openBlock$2(), _createElementBlock$2("div", _hoisted_7$2, [
-                          _createElementVNode$2("div", _hoisted_8$2, [
-                            _createElementVNode$2("div", _hoisted_9$2, [
-                              _createElementVNode$2("div", _hoisted_10$2, _toDisplayString$2(selectedFont.value.name || selectedFont.value.family || selectedFont.value.file_name), 1),
-                              _createElementVNode$2("div", _hoisted_11$2, [
+                      ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_7$2, " 点击左侧字体查看详情与预览 "))
+                      : (_openBlock$2(), _createElementBlock$2("div", _hoisted_8$2, [
+                          _createElementVNode$2("div", _hoisted_9$2, [
+                            _createElementVNode$2("div", _hoisted_10$2, [
+                              _createElementVNode$2("div", _hoisted_11$2, _toDisplayString$2(selectedFont.value.name || selectedFont.value.family || selectedFont.value.file_name), 1),
+                              _createElementVNode$2("div", _hoisted_12$2, [
                                 _createTextVNode$2(_toDisplayString$2(selectedFont.value.family || '未知字族') + " ", 1),
                                 _createVNode$2(_component_v_chip, {
                                   color: selectedFont.value.source === 'manual' ? 'primary' : 'success',
@@ -1971,25 +2052,25 @@ return (_ctx, _cache) => {
                             })
                           ]),
                           _createVNode$2(_component_v_divider, { class: "mb-3" }),
-                          _createElementVNode$2("div", _hoisted_12$2, [
-                            _createElementVNode$2("div", _hoisted_13$2, [
+                          _createElementVNode$2("div", _hoisted_13$2, [
+                            _createElementVNode$2("div", _hoisted_14$2, [
                               _cache[33] || (_cache[33] = _createElementVNode$2("div", { class: "zt-meta-label" }, "厂商", -1)),
-                              _createElementVNode$2("div", _hoisted_14$2, _toDisplayString$2(selectedFont.value.vendor || '未知厂商'), 1)
+                              _createElementVNode$2("div", _hoisted_15$2, _toDisplayString$2(selectedFont.value.vendor || '未知厂商'), 1)
                             ]),
-                            _createElementVNode$2("div", _hoisted_15$2, [
+                            _createElementVNode$2("div", _hoisted_16$2, [
                               _cache[34] || (_cache[34] = _createElementVNode$2("div", { class: "zt-meta-label" }, "设计师", -1)),
-                              _createElementVNode$2("div", _hoisted_16$2, _toDisplayString$2(selectedFont.value.designer || '未知设计师'), 1)
+                              _createElementVNode$2("div", _hoisted_17$2, _toDisplayString$2(selectedFont.value.designer || '未知设计师'), 1)
                             ]),
-                            _createElementVNode$2("div", _hoisted_17$2, [
+                            _createElementVNode$2("div", _hoisted_18$2, [
                               _cache[35] || (_cache[35] = _createElementVNode$2("div", { class: "zt-meta-label" }, "文件名", -1)),
-                              _createElementVNode$2("div", _hoisted_18$2, _toDisplayString$2(selectedFont.value.file_name), 1)
+                              _createElementVNode$2("div", _hoisted_19$2, _toDisplayString$2(selectedFont.value.file_name), 1)
                             ]),
-                            _createElementVNode$2("div", _hoisted_19$2, [
+                            _createElementVNode$2("div", _hoisted_20$2, [
                               _cache[36] || (_cache[36] = _createElementVNode$2("div", { class: "zt-meta-label" }, "大小", -1)),
-                              _createElementVNode$2("div", _hoisted_20$2, _toDisplayString$2(selectedFont.value.file_size ? (selectedFont.value.file_size / 1024).toFixed(0) + ' KB' : '-'), 1)
+                              _createElementVNode$2("div", _hoisted_21$2, _toDisplayString$2(selectedFont.value.file_size ? (selectedFont.value.file_size / 1024).toFixed(0) + ' KB' : '-'), 1)
                             ])
                           ]),
-                          _createElementVNode$2("div", _hoisted_21$2, [
+                          _createElementVNode$2("div", _hoisted_22$2, [
                             _createVNode$2(_component_v_icon, {
                               start: "",
                               size: "16"
@@ -2019,7 +2100,7 @@ return (_ctx, _cache) => {
                                 }))
                               : _createCommentVNode$2("", true)
                           ]),
-                          _createElementVNode$2("div", _hoisted_22$2, [
+                          _createElementVNode$2("div", _hoisted_23$2, [
                             (faceLoading.value)
                               ? (_openBlock$2(), _createBlock$2(_component_v_progress_circular, {
                                   key: 0,
@@ -2028,7 +2109,7 @@ return (_ctx, _cache) => {
                                   class: "ma-4"
                                 }))
                               : (faceError.value)
-                                ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_23$2, _toDisplayString$2(faceError.value), 1))
+                                ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_24$2, _toDisplayString$2(faceError.value), 1))
                                 : (_openBlock$2(), _createElementBlock$2("div", {
                                     key: 2,
                                     style: _normalizeStyle(previewStyle.value)
@@ -2039,7 +2120,7 @@ return (_ctx, _cache) => {
                                     _cache[39] || (_cache[39] = _createElementVNode$2("div", { style: {"font-size":"16px","margin-top":"8px"} }, " ABCDEFGHIJKLM · abcdefghijklm · 0123456789 ", -1))
                                   ], 4))
                           ]),
-                          _createElementVNode$2("div", _hoisted_24$2, [
+                          _createElementVNode$2("div", _hoisted_25$2, [
                             _cache[40] || (_cache[40] = _createElementVNode$2("span", { class: "zt-preview-control-label" }, "字号", -1)),
                             _createVNode$2(_component_v_slider, {
                               modelValue: previewSize.value,
@@ -2158,7 +2239,7 @@ return (_ctx, _cache) => {
                   ]),
                   _: 1
                 }),
-                _createElementVNode$2("div", _hoisted_25$2, [
+                _createElementVNode$2("div", _hoisted_26$2, [
                   _createVNode$2(_component_v_btn, {
                     color: "success",
                     variant: "tonal",
@@ -2386,9 +2467,9 @@ return (_ctx, _cache) => {
                       class: "zt-preview-loading"
                     }))
                   : (previewError.value)
-                    ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_26$2, _toDisplayString$2(previewError.value), 1))
-                    : (_openBlock$2(), _createElementBlock$2("div", _hoisted_27$2, [
-                        _createElementVNode$2("div", _hoisted_28$2, [
+                    ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_27$2, _toDisplayString$2(previewError.value), 1))
+                    : (_openBlock$2(), _createElementBlock$2("div", _hoisted_28$2, [
+                        _createElementVNode$2("div", _hoisted_29$2, [
                           _createTextVNode$2(_toDisplayString$2(previewName.value) + " ", 1),
                           (previewCharCount.value)
                             ? (_openBlock$2(), _createBlock$2(_component_v_chip, {
@@ -2409,8 +2490,8 @@ return (_ctx, _cache) => {
                               }))
                             : _createCommentVNode$2("", true)
                         ]),
-                        _createElementVNode$2("div", _hoisted_29$1, _toDisplayString$2(previewFamily.value), 1),
-                        _createElementVNode$2("div", _hoisted_30$1, [
+                        _createElementVNode$2("div", _hoisted_30$1, _toDisplayString$2(previewFamily.value), 1),
+                        _createElementVNode$2("div", _hoisted_31$1, [
                           _cache[64] || (_cache[64] = _createElementVNode$2("span", { class: "zt-preview-control-label" }, "字号", -1)),
                           _createVNode$2(_component_v_slider, {
                             modelValue: previewSize.value,
@@ -2455,74 +2536,75 @@ return (_ctx, _cache) => {
 }
 
 };
-const FontLibrary = /*#__PURE__*/_export_sfc(_sfc_main$2, [['__scopeId',"data-v-7b3b9d72"]]);
+const FontLibrary = /*#__PURE__*/_export_sfc(_sfc_main$2, [['__scopeId',"data-v-41da98ea"]]);
 
-const {createTextVNode:_createTextVNode$1,resolveComponent:_resolveComponent$1,withCtx:_withCtx$1,createVNode:_createVNode$1,createElementVNode:_createElementVNode$1,toDisplayString:_toDisplayString$1,openBlock:_openBlock$1,createElementBlock:_createElementBlock$1,createCommentVNode:_createCommentVNode$1,createBlock:_createBlock$1,renderList:_renderList$1,Fragment:_Fragment$1,withModifiers:_withModifiers,normalizeClass:_normalizeClass$1} = await importShared('vue');
+const {createTextVNode:_createTextVNode$1,resolveComponent:_resolveComponent$1,withCtx:_withCtx$1,createVNode:_createVNode$1,unref:_unref,createElementVNode:_createElementVNode$1,toDisplayString:_toDisplayString$1,openBlock:_openBlock$1,createElementBlock:_createElementBlock$1,createCommentVNode:_createCommentVNode$1,createBlock:_createBlock$1,renderList:_renderList$1,Fragment:_Fragment$1,withModifiers:_withModifiers,normalizeClass:_normalizeClass$1} = await importShared('vue');
 
 
 const _hoisted_1$1 = { class: "zt-check" };
 const _hoisted_2$1 = { class: "d-flex align-center flex-wrap mb-4" };
-const _hoisted_3$1 = {
+const _hoisted_3$1 = ["accept"];
+const _hoisted_4$1 = {
   key: 0,
   class: "zt-match-source mb-2"
 };
-const _hoisted_4$1 = { class: "zt-title-text" };
-const _hoisted_5$1 = { class: "zt-filter-row" };
-const _hoisted_6$1 = {
+const _hoisted_5$1 = { class: "zt-title-text" };
+const _hoisted_6$1 = { class: "zt-filter-row" };
+const _hoisted_7$1 = {
   key: 0,
   class: "zt-empty pa-6"
 };
-const _hoisted_7$1 = {
+const _hoisted_8$1 = {
   key: 1,
   class: "zt-group-wrap"
 };
-const _hoisted_8$1 = ["onClick"];
-const _hoisted_9$1 = ["title"];
-const _hoisted_10$1 = { class: "zt-group-count" };
-const _hoisted_11$1 = { class: "zt-group-stats" };
-const _hoisted_12$1 = { class: "zt-group-actions" };
-const _hoisted_13$1 = {
-  key: 0,
-  class: "zt-group-body"
-};
+const _hoisted_9$1 = ["onClick"];
+const _hoisted_10$1 = ["title"];
+const _hoisted_11$1 = { class: "zt-group-count" };
+const _hoisted_12$1 = { class: "zt-group-stats" };
+const _hoisted_13$1 = { class: "zt-group-actions" };
 const _hoisted_14$1 = {
   key: 0,
-  class: "zt-loading-more pa-2 text-center"
+  class: "zt-group-body"
 };
 const _hoisted_15$1 = {
   key: 0,
   class: "zt-loading-more pa-2 text-center"
 };
 const _hoisted_16$1 = {
+  key: 0,
+  class: "zt-loading-more pa-2 text-center"
+};
+const _hoisted_17$1 = {
   key: 1,
   class: "zt-empty pa-6"
 };
-const _hoisted_17$1 = {
+const _hoisted_18$1 = {
   key: 2,
   class: "pa-4"
 };
-const _hoisted_18$1 = { class: "d-flex align-center mb-3 flex-wrap" };
-const _hoisted_19$1 = { class: "flex-grow-1" };
-const _hoisted_20$1 = { class: "zt-detail-title text-subtitle-1" };
-const _hoisted_21$1 = { class: "zt-detail-meta text-body-2" };
-const _hoisted_22$1 = {
+const _hoisted_19$1 = { class: "d-flex align-center mb-3 flex-wrap" };
+const _hoisted_20$1 = { class: "flex-grow-1" };
+const _hoisted_21$1 = { class: "zt-detail-title text-subtitle-1" };
+const _hoisted_22$1 = { class: "zt-detail-meta text-body-2" };
+const _hoisted_23$1 = {
   key: 0,
   class: "mb-4 zt-inline-ok"
 };
-const _hoisted_23$1 = { class: "mb-2" };
-const _hoisted_24$1 = { class: "zt-section-label" };
-const _hoisted_25$1 = { class: "zt-missing-list mb-4" };
-const _hoisted_26$1 = {
+const _hoisted_24$1 = { class: "mb-2" };
+const _hoisted_25$1 = { class: "zt-section-label" };
+const _hoisted_26$1 = { class: "zt-missing-list mb-4" };
+const _hoisted_27$1 = {
   key: 0,
   class: "zt-empty2"
 };
-const _hoisted_27$1 = { class: "zt-missing-chip-body" };
-const _hoisted_28$1 = {
+const _hoisted_28$1 = { class: "zt-missing-chip-body" };
+const _hoisted_29$1 = {
   key: 0,
   class: "zt-missing-chars"
 };
-const _hoisted_29 = { class: "zt-section-label" };
-const _hoisted_30 = { class: "zt-all-list" };
+const _hoisted_30 = { class: "zt-section-label" };
+const _hoisted_31 = { class: "zt-all-list" };
 
 const {computed: computed$1,onActivated,onDeactivated,onMounted: onMounted$1,onUnmounted,ref: ref$1,watch: watch$1} = await importShared('vue');
 
@@ -2756,6 +2838,7 @@ async function handleUpload(event) {
   const pad = n => String(n).padStart(2, '0');
   const batchLabel = `手动上传 ${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
   let total = 0;
+  const notes = [];
   uploading.value = true;
   try {
     for (let i = 0; i < files.length; i += BATCH) {
@@ -2774,9 +2857,12 @@ async function handleUpload(event) {
         break
       } else {
         total += (body?.data?.count ?? chunk.length);
+        if (Array.isArray(body?.data?.notes)) notes.push(...body.data.notes);
       }
     }
     emit('notify', `已上传 ${total} 个字幕，点击上方「检查」对比字体库`, 'success');
+    const noteText = formatNotes(notes);
+    if (noteText) emit('notify', `部分文件被跳过：${noteText}`, 'warning');
     // 不自动选中任何记录：右侧保持空，等待点击左侧
     await loadRecords(true, true);
   } catch (e) {
@@ -3063,11 +3149,11 @@ return (_ctx, _cache) => {
         ref_key: "uploadRef",
         ref: uploadRef,
         type: "file",
-        accept: ".ass,.ASS,.zip,.7z,.rar",
+        accept: _unref(uploadAcceptFor)(_unref(DESKTOP_ACCEPT_ASS)),
         multiple: "",
         style: {"display":"none"},
         onChange: handleUpload
-      }, null, 544),
+      }, null, 40, _hoisted_3$1),
       _createVNode$1(_component_v_btn, {
         color: "success",
         variant: "tonal",
@@ -3118,7 +3204,7 @@ return (_ctx, _cache) => {
     ]),
     _cache[47] || (_cache[47] = _createElementVNode$1("div", { class: "zt-tip text-body-2 mb-2" }, " 上传字幕仅登记为「待检查」；点顶部「检查」一次性检查全部，或点左侧每组 / 每条的「检查」单独检查；缺字体的补字/入库请到「缺失字体」页 ", -1)),
     (matchSourceText.value)
-      ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_3$1, " 匹配基准：" + _toDisplayString$1(matchSourceText.value), 1))
+      ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_4$1, " 匹配基准：" + _toDisplayString$1(matchSourceText.value), 1))
       : _createCommentVNode$1("", true),
     _createVNode$1(_component_v_row, { "no-gutters": "" }, {
       default: _withCtx$1(() => [
@@ -3140,7 +3226,7 @@ return (_ctx, _cache) => {
                       ]))]),
                       _: 1
                     }),
-                    _createElementVNode$1("span", _hoisted_4$1, "检查记录（" + _toDisplayString$1(filteredRecords.value.length) + "）", 1),
+                    _createElementVNode$1("span", _hoisted_5$1, "检查记录（" + _toDisplayString$1(filteredRecords.value.length) + "）", 1),
                     _createVNode$1(_component_v_spacer),
                     _createVNode$1(_component_v_btn, {
                       size: "small",
@@ -3169,7 +3255,7 @@ return (_ctx, _cache) => {
                   _: 1
                 }),
                 _createVNode$1(_component_v_divider),
-                _createElementVNode$1("div", _hoisted_5$1, [
+                _createElementVNode$1("div", _hoisted_6$1, [
                   _createVNode$1(_component_v_select, {
                     modelValue: filterStatus.value,
                     "onUpdate:modelValue": _cache[2] || (_cache[2] = $event => ((filterStatus).value = $event)),
@@ -3206,8 +3292,8 @@ return (_ctx, _cache) => {
                   onScroll: onRecordsScroll
                 }, [
                   (!loadingList.value && !groupedRecords.value.length)
-                    ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_6$1, _toDisplayString$1(filterStatus.value || search.value ? '暂无匹配的检查记录' : '暂无检查记录，上传 ASS 字幕后点击「检查」对比字体库'), 1))
-                    : (_openBlock$1(), _createElementBlock$1("div", _hoisted_7$1, [
+                    ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_7$1, _toDisplayString$1(filterStatus.value || search.value ? '暂无匹配的检查记录' : '暂无检查记录，上传 ASS 字幕后点击「检查」对比字体库'), 1))
+                    : (_openBlock$1(), _createElementBlock$1("div", _hoisted_8$1, [
                         (_openBlock$1(true), _createElementBlock$1(_Fragment$1, null, _renderList$1(visibleGroups.value, (g) => {
                           return (_openBlock$1(), _createElementBlock$1("div", {
                             key: g.key,
@@ -3235,9 +3321,9 @@ return (_ctx, _cache) => {
                               _createElementVNode$1("span", {
                                 class: "zt-group-name",
                                 title: g.label
-                              }, _toDisplayString$1(g.label), 9, _hoisted_9$1),
-                              _createElementVNode$1("span", _hoisted_10$1, _toDisplayString$1(g.records.length), 1),
-                              _createElementVNode$1("span", _hoisted_11$1, [
+                              }, _toDisplayString$1(g.label), 9, _hoisted_10$1),
+                              _createElementVNode$1("span", _hoisted_11$1, _toDisplayString$1(g.records.length), 1),
+                              _createElementVNode$1("span", _hoisted_12$1, [
                                 (g.stats.ok)
                                   ? (_openBlock$1(), _createBlock$1(_component_v_chip, {
                                       key: 0,
@@ -3278,7 +3364,7 @@ return (_ctx, _cache) => {
                                     }, 1024))
                                   : _createCommentVNode$1("", true)
                               ]),
-                              _createElementVNode$1("span", _hoisted_12$1, [
+                              _createElementVNode$1("span", _hoisted_13$1, [
                                 _createVNode$1(_component_v_btn, {
                                   size: "x-small",
                                   variant: "tonal",
@@ -3324,9 +3410,9 @@ return (_ctx, _cache) => {
                                   _: 1
                                 }, 8, ["disabled", "onClick"])
                               ])
-                            ], 8, _hoisted_8$1),
+                            ], 8, _hoisted_9$1),
                             (g.expanded)
-                              ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_13$1, [
+                              ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_14$1, [
                                   _createVNode$1(_component_v_list, {
                                     density: "compact",
                                     class: "pa-0"
@@ -3482,14 +3568,14 @@ return (_ctx, _cache) => {
                                     _: 2
                                   }, 1024),
                                   (g.truncated)
-                                    ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_14$1, " 还有 " + _toDisplayString$1(g.records.length - g.visibleRecords.length) + " 条，下拉加载… ", 1))
+                                    ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_15$1, " 还有 " + _toDisplayString$1(g.records.length - g.visibleRecords.length) + " 条，下拉加载… ", 1))
                                     : _createCommentVNode$1("", true)
                                 ]))
                               : _createCommentVNode$1("", true)
                           ], 2))
                         }), 128)),
                         (hasMoreRecords.value)
-                          ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_15$1, [
+                          ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_16$1, [
                               _createVNode$1(_component_v_btn, {
                                 size: "small",
                                 variant: "text",
@@ -3527,12 +3613,12 @@ return (_ctx, _cache) => {
                           class: "zt-detail-loading"
                         }))
                       : (!detail.value)
-                        ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_16$1, " 点击左侧记录查看详情 "))
-                        : (_openBlock$1(), _createElementBlock$1("div", _hoisted_17$1, [
-                            _createElementVNode$1("div", _hoisted_18$1, [
-                              _createElementVNode$1("div", _hoisted_19$1, [
-                                _createElementVNode$1("div", _hoisted_20$1, _toDisplayString$1(detail.value.file_name), 1),
-                                _createElementVNode$1("div", _hoisted_21$1, [
+                        ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_17$1, " 点击左侧记录查看详情 "))
+                        : (_openBlock$1(), _createElementBlock$1("div", _hoisted_18$1, [
+                            _createElementVNode$1("div", _hoisted_19$1, [
+                              _createElementVNode$1("div", _hoisted_20$1, [
+                                _createElementVNode$1("div", _hoisted_21$1, _toDisplayString$1(detail.value.file_name), 1),
+                                _createElementVNode$1("div", _hoisted_22$1, [
                                   _createTextVNode$1(" 检查时间：" + _toDisplayString$1(detail.value.check_time) + " ", 1),
                                   _createVNode$1(_component_v_chip, {
                                     size: "x-small",
@@ -3625,7 +3711,7 @@ return (_ctx, _cache) => {
                             (detail.value.status !== 'pending')
                               ? (_openBlock$1(), _createElementBlock$1(_Fragment$1, { key: 3 }, [
                                   (detail.value.subsetted)
-                                    ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_22$1, [
+                                    ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_23$1, [
                                         _createVNode$1(_component_v_icon, {
                                           start: "",
                                           size: "16",
@@ -3639,7 +3725,7 @@ return (_ctx, _cache) => {
                                         _cache[35] || (_cache[35] = _createElementVNode$1("span", { class: "zt-section-label" }, "该字幕已内嵌（子集化）字体，无需检查缺失字体", -1))
                                       ]))
                                     : (_openBlock$1(), _createElementBlock$1(_Fragment$1, { key: 1 }, [
-                                        _createElementVNode$1("div", _hoisted_23$1, [
+                                        _createElementVNode$1("div", _hoisted_24$1, [
                                           _createVNode$1(_component_v_icon, {
                                             start: "",
                                             size: "16",
@@ -3650,11 +3736,11 @@ return (_ctx, _cache) => {
                                             ]))]),
                                             _: 1
                                           }),
-                                          _createElementVNode$1("span", _hoisted_24$1, "缺失字体（" + _toDisplayString$1(detail.value.missing_fonts?.length || 0) + "）", 1)
+                                          _createElementVNode$1("span", _hoisted_25$1, "缺失字体（" + _toDisplayString$1(detail.value.missing_fonts?.length || 0) + "）", 1)
                                         ]),
-                                        _createElementVNode$1("div", _hoisted_25$1, [
+                                        _createElementVNode$1("div", _hoisted_26$1, [
                                           (!(detail.value.missing_fonts?.length))
-                                            ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_26$1, [
+                                            ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_27$1, [
                                                 _createVNode$1(_component_v_icon, {
                                                   color: "success",
                                                   size: "16",
@@ -3677,10 +3763,10 @@ return (_ctx, _cache) => {
                                               class: "ma-1 zt-missing-chip"
                                             }, {
                                               default: _withCtx$1(() => [
-                                                _createElementVNode$1("div", _hoisted_27$1, [
+                                                _createElementVNode$1("div", _hoisted_28$1, [
                                                   _createElementVNode$1("span", null, _toDisplayString$1(f), 1),
                                                   (missingCharText(f))
-                                                    ? (_openBlock$1(), _createElementBlock$1("span", _hoisted_28$1, " 缺 " + _toDisplayString$1(missingCharCount(f)) + " 字符：" + _toDisplayString$1(missingCharText(f)), 1))
+                                                    ? (_openBlock$1(), _createElementBlock$1("span", _hoisted_29$1, " 缺 " + _toDisplayString$1(missingCharCount(f)) + " 字符：" + _toDisplayString$1(missingCharText(f)), 1))
                                                     : _createCommentVNode$1("", true)
                                                 ]),
                                                 _createVNode$1(_component_v_icon, {
@@ -3709,9 +3795,9 @@ return (_ctx, _cache) => {
                                       ]))]),
                                       _: 1
                                     }),
-                                    _createElementVNode$1("span", _hoisted_29, "使用的全部字体（" + _toDisplayString$1(detail.value.all_fonts?.length || 0) + "）", 1)
+                                    _createElementVNode$1("span", _hoisted_30, "使用的全部字体（" + _toDisplayString$1(detail.value.all_fonts?.length || 0) + "）", 1)
                                   ]),
-                                  _createElementVNode$1("div", _hoisted_30, [
+                                  _createElementVNode$1("div", _hoisted_31, [
                                     (_openBlock$1(true), _createElementBlock$1(_Fragment$1, null, _renderList$1(detail.value.all_fonts || [], (f) => {
                                       return (_openBlock$1(), _createBlock$1(_component_v_chip, {
                                         key: f.name || f,
@@ -3862,7 +3948,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const Check = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-8c4566b3"]]);
+const Check = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-5cd87b2a"]]);
 
 const {createTextVNode:_createTextVNode,resolveComponent:_resolveComponent,withCtx:_withCtx,createVNode:_createVNode,createElementVNode:_createElementVNode,openBlock:_openBlock,createBlock:_createBlock,createCommentVNode:_createCommentVNode,renderList:_renderList,Fragment:_Fragment,createElementBlock:_createElementBlock,toDisplayString:_toDisplayString,normalizeClass:_normalizeClass} = await importShared('vue');
 
@@ -3886,24 +3972,25 @@ const _hoisted_13 = { class: "zt-switch-row" };
 const _hoisted_14 = { class: "zt-switch-row mt-2" };
 const _hoisted_15 = { class: "zt-hint" };
 const _hoisted_16 = { key: 0 };
-const _hoisted_17 = { class: "d-flex flex-wrap ga-2 mt-2" };
-const _hoisted_18 = {
+const _hoisted_17 = { key: 1 };
+const _hoisted_18 = { class: "d-flex flex-wrap ga-2 mt-2" };
+const _hoisted_19 = {
   key: 0,
   class: "mt-2"
 };
-const _hoisted_19 = { key: 0 };
-const _hoisted_20 = { key: 1 };
-const _hoisted_21 = {
+const _hoisted_20 = { key: 0 };
+const _hoisted_21 = { key: 1 };
+const _hoisted_22 = {
   key: 1,
   class: "zt-hint mt-2"
 };
-const _hoisted_22 = { class: "zt-switch-row" };
 const _hoisted_23 = { class: "zt-switch-row" };
 const _hoisted_24 = { class: "zt-switch-row" };
-const _hoisted_25 = { class: "zt-radio-title" };
-const _hoisted_26 = { class: "zt-radio-desc" };
-const _hoisted_27 = { class: "zt-switch-row" };
-const _hoisted_28 = { class: "d-flex justify-end mt-4" };
+const _hoisted_25 = { class: "zt-switch-row" };
+const _hoisted_26 = { class: "zt-radio-title" };
+const _hoisted_27 = { class: "zt-radio-desc" };
+const _hoisted_28 = { class: "zt-switch-row" };
+const _hoisted_29 = { class: "d-flex justify-end mt-4" };
 
 const {computed,onMounted,ref,watch} = await importShared('vue');
 
@@ -4067,6 +4154,8 @@ const torrentStatus = ref({ downloaders: [], tools: {}, baseline_text: '', runni
 const torrentRecords = ref([]);
 const torrentBusy = ref(false);
 const torrentClearing = ref(false);
+// 一键安装容器内解压工具（.7z/.rar 上传与种子字体收集都依赖它）
+const archiveToolInstalling = ref(false);
 
 const TORRENT_STATUS_TEXT = { done: '完成', empty: '无字体', failed: '失败', partial: '部分成功' };
 const recordStatusText = (s) => TORRENT_STATUS_TEXT[s] || s || '';
@@ -4120,6 +4209,21 @@ async function scanTorrents() {
     emit('notify', e.message || '检查下载器失败');
   } finally {
     torrentBusy.value = false;
+  }
+}
+
+// 一键在容器内安装解压工具（apt/apk 安装 unar/7zip）；容器重建/更新镜像后需要重新安装
+async function installArchiveTools() {
+  if (archiveToolInstalling.value) return
+  archiveToolInstalling.value = true;
+  try {
+    const res = await apiModule.post(props.api, '/archive/tools/install', {});
+    emit('notify', res?.message || '解压工具安装完成', 'success');
+    await loadTorrentStatus();
+  } catch (e) {
+    emit('notify', e.message || '安装解压工具失败');
+  } finally {
+    archiveToolInstalling.value = false;
   }
 }
 
@@ -4670,14 +4774,40 @@ return (_ctx, _cache) => {
               _createElementVNode("div", _hoisted_15, [
                 _createTextVNode(" 下载器：" + _toDisplayString(torrentDownloaderText.value), 1),
                 _cache[55] || (_cache[55] = _createElementVNode("br", null, null, -1)),
-                _createTextVNode(" 解压能力：" + _toDisplayString(torrentToolText.value) + "（7z/rar 需容器内安装 p7zip/unar，未装时只解 zip）", 1),
+                _createTextVNode(" 解压能力：" + _toDisplayString(torrentToolText.value), 1),
+                (torrentStatus.value.tools.hint)
+                  ? (_openBlock(), _createElementBlock("span", _hoisted_16, " · " + _toDisplayString(torrentStatus.value.tools.hint), 1))
+                  : _createCommentVNode("", true),
                 _cache[56] || (_cache[56] = _createElementVNode("br", null, null, -1)),
                 _createTextVNode(" 基线：" + _toDisplayString(torrentStatus.value.baseline_text || '未设置') + "（只处理基线之后完成的种子，历史不碰）", 1),
                 (torrentStatus.value.running)
-                  ? (_openBlock(), _createElementBlock("span", _hoisted_16, " · 正在收集 " + _toDisplayString(torrentStatus.value.running) + " 个", 1))
+                  ? (_openBlock(), _createElementBlock("span", _hoisted_17, " · 正在收集 " + _toDisplayString(torrentStatus.value.running) + " 个", 1))
                   : _createCommentVNode("", true)
               ]),
-              _createElementVNode("div", _hoisted_17, [
+              _createElementVNode("div", _hoisted_18, [
+                _createVNode(_component_v_btn, {
+                  size: "small",
+                  color: "warning",
+                  variant: "tonal",
+                  loading: archiveToolInstalling.value,
+                  disabled: torrentStatus.value.tools.can_install === false,
+                  title: "在容器内用 apt/apk 安装/修复 unar（可解 .7z/.rar）；容器重建后需要重新安装",
+                  onClick: installArchiveTools
+                }, {
+                  default: _withCtx(() => [
+                    _createVNode(_component_v_icon, {
+                      start: "",
+                      size: "16"
+                    }, {
+                      default: _withCtx(() => [...(_cache[57] || (_cache[57] = [
+                        _createTextVNode("mdi-archive-arrow-up-outline", -1)
+                      ]))]),
+                      _: 1
+                    }),
+                    _cache[58] || (_cache[58] = _createTextVNode(" 安装/修复解压工具 ", -1))
+                  ]),
+                  _: 1
+                }, 8, ["loading", "disabled"]),
                 _createVNode(_component_v_btn, {
                   size: "small",
                   color: "primary",
@@ -4691,12 +4821,12 @@ return (_ctx, _cache) => {
                       start: "",
                       size: "16"
                     }, {
-                      default: _withCtx(() => [...(_cache[57] || (_cache[57] = [
+                      default: _withCtx(() => [...(_cache[59] || (_cache[59] = [
                         _createTextVNode("mdi-magnify-scan", -1)
                       ]))]),
                       _: 1
                     }),
-                    _cache[58] || (_cache[58] = _createTextVNode(" 立即检查下载器 ", -1))
+                    _cache[60] || (_cache[60] = _createTextVNode(" 立即检查下载器 ", -1))
                   ]),
                   _: 1
                 }, 8, ["loading", "disabled"]),
@@ -4710,12 +4840,12 @@ return (_ctx, _cache) => {
                       start: "",
                       size: "16"
                     }, {
-                      default: _withCtx(() => [...(_cache[59] || (_cache[59] = [
+                      default: _withCtx(() => [...(_cache[61] || (_cache[61] = [
                         _createTextVNode("mdi-clock-outline", -1)
                       ]))]),
                       _: 1
                     }),
-                    _cache[60] || (_cache[60] = _createTextVNode(" 重置基线为现在 ", -1))
+                    _cache[62] || (_cache[62] = _createTextVNode(" 重置基线为现在 ", -1))
                   ]),
                   _: 1
                 }),
@@ -4732,19 +4862,19 @@ return (_ctx, _cache) => {
                       start: "",
                       size: "16"
                     }, {
-                      default: _withCtx(() => [...(_cache[61] || (_cache[61] = [
+                      default: _withCtx(() => [...(_cache[63] || (_cache[63] = [
                         _createTextVNode("mdi-delete-sweep", -1)
                       ]))]),
                       _: 1
                     }),
-                    _cache[62] || (_cache[62] = _createTextVNode(" 清空记录 ", -1))
+                    _cache[64] || (_cache[64] = _createTextVNode(" 清空记录 ", -1))
                   ]),
                   _: 1
                 }, 8, ["loading", "disabled"])
               ]),
               (torrentRecords.value.length)
-                ? (_openBlock(), _createElementBlock("div", _hoisted_18, [
-                    _cache[63] || (_cache[63] = _createElementVNode("div", { class: "zt-option-label mb-1" }, "最近处理记录", -1)),
+                ? (_openBlock(), _createElementBlock("div", _hoisted_19, [
+                    _cache[65] || (_cache[65] = _createElementVNode("div", { class: "zt-option-label mb-1" }, "最近处理记录", -1)),
                     (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(torrentRecords.value, (r) => {
                       return (_openBlock(), _createElementBlock("div", {
                         key: r.id,
@@ -4753,15 +4883,15 @@ return (_ctx, _cache) => {
                       }, [
                         _createTextVNode(_toDisplayString(r.created_at) + " · " + _toDisplayString(recordStatusText(r.status)) + " · " + _toDisplayString(r.torrent_name || (r.hash || '').slice(0, 8)) + " · 新增 " + _toDisplayString(r.added) + " / 跳过 " + _toDisplayString(r.skipped), 1),
                         (r.failed)
-                          ? (_openBlock(), _createElementBlock("span", _hoisted_19, " / 失败 " + _toDisplayString(r.failed), 1))
+                          ? (_openBlock(), _createElementBlock("span", _hoisted_20, " / 失败 " + _toDisplayString(r.failed), 1))
                           : _createCommentVNode("", true),
                         (r.detail)
-                          ? (_openBlock(), _createElementBlock("span", _hoisted_20, " — " + _toDisplayString(r.detail), 1))
+                          ? (_openBlock(), _createElementBlock("span", _hoisted_21, " — " + _toDisplayString(r.detail), 1))
                           : _createCommentVNode("", true)
                       ]))
                     }), 128))
                   ]))
-                : (_openBlock(), _createElementBlock("div", _hoisted_21, "暂无处理记录"))
+                : (_openBlock(), _createElementBlock("div", _hoisted_22, "暂无处理记录"))
             ]),
             _: 1
           })
@@ -4776,19 +4906,19 @@ return (_ctx, _cache) => {
                 start: "",
                 size: "18"
               }, {
-                default: _withCtx(() => [...(_cache[64] || (_cache[64] = [
+                default: _withCtx(() => [...(_cache[66] || (_cache[66] = [
                   _createTextVNode("mdi-subtitles-outline", -1)
                 ]))]),
                 _: 1
               }),
-              _cache[65] || (_cache[65] = _createTextVNode(" 子集化设置 ", -1))
+              _cache[67] || (_cache[67] = _createTextVNode(" 子集化设置 ", -1))
             ]),
             _: 1
           }),
           _createVNode(_component_v_card_text, null, {
             default: _withCtx(() => [
-              _createElementVNode("div", _hoisted_22, [
-                _cache[66] || (_cache[66] = _createElementVNode("div", { class: "flex-grow-1" }, [
+              _createElementVNode("div", _hoisted_23, [
+                _cache[68] || (_cache[68] = _createElementVNode("div", { class: "flex-grow-1" }, [
                   _createElementVNode("div", { class: "zt-switch-title" }, "入库后自动子集化"),
                   _createElementVNode("div", { class: "zt-switch-desc" }, "MP 转存完成时，对新增字幕执行子集化并内嵌字体（结果可在「子集化」页查看；与「入库自动检查字幕」互斥，同时只能开一个）")
                 ], -1)),
@@ -4799,8 +4929,8 @@ return (_ctx, _cache) => {
                   "hide-details": ""
                 }, null, 8, ["modelValue"])
               ]),
-              _createElementVNode("div", _hoisted_23, [
-                _cache[67] || (_cache[67] = _createElementVNode("div", { class: "flex-grow-1" }, [
+              _createElementVNode("div", _hoisted_24, [
+                _cache[69] || (_cache[69] = _createElementVNode("div", { class: "flex-grow-1" }, [
                   _createElementVNode("div", { class: "zt-switch-title" }, "MP 入库替换原字幕"),
                   _createElementVNode("div", { class: "zt-switch-desc" }, "开：入库子集化的成品直接替换媒体库原字幕（文件名不变，媒体库只保留一份）；关：保留原字幕，另生成 xx.ziti.ass 成品（默认）。只作用于 MP 入库，目录监控见下方「监控目录输出方式」，手动上传永不覆盖")
                 ], -1)),
@@ -4811,8 +4941,8 @@ return (_ctx, _cache) => {
                   "hide-details": ""
                 }, null, 8, ["modelValue"])
               ]),
-              _createElementVNode("div", _hoisted_24, [
-                _cache[68] || (_cache[68] = _createElementVNode("div", { class: "flex-grow-1" }, [
+              _createElementVNode("div", _hoisted_25, [
+                _cache[70] || (_cache[70] = _createElementVNode("div", { class: "flex-grow-1" }, [
                   _createElementVNode("div", { class: "zt-switch-title" }, "子集化进程隔离"),
                   _createElementVNode("div", { class: "zt-switch-desc" }, "开：字体子集化在独立工作进程执行，uharfbuzz 崩溃或病态字体只影响当前字幕，不会拖垮 MoviePilot 主进程；工作进程无法启动时自动回退进程内执行（默认开）")
                 ], -1)),
@@ -4823,7 +4953,7 @@ return (_ctx, _cache) => {
                   "hide-details": ""
                 }, null, 8, ["modelValue"])
               ]),
-              _cache[70] || (_cache[70] = _createElementVNode("div", { class: "zt-option-label mb-1 mt-2" }, "监控目录输出方式", -1)),
+              _cache[72] || (_cache[72] = _createElementVNode("div", { class: "zt-option-label mb-1 mt-2" }, "监控目录输出方式", -1)),
               _createVNode(_component_v_radio_group, {
                 modelValue: config.value.subset_out_mode,
                 "onUpdate:modelValue": _cache[25] || (_cache[25] = $event => ((config.value.subset_out_mode) = $event)),
@@ -4838,8 +4968,8 @@ return (_ctx, _cache) => {
                     }, {
                       label: _withCtx(() => [
                         _createElementVNode("div", null, [
-                          _createElementVNode("div", _hoisted_25, _toDisplayString(mode.title), 1),
-                          _createElementVNode("div", _hoisted_26, _toDisplayString(mode.description), 1)
+                          _createElementVNode("div", _hoisted_26, _toDisplayString(mode.title), 1),
+                          _createElementVNode("div", _hoisted_27, _toDisplayString(mode.description), 1)
                         ])
                       ]),
                       _: 2
@@ -4848,11 +4978,11 @@ return (_ctx, _cache) => {
                 ]),
                 _: 1
               }, 8, ["modelValue"]),
-              _cache[71] || (_cache[71] = _createElementVNode("div", { class: "zt-hint" }, "目录监控（ASS 自动子集化目录）的字幕成品按「输出目录/剧名/」子文件夹分类输出（如「你的名字.ass」→「你的名字」文件夹），多剧字幕互不混淆；手动上传的字幕子集结果留在插件临时文件夹，不受此设置影响。未配输出目录时不涉及复制/移动：复制=另生成 xx.ziti.ass 并保留源字幕，移动=成品就地替换源字幕", -1)),
-              _cache[72] || (_cache[72] = _createElementVNode("div", { class: "zt-hint" }, "字体已内嵌进 .ziti.ass 成品，不再产生 *_subsetted 字体备份夹；旧版本遗留的备份夹会在对应源字幕删除时自动清理", -1)),
-              _cache[73] || (_cache[73] = _createElementVNode("div", { class: "zt-option-label mb-1 mt-2" }, "HDR 字幕亮度", -1)),
-              _createElementVNode("div", _hoisted_27, [
-                _cache[69] || (_cache[69] = _createElementVNode("div", { class: "flex-grow-1" }, [
+              _cache[73] || (_cache[73] = _createElementVNode("div", { class: "zt-hint" }, "目录监控（ASS 自动子集化目录）的字幕成品按「输出目录/剧名/」子文件夹分类输出（如「你的名字.ass」→「你的名字」文件夹），多剧字幕互不混淆；手动上传的字幕子集结果留在插件临时文件夹，不受此设置影响。未配输出目录时不涉及复制/移动：复制=另生成 xx.ziti.ass 并保留源字幕，移动=成品就地替换源字幕", -1)),
+              _cache[74] || (_cache[74] = _createElementVNode("div", { class: "zt-hint" }, "字体已内嵌进 .ziti.ass 成品，不再产生 *_subsetted 字体备份夹；旧版本遗留的备份夹会在对应源字幕删除时自动清理", -1)),
+              _cache[75] || (_cache[75] = _createElementVNode("div", { class: "zt-option-label mb-1 mt-2" }, "HDR 字幕亮度", -1)),
+              _createElementVNode("div", _hoisted_28, [
+                _cache[71] || (_cache[71] = _createElementVNode("div", { class: "flex-grow-1" }, [
                   _createElementVNode("div", { class: "zt-switch-title" }, "启用 HDR 亮度压暗"),
                   _createElementVNode("div", { class: "zt-switch-desc" }, "子集化/上传处理的字幕成品按所选档位压暗主色/描边/阴影，避免 HDR 片源下纯白字幕刺眼")
                 ], -1)),
@@ -4880,7 +5010,7 @@ return (_ctx, _cache) => {
                 hint: "档位即纯白亮度百分比（80% ⭐ HDR 主流推荐）；选择「关」或留空则不调整",
                 "persistent-hint": ""
               }, null, 8, ["modelValue", "disabled"]),
-              _cache[74] || (_cache[74] = _createElementVNode("div", { class: "zt-hint" }, "应用范围：全量子集化、目录监控自动子集化、入库子集化处理后生成的成品字幕（原始字幕不受影响）", -1))
+              _cache[76] || (_cache[76] = _createElementVNode("div", { class: "zt-hint" }, "应用范围：全量子集化、目录监控自动子集化、入库子集化处理后生成的成品字幕（原始字幕不受影响）", -1))
             ]),
             _: 1
           })
@@ -4888,7 +5018,7 @@ return (_ctx, _cache) => {
         _: 1
       })
     ], 2),
-    _createElementVNode("div", _hoisted_28, [
+    _createElementVNode("div", _hoisted_29, [
       _createVNode(_component_v_btn, {
         color: "primary",
         variant: "tonal",
@@ -4900,12 +5030,12 @@ return (_ctx, _cache) => {
             start: "",
             size: "18"
           }, {
-            default: _withCtx(() => [...(_cache[75] || (_cache[75] = [
+            default: _withCtx(() => [...(_cache[77] || (_cache[77] = [
               _createTextVNode("mdi-content-save-outline", -1)
             ]))]),
             _: 1
           }),
-          _cache[76] || (_cache[76] = _createTextVNode(" 保存配置 ", -1))
+          _cache[78] || (_cache[78] = _createTextVNode(" 保存配置 ", -1))
         ]),
         _: 1
       }, 8, ["loading"])
@@ -4925,17 +5055,17 @@ return (_ctx, _cache) => {
                   size: "20",
                   color: "warning"
                 }, {
-                  default: _withCtx(() => [...(_cache[77] || (_cache[77] = [
+                  default: _withCtx(() => [...(_cache[79] || (_cache[79] = [
                     _createTextVNode("mdi-progress-clock", -1)
                   ]))]),
                   _: 1
                 }),
-                _cache[78] || (_cache[78] = _createTextVNode(" 后台有任务运行 ", -1))
+                _cache[80] || (_cache[80] = _createTextVNode(" 后台有任务运行 ", -1))
               ]),
               _: 1
             }),
             _createVNode(_component_v_card_text, { class: "pt-2" }, {
-              default: _withCtx(() => [...(_cache[79] || (_cache[79] = [
+              default: _withCtx(() => [...(_cache[81] || (_cache[81] = [
                 _createTextVNode(" 当前有全量检查 / 扫描 / 子集化任务正在后台运行，暂时无法关闭插件。", -1),
                 _createElementVNode("br", null, null, -1),
                 _createElementVNode("br", null, null, -1),
@@ -4950,7 +5080,7 @@ return (_ctx, _cache) => {
                   variant: "tonal",
                   onClick: _cache[29] || (_cache[29] = $event => (busyDialog.value = false))
                 }, {
-                  default: _withCtx(() => [...(_cache[80] || (_cache[80] = [
+                  default: _withCtx(() => [...(_cache[82] || (_cache[82] = [
                     _createTextVNode("我知道了", -1)
                   ]))]),
                   _: 1
@@ -4969,6 +5099,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Settings = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-ba4157b0"]]);
+const Settings = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-d2723d1d"]]);
 
-export { Check as C, Dashboard as D, FontLibrary as F, Settings as S, _export_sfc as _, apiModule as a };
+export { Check as C, Dashboard as D, FontLibrary as F, Settings as S, _export_sfc as _, DESKTOP_ACCEPT_ASS as a, apiModule as b, DESKTOP_ACCEPT_FONT as c, formatNotes as f, uploadAcceptFor as u };

@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref } from 'vue'
 import apiModule from '../api/fontManager.js'
+import { DESKTOP_ACCEPT_FONT, formatNotes, uploadAcceptFor } from '../utils/uploadAccept.js'
 
 const props = defineProps({
   api: { type: Object, default: () => ({}) },
@@ -58,6 +59,7 @@ async function handleUpload(event) {
   const BATCH = 3
   let total = 0
   const rejected = []
+  const notes = []
   uploading.value = true
   try {
     for (let i = 0; i < files.length; i += BATCH) {
@@ -77,6 +79,7 @@ async function handleUpload(event) {
       } else {
         total += (body?.data?.count ?? 0)
         for (const r of body?.data?.rejected || []) rejected.push(r)
+        if (Array.isArray(body?.data?.notes)) notes.push(...body.data.notes)
       }
     }
     if (total) {
@@ -86,6 +89,8 @@ async function handleUpload(event) {
       const detail = rejected.slice(0, 3).map(r => `${r.file_name}：${r.reason}`).join('；')
       emit('notify', `${rejected.length} 个字体未通过校验：${detail}`, 'warning')
     }
+    const noteText = formatNotes(notes)
+    if (noteText) emit('notify', `部分文件被跳过：${noteText}`, 'warning')
     if (!total && !rejected.length) emit('notify', '没有字体通过缺失校验', 'warning')
     await loadUploads()
     await loadSummary()
@@ -322,7 +327,7 @@ function stopPolling() {
           <input
             ref="uploadRef"
             type="file"
-            accept=".ttf,.otf,.ttc,.otc,.woff,.woff2,.zip,.7z,.rar"
+            :accept="uploadAcceptFor(DESKTOP_ACCEPT_FONT)"
             multiple
             style="display: none"
             @change="handleUpload"

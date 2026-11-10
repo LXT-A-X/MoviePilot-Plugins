@@ -21,6 +21,8 @@ const deps = ref({ items: [], ok_count: 0, total: 0 })
 const depsDialog = ref(false)
 const depsLoading = ref(false)
 const installingKey = ref('')
+// 解压工具（.7z/.rar）一键安装中
+const installingExtract = ref(false)
 
 let refreshTimer = null
 function startPolling() {
@@ -60,6 +62,21 @@ async function installDep(d) {
     emit('notify', e.message || `${d.name} 安装失败`, 'error')
   } finally {
     installingKey.value = ''
+  }
+}
+
+// 在容器内一键安装解压工具（apt/apk 安装 unar/7zip），用于上传 .7z/.rar 与种子字体收集
+async function installArchiveTools() {
+  if (installingExtract.value) return
+  installingExtract.value = true
+  try {
+    const res = await apiModule.post(props.api, '/archive/tools/install', {})
+    emit('notify', res?.message || '解压工具安装完成', 'success')
+    await loadDeps()
+  } catch (e) {
+    emit('notify', e.message || '安装解压工具失败', 'error')
+  } finally {
+    installingExtract.value = false
   }
 }
 
@@ -214,12 +231,25 @@ watch(() => props.refreshKey, () => {
                   variant="tonal"
                   color="primary"
                   :loading="installingKey === d.key"
-                  :disabled="!!installingKey"
+                  :disabled="!!installingKey || installingExtract"
                   title="通过 pip 重新安装该依赖"
                   @click="installDep(d)"
                 >
                   <v-icon start size="14">mdi-download</v-icon>
                   重新安装
+                </v-btn>
+                <v-btn
+                  v-if="d.key === 'extract_tools' && d.can_install !== false"
+                  size="small"
+                  variant="tonal"
+                  color="warning"
+                  :loading="installingExtract"
+                  :disabled="!!installingKey || installingExtract"
+                  title="在容器内用 apt/apk 安装 unar/7zip（需要容器联网，镜像更新后需重装）"
+                  @click="installArchiveTools"
+                >
+                  <v-icon start size="14">mdi-archive-arrow-up-outline</v-icon>
+                  安装解压工具
                 </v-btn>
               </template>
             </v-list-item>

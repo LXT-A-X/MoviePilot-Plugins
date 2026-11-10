@@ -73,7 +73,15 @@ def test_extract_single_member_size_limit(tmp_path):
     assert any("超过上限" in reason for _, reason in result.skipped)
 
 
-def test_is_archive():
+def test_is_archive(monkeypatch):
+    # 显式固定「无解压工具」环境，避免测试机恰好装了 7z/unar 时结果随环境漂移
+    monkeypatch.setattr(au, "detect_extract_tools", lambda refresh=False: {})
     assert au.is_archive("a.ZIP")
     assert not au.is_archive("a.rar")
     assert not au.is_archive("a.7z")
+
+
+def test_is_archive_with_unar(monkeypatch):
+    monkeypatch.setattr(au, "detect_extract_tools", lambda refresh=False: {"unar": "unar"})
+    assert au.is_archive("a.rar")
+    assert au.is_archive("a.7z")

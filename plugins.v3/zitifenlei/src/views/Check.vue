@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue'
 import apiModule from '../api/fontManager.js'
+import { DESKTOP_ACCEPT_ASS, formatNotes, uploadAcceptFor } from '../utils/uploadAccept.js'
 
 const props = defineProps({
   api: { type: Object, default: () => ({}) },
@@ -225,6 +226,7 @@ async function handleUpload(event) {
   const pad = n => String(n).padStart(2, '0')
   const batchLabel = `手动上传 ${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`
   let total = 0
+  const notes = []
   uploading.value = true
   try {
     for (let i = 0; i < files.length; i += BATCH) {
@@ -243,9 +245,12 @@ async function handleUpload(event) {
         break
       } else {
         total += (body?.data?.count ?? chunk.length)
+        if (Array.isArray(body?.data?.notes)) notes.push(...body.data.notes)
       }
     }
     emit('notify', `已上传 ${total} 个字幕，点击上方「检查」对比字体库`, 'success')
+    const noteText = formatNotes(notes)
+    if (noteText) emit('notify', `部分文件被跳过：${noteText}`, 'warning')
     // 不自动选中任何记录：右侧保持空，等待点击左侧
     await loadRecords(true, true)
   } catch (e) {
@@ -500,7 +505,7 @@ onUnmounted(() => {
       <input
         ref="uploadRef"
         type="file"
-        accept=".ass,.ASS,.zip,.7z,.rar"
+        :accept="uploadAcceptFor(DESKTOP_ACCEPT_ASS)"
         multiple
         style="display: none"
         @change="handleUpload"
