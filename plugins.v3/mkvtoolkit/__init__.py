@@ -87,7 +87,7 @@ from .probe import ProbeError, probe_extra_file, probe_media
 from .runner import JobRunner
 from .store import DataStore, normalize_config
 
-VERSION = "0.1.50"
+VERSION = "0.1.51"
 _CHAPTER_EXT = {".xml", ".txt", ".chap", ".ffmeta"}
 
 # 插件管理卡片图标：宿主只对 http(s) 地址走图片代理，需使用公网图片地址。

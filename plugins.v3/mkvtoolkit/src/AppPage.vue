@@ -6,7 +6,7 @@
  */
 import { computed, getCurrentInstance, inject, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useDisplay } from 'vuetify'
-import logoUrl from '../icon.png'
+import logoUrl from './logo.js'
 import { createApi } from './api.js'
 import Config from './Config.vue'
 import FileTree from './components/FileTree.vue'
@@ -102,7 +102,7 @@ function openSettingsFromDisabled() {
   switchTab('settings')
 }
 // 前端构建版本（与后端版本独立，便于确认浏览器加载的是新 bundle）
-const UI_BUILD = '0.1.50'
+const UI_BUILD = '0.1.51'
 const config = ref({ ...(props.initialConfig || {}) })
 const error = ref('')
 const treeDialog = ref(false)
@@ -2004,7 +2004,7 @@ onBeforeUnmount(() => {
       <div class="mkv-brand">
         <img class="mkv-logo mkv-logo--img" :src="logoUrl" alt="MKV 工具箱" />
         <span v-if="!medium" class="mkv-brand-text">{{ narrow ? '工具箱' : 'MKV 工具箱' }}</span>
-        <span v-if="wide" class="mkv-ver">v{{ status.version || '0.1.50' }}</span>
+        <span v-if="wide" class="mkv-ver">v{{ status.version || '0.1.51' }}</span>
         <span v-if="wide" class="mkv-ver mkv-ver--ui">UI {{ UI_BUILD }}</span>
       </div>
 
