@@ -54,7 +54,6 @@ const DEFAULT_CONFIG = {
   lib_dir: '',
   ass_dir: '',
   archive_mode: 'copy',
-  monitor_enabled: false,
   notify_enabled: false,
 }
 const pluginConfig = ref({ ...DEFAULT_CONFIG, ...(props.initialConfig || {}) })

@@ -251,7 +251,7 @@
 }
 
 /* 根容器：吃满宿主宽度，窗口高度固定（不再随页面内容上下跳动） */
-.zt-app[data-v-a294402a] {
+.zt-app[data-v-8e5a1008] {
   width: 100%;
   height: min(720px, calc(100vh - 100px));  /* 固定高度：大屏 720px，小屏随视口收缩 */
   min-height: 560px;
@@ -261,7 +261,7 @@
 }
 
 /* Flex 左右布局 */
-.zt-layout[data-v-a294402a] {
+.zt-layout[data-v-8e5a1008] {
   display: flex;
   flex-direction: row;
   width: 100%;
@@ -269,7 +269,7 @@
 }
 
 /* 左侧导航：固定宽度，禁止压缩 */
-.zt-nav[data-v-a294402a] {
+.zt-nav[data-v-8e5a1008] {
   width: 180px;
   flex-shrink: 0;
   height: 100%;
@@ -278,20 +278,20 @@
   box-sizing: border-box;
   padding: 16px 0;
 }
-.zt-nav-header[data-v-a294402a] {
+.zt-nav-header[data-v-8e5a1008] {
   padding: 0 16px 16px;
 }
-.zt-app-title[data-v-a294402a] {
+.zt-app-title[data-v-8e5a1008] {
   font-weight: 600;
   font-size: 16px;
 }
-.zt-app-subtitle[data-v-a294402a] {
+.zt-app-subtitle[data-v-8e5a1008] {
   font-size: 12px;
   opacity: 0.7;
 }
 
 /* 右侧内容区：吃掉所有剩余空间，高度严格跟随 .zt-app（固定窗口），内容多了内部滚 */
-.zt-content[data-v-a294402a] {
+.zt-content[data-v-8e5a1008] {
   flex-grow: 1;
   flex-shrink: 1;
   height: 100%;
@@ -304,7 +304,7 @@
 }
 
 /* 插件停用遮罩 */
-.zt-disabled-mask[data-v-a294402a] {
+.zt-disabled-mask[data-v-8e5a1008] {
   position: absolute;
   inset: 0;
   z-index: 20;
@@ -313,22 +313,22 @@
   align-items: center;
   justify-content: center;
 }
-.zt-disabled-card[data-v-a294402a] {
+.zt-disabled-card[data-v-8e5a1008] {
   padding: 24px 32px;
   border-radius: 10px;
   text-align: center;
   min-width: 280px;
 }
-.zt-disabled-title[data-v-a294402a] {
+.zt-disabled-title[data-v-8e5a1008] {
   font-size: 17px;
   font-weight: 600;
 }
-.zt-disabled-desc[data-v-a294402a] {
+.zt-disabled-desc[data-v-8e5a1008] {
   font-size: 13px;
   opacity: 0.7;
   margin-top: 4px;
 }
-.zt-disabled-banner[data-v-a294402a] {
+.zt-disabled-banner[data-v-8e5a1008] {
   position: absolute;
   top: 10px;
   left: 10px;
@@ -336,13 +336,13 @@
   z-index: 15;
 }
 /* 右上角关闭按钮（常驻，悬浮于所有层之上） */
-.zt-close-btn[data-v-a294402a] {
+.zt-close-btn[data-v-8e5a1008] {
   position: absolute;
   top: 8px;
   right: 8px;
   z-index: 30;
 }
-.zt-loading[data-v-a294402a] {
+.zt-loading[data-v-8e5a1008] {
   position: absolute;
   top: 50%;
   left: 50%;
@@ -350,12 +350,12 @@
 }
 
 /* ── 手机端适配（视口媒体查询，对齐 subscribeplus 全屏方案） ── */
-.zt-mobile-nav[data-v-a294402a] {
+.zt-mobile-nav[data-v-8e5a1008] {
   display: none;   /* 默认隐藏，仅窄屏显示 */
 }
 @media (max-width: 820px) {
   /* 手机端：全屏铺满视口。dvh 随浏览器地址栏动态收缩，竖屏自适应。 */
-.zt-app[data-v-a294402a] {
+.zt-app[data-v-8e5a1008] {
     width: 100%;
     height: 100dvh;
     max-height: 100dvh;
@@ -365,11 +365,11 @@
     flex-direction: column;
 }
   /* 隐藏左侧导航 */
-.zt-nav[data-v-a294402a] {
+.zt-nav[data-v-8e5a1008] {
     display: none;
 }
   /* 布局列向排列：导航在顶部（order:-1），内容区吃满剩余高度 */
-.zt-layout[data-v-a294402a] {
+.zt-layout[data-v-8e5a1008] {
     display: flex;
     flex-direction: column;
     flex: 1 1 auto;
@@ -378,7 +378,7 @@
     width: 100%;
 }
   /* 内容区吃满剩余空间（flex 链），内部滚动，底部无缝铺到屏幕底 */
-.zt-content[data-v-a294402a] {
+.zt-content[data-v-8e5a1008] {
     flex: 1 1 auto;
     min-height: 0;
     height: auto;
@@ -388,7 +388,7 @@
 }
   /* 移动端导航：固定在顶部，宽度吃满（flex 链式排列），
      右侧留 48px 给右上角关闭按钮；当前项 + 下拉按钮 */
-.zt-mobile-nav[data-v-a294402a] {
+.zt-mobile-nav[data-v-8e5a1008] {
     display: flex;
     align-items: center;
     flex: 0 0 auto;
@@ -403,7 +403,7 @@
     padding: 0 48px 0 12px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.12);
 }
-.zt-mnav-current[data-v-a294402a] {
+.zt-mnav-current[data-v-8e5a1008] {
     display: flex;
     align-items: center;
     gap: 6px;
@@ -416,34 +416,34 @@
     font-weight: 600;
     cursor: pointer;
 }
-.zt-mnav-caret[data-v-a294402a] {
+.zt-mnav-caret[data-v-8e5a1008] {
     opacity: 0.6;
 }
   /* 底部选择面板：切换页面（对齐 subscribeplus 的 VBottomSheet 交互） */
-.zt-sheet-card[data-v-a294402a] {
+.zt-sheet-card[data-v-8e5a1008] {
     padding: 12px 16px 20px;
     border-top-left-radius: 16px;
     border-top-right-radius: 16px;
 }
-.zt-sheet-title[data-v-a294402a] {
+.zt-sheet-title[data-v-8e5a1008] {
     font-size: 15px;
     font-weight: 600;
     padding: 4px 4px 10px;
 }
-.zt-sheet-list[data-v-a294402a] {
+.zt-sheet-list[data-v-8e5a1008] {
     padding: 8px 0 4px;
 }
-.zt-sheet-item[data-v-a294402a] {
+.zt-sheet-item[data-v-8e5a1008] {
     margin: 2px 4px;
 }
   /* 右上角关闭按钮：悬浮于页面右上角（导航占顶部，但按钮压在其右上角） */
-.zt-close-btn[data-v-a294402a] {
+.zt-close-btn[data-v-8e5a1008] {
     top: 10px;
     right: 10px !important;
     z-index: 50;
 }
   /* 调整停用卡片宽度 */
-.zt-disabled-card[data-v-a294402a] {
+.zt-disabled-card[data-v-8e5a1008] {
     min-width: 240px;
     padding: 18px 24px;
 }

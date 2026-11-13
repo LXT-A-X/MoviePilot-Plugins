@@ -204,9 +204,7 @@ def _plugin_with_index(tmp_path: Path):
     plugin = plugin_mod.Zitifenlei()
     plugin._db = db
     plugin._enabled = True
-    plugin._config.update(
-        {"lib_dir": str(lib), "subset_process_isolation": True}
-    )
+    plugin._config.update({"lib_dir": str(lib)})
     plugin._tmp_dir = tmp_path / "tmp"
     plugin._tmp_dir.mkdir(exist_ok=True)
     src = tmp_path / "ep.ass"
@@ -280,51 +278,15 @@ def test_subset_with_hb_worker_timeout_isolated(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(not MSYH.exists(), reason="需要 Windows 微软雅黑字体")
-def test_subset_with_hb_worker_unavailable_fails_when_isolated(tmp_path, monkeypatch):
-    """隔离开启时工作进程起不来：直接报错，且绝不在主进程内调用 HarfBuzz。"""
+def test_subset_with_hb_worker_unavailable_always_errors(tmp_path, monkeypatch):
+    """v3.3.0 起工作进程起不来：一律直接报错，不回退主进程执行。"""
     plugin, db, src, out = _plugin_with_index(tmp_path)
     monkeypatch.setattr(plugin, "_get_subset_worker", lambda: None)
-
-    def _must_not_call(*args, **kwargs):
-        raise AssertionError("隔离开启时不得回退主进程执行 HarfBuzz 子集化")
-
-    monkeypatch.setattr(plugin_mod, "hb_subset_ass_file", _must_not_call)
     try:
         result = plugin._subset_with_hb(src, out)
         assert result["status"] == "error", result
         assert "工作进程无法启动" in result["reason"]
         assert not out.exists()
-    finally:
-        db.close()
-
-
-@pytest.mark.skipif(not MSYH.exists(), reason="需要 Windows 微软雅黑字体")
-def test_subset_with_hb_worker_unavailable_falls_back_when_isolation_off(tmp_path, monkeypatch):
-    """显式关闭隔离：工作进程不可用时允许进程内执行（功能不降级）。"""
-    plugin, db, src, out = _plugin_with_index(tmp_path)
-    plugin._config["subset_process_isolation"] = False
-    monkeypatch.setattr(plugin, "_get_subset_worker", lambda: None)
-    try:
-        result = plugin._subset_with_hb(src, out)
-        assert result["status"] == "success", result
-        assert out.is_file()
-    finally:
-        db.close()
-
-
-@pytest.mark.skipif(not MSYH.exists(), reason="需要 Windows 微软雅黑字体")
-def test_subset_with_hb_isolation_disabled_runs_in_process(tmp_path, monkeypatch):
-    plugin, db, src, out = _plugin_with_index(tmp_path)
-    plugin._config["subset_process_isolation"] = False
-
-    def _must_not_call(*args, **kwargs):
-        raise AssertionError("隔离关闭时不应启动工作进程")
-
-    monkeypatch.setattr(plugin, "_subset_via_worker", _must_not_call)
-    try:
-        result = plugin._subset_with_hb(src, out)
-        assert result["status"] == "success", result
-        assert out.is_file()
     finally:
         db.close()
 

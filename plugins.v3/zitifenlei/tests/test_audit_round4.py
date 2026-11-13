@@ -467,56 +467,6 @@ def test_startup_light_check_discovers_unindexed_files(tmp_path):
 # ─── P1-10 缺失字体专用目录 ─────────────────────────────────────────────
 
 
-def test_missing_dir_rejects_unrelated_and_accepts_match(tmp_path, monkeypatch):
-    lib = _make_lib(tmp_path)
-    db = FontDB(tmp_path / "ziti.db")
-    try:
-        plugin = _plugin(tmp_path, db, lib)
-        missing_dir = tmp_path / "missing"
-        missing_dir.mkdir()
-        plugin._config.update({"missing_font_dir": str(missing_dir)})
-
-        unrelated = missing_dir / "unrelated.ttf"
-        unrelated.write_bytes(ARIAL.read_bytes())
-        monkeypatch.setattr(
-            plugin,
-            "_missing_glyph_targets",
-            lambda: {
-                "nosuchfont": {
-                    "name": "NoSuchFont",
-                    "count": 1,
-                    "codepoints": {ord("中")},
-                    "chars": "中",
-                    "glyph": True,
-                }
-            },
-        )
-        monkeypatch.setattr(
-            plugin,
-            "_evaluate_font_for_targets",
-            lambda _p, _t, _h="", **_kw: {"ok": False, "reason": "与当前缺失字体不匹配"},
-        )
-        archived = []
-        monkeypatch.setattr(plugin, "_archive_font_file", lambda p, source="auto": archived.append(str(p)) or 1)
-        assert plugin._handle_missing_dir_font(unrelated) is True
-        assert not unrelated.exists()
-        rejected = list((missing_dir / "rejected").glob("*.ttf"))
-        assert rejected and rejected[0].name == "unrelated.ttf"
-        assert archived == [], "未通过严格校验的字体不得入库"
-
-        matched = missing_dir / "matched.ttf"
-        matched.write_bytes(MSYH.read_bytes())
-        monkeypatch.setattr(
-            plugin,
-            "_evaluate_font_for_targets",
-            lambda _p, _t, _h="", **_kw: {"ok": True, "matched": "NoSuchFont", "covered_chars": "中", "reason": ""},
-        )
-        assert plugin._handle_missing_dir_font(matched) is True
-        assert archived == [str(matched)]
-    finally:
-        db.close()
-
-
 # ─── P2-12 同内容多路径 ─────────────────────────────────────────────────
 
 

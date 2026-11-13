@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import { _ as _export_sfc, S as Settings, C as Check, F as FontLibrary, D as Dashboard } from './Settings-CN9G90ZG.js';
+import { _ as _export_sfc, S as Settings, C as Check, F as FontLibrary, D as Dashboard } from './Settings-VkhLHDQR.js';
 
 const {createTextVNode:_createTextVNode,resolveComponent:_resolveComponent,withCtx:_withCtx,createVNode:_createVNode,createElementVNode:_createElementVNode,renderList:_renderList,Fragment:_Fragment,openBlock:_openBlock,createElementBlock:_createElementBlock,toDisplayString:_toDisplayString,createBlock:_createBlock,createCommentVNode:_createCommentVNode,resolveDynamicComponent:_resolveDynamicComponent,KeepAlive:_KeepAlive} = await importShared('vue');
 
@@ -56,7 +56,6 @@ const pluginConfig = ref({
   lib_dir: '',
   ass_dir: '',
   archive_mode: 'copy',
-  monitor_enabled: false,
   notify_enabled: false,
   ...(props.initialConfig || {}),
 });
@@ -264,6 +263,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Config = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-5cd7c1cc"]]);
+const Config = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-6a0ca89d"]]);
 
 export { Config as default };

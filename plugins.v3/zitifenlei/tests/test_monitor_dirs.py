@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""v3.2.3 回归：监控目录类型判定 + 字体监控目录压缩包处理（不依赖宿主）。"""
+"""v3.3.0 回归：监控目录类型 / 压缩包待确认稳定副本 / 清理策略 / 放错目录提醒。"""
 import importlib
 import threading
 import zipfile
@@ -30,12 +30,42 @@ class _FakeDB:
         self.settings[key] = value
 
 
-def test_watch_dir_kind_priority(tmp_path):
+def _make_zip(path: Path, names=("a.ttf", "readme.txt")):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w") as zf:
+        for name in names:
+            zf.writestr(name, b"\x00" * 128)
+
+
+def _page_plugin(tmp: Path, cfg=None, archive_ret=1):
+    plugin = _plugin()
+    plugin._db = _FakeDB()
+    plugin._tmp_dir = str(tmp / "tmp")
+    plugin._notify_agg = {"fonts": [], "archives": [], "archives_wrong_dir": []}
+    plugin._lock = threading.RLock()
+    plugin._stopping = False
+    plugin._schedule_index_rebuild = lambda: None
+    plugin._queue_agg_notify = lambda: None
+    conf = {"lib_dir": str(tmp / "lib"), "input_dir": str(tmp / "input")}
+    conf.update(cfg or {})
+    plugin.get_resource_or_config = lambda key: conf.get(key, "")
+    handled = []
+
+    def _archive(f, source="auto", **kw):
+        handled.append(Path(f))
+        return archive_ret
+
+    plugin._archive_font_file = _archive
+    return plugin, handled
+
+
+def test_watch_dir_kind_without_missing(tmp_path):
     dirs = {
         "input_dir": str(tmp_path / "fonts"),
         "ass_dir": str(tmp_path / "subs"),
         "subset_dir": str(tmp_path / "subs" / "subset"),
         "lib_dir": str(tmp_path / "lib"),
+        # v3.3.0 起删除「缺失字体接收目录」，旧键即使存在也应被忽略
         "missing_font_dir": str(tmp_path / "miss"),
     }
     plugin = _plugin()
@@ -44,67 +74,116 @@ def test_watch_dir_kind_priority(tmp_path):
     assert plugin._watch_dir_kind(tmp_path / "fonts" / "a.ttf") == "input"
     assert plugin._watch_dir_kind(tmp_path / "fonts" / "pack.7z") == "input"
     assert plugin._watch_dir_kind(tmp_path / "subs" / "a.ass") == "ass"
-    # 子目录更具体：subset 优先于 ass
     assert plugin._watch_dir_kind(tmp_path / "subs" / "subset" / "a.ass") == "subset"
     assert plugin._watch_dir_kind(tmp_path / "subs" / "font.ttf") == "ass"
     assert plugin._watch_dir_kind(tmp_path / "lib" / "f.ttf") == "lib"
-    assert plugin._watch_dir_kind(tmp_path / "miss" / "m.ttf") == "missing"
-    assert plugin._watch_dir_kind(tmp_path / "other" / "z.ttf") == ""
+    assert plugin._watch_dir_kind(tmp_path / "miss" / "m.ttf") == ""
 
 
-def test_handle_font_archive_extracts_once(tmp_path):
+def test_monitor_dirs_requires_configured_existing_dirs(tmp_path):
     plugin = _plugin()
-    plugin._db = _FakeDB()
-    plugin._tmp_dir = str(tmp_path / "tmp")
-    plugin._notify_agg = {"fonts": []}
-    plugin._lock = threading.RLock()
-    plugin._schedule_index_rebuild = lambda: None
-    plugin._queue_agg_notify = lambda: None
-    plugin.get_resource_or_config = lambda key: {"lib_dir": str(tmp_path / "lib"), "archive_mode": "copy"}.get(key, "")
+    for name in ("fonts", "subs", "lib"):
+        (tmp_path / name).mkdir()
+    plugin.get_resource_or_config = lambda key: {
+        "input_dir": str(tmp_path / "fonts"),
+        "ass_dir": str(tmp_path / "subs"),
+        "lib_dir": str(tmp_path / "lib"),
+        "subset_dir": str(tmp_path / "missing-dir"),
+    }.get(key, "")
+    dirs = [str(p.resolve()) for p in plugin._monitor_dirs()]
+    assert str((tmp_path / "fonts").resolve()) in dirs
+    assert str((tmp_path / "subs").resolve()) in dirs
+    assert str((tmp_path / "lib").resolve()) in dirs
+    assert str((tmp_path / "missing-dir").resolve()) not in dirs
 
-    archive = tmp_path / "fonts.zip"
-    with zipfile.ZipFile(archive, "w") as zf:
-        zf.writestr("a.ttf", b"\x00" * 256)
-        zf.writestr("readme.txt", b"ignore me")
 
-    handled = []
-    plugin._archive_font_file = lambda f, source="auto", **kw: (handled.append(Path(f).name) or 1)
+def test_archive_cleanup_off_keeps_package(tmp_path):
+    plugin, handled = _page_plugin(tmp_path)
+    archive = tmp_path / "input" / "pack.zip"
+    _make_zip(archive)
 
     assert plugin._handle_font_archive(archive) is True
-    assert handled == ["a.ttf"]
-    # 同一包（路径+大小+mtime 指纹）第二次应直接跳过，不重复解压
+    assert archive.is_file()
+    assert handled
+    entry = plugin._notify_agg["archives"][-1]
+    assert entry["added"] == 1
+    assert entry["action"] == ""
+    assert "未开启" in entry["keep_reason"]
+
+
+def test_archive_cleanup_move_to_done_dir(tmp_path):
+    plugin, _ = _page_plugin(tmp_path, {"archive_cleanup_enabled": True, "archive_cleanup_action": "move"})
+    archive = tmp_path / "input" / "pack.zip"
+    _make_zip(archive)
+
     assert plugin._handle_font_archive(archive) is True
-    assert handled == ["a.ttf"]
-    assert any("监控压缩包" in msg for _, msg in plugin._db.logs)
+    assert not archive.exists()
+    assert (tmp_path / "input" / "已处理压缩包" / "pack.zip").is_file()
+    assert plugin._notify_agg["archives"][-1]["action"] == "moved"
 
 
-def test_handle_font_archive_7z_uses_archive_utils(tmp_path, monkeypatch):
-    plugin = _plugin()
-    plugin._db = _FakeDB()
-    plugin._tmp_dir = str(tmp_path / "tmp")
-    plugin._notify_agg = {"fonts": []}
-    plugin._lock = threading.RLock()
-    plugin._schedule_index_rebuild = lambda: None
-    plugin._queue_agg_notify = lambda: None
-    plugin.get_resource_or_config = lambda key: {"lib_dir": str(tmp_path / "lib")}.get(key, "")
+def test_archive_cleanup_delete(tmp_path):
+    plugin, _ = _page_plugin(tmp_path, {"archive_cleanup_enabled": True, "archive_cleanup_action": "delete"})
+    archive = tmp_path / "input" / "pack.zip"
+    _make_zip(archive)
 
-    archive = tmp_path / "fonts.7z"
-    archive.write_bytes(b"fake-7z")
-
-    def _fake_extract(archive_path, dest_dir, exts, **kwargs):
-        dest = Path(dest_dir)
-        dest.mkdir(parents=True, exist_ok=True)
-        font = dest / "b.ttf"
-        font.write_bytes(b"\x01" * 128)
-        result = au.ExtractResult()
-        result.files.append(au.ExtractedFile(path=font, member="b.ttf", size=128))
-        return result
-
-    monkeypatch.setattr(au, "is_any_archive", lambda name: True)
-    monkeypatch.setattr(au, "is_archive", lambda name: True)
-    monkeypatch.setattr(au, "extract_archive", _fake_extract)
-
-    handled = []
-    plugin._archive_font_file = lambda f, source="auto", **kw: (handled.append(Path(f).name) or 1)
     assert plugin._handle_font_archive(archive) is True
-    assert handled == ["b.ttf"]
+    assert not archive.exists()
+    assert plugin._notify_agg["archives"][-1]["action"] == "deleted"
+
+
+def test_archive_pending_uses_stable_copy(tmp_path):
+    plugin, handled = _page_plugin(tmp_path, {"auto_collect": False}, archive_ret=-1)
+    archive = tmp_path / "input" / "pack.zip"
+    _make_zip(archive)
+
+    assert plugin._handle_font_archive(archive) is True
+    # 待确认字体必须在解压目录被清理后仍然存在（稳定副本）
+    assert handled and handled[0].is_file()
+    assert handled[0].parent == Path(plugin._tmp_dir)
+    assert archive.is_file()
+    entry = plugin._notify_agg["archives"][-1]
+    assert entry["pending"] == 1
+    assert entry["action"] == ""
+    assert "待确认" in entry["keep_reason"]
+
+
+def test_archive_failure_keeps_package(tmp_path):
+    plugin, _ = _page_plugin(tmp_path, {"archive_cleanup_enabled": True}, archive_ret=None)
+    archive = tmp_path / "input" / "pack.zip"
+    _make_zip(archive)
+
+    assert plugin._handle_font_archive(archive) is True
+    assert archive.is_file()
+    entry = plugin._notify_agg["archives"][-1]
+    assert entry["failed"] == 1
+    assert entry["action"] == ""
+    assert "失败" in entry["keep_reason"]
+
+
+def test_archive_in_wrong_dir_notified_and_kept(tmp_path):
+    plugin, _ = _page_plugin(tmp_path, {"ass_dir": str(tmp_path / "subs")})
+    (tmp_path / "subs").mkdir()
+    archive = tmp_path / "subs" / "fonts.zip"
+    _make_zip(archive)
+
+    plugin._log_dir_mismatch(archive, "ass", False, False, True)
+    assert archive.is_file()
+    assert plugin._notify_agg["archives_wrong_dir"][-1]["label"] == "ASS 字幕检查目录"
+    assert any("放错目录" in msg for _, msg in plugin._db.logs)
+
+
+def test_deprecated_config_keys_stripped():
+    mod = importlib.import_module("ziti_under_test.__init__")
+    plugin = object.__new__(mod.Zitifenlei)
+    plugin._config = {
+        "enabled": True,
+        "input_dir": "/tmp/fonts",
+        "monitor_enabled": True,
+        "missing_font_dir": "/tmp/missing",
+        "subset_process_isolation": False,
+    }
+    form = mod.Zitifenlei.get_form(plugin)[1]
+    for key in ("monitor_enabled", "missing_font_dir", "subset_process_isolation"):
+        assert key not in form
+    assert form.get("input_dir") == "/tmp/fonts"

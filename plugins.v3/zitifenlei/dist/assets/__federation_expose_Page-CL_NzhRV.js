@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import { _ as _export_sfc, u as uploadAcceptFor, a as DESKTOP_ACCEPT_ASS, b as apiModule, f as formatNotes, c as DESKTOP_ACCEPT_FONT, S as Settings, C as Check, F as FontLibrary, D as Dashboard } from './Settings-CN9G90ZG.js';
+import { _ as _export_sfc, u as uploadAcceptFor, a as DESKTOP_ACCEPT_ASS, b as apiModule, f as formatNotes, c as DESKTOP_ACCEPT_FONT, S as Settings, C as Check, F as FontLibrary, D as Dashboard } from './Settings-VkhLHDQR.js';
 
 const {createTextVNode:_createTextVNode$2,resolveComponent:_resolveComponent$2,withCtx:_withCtx$2,createVNode:_createVNode$2,unref:_unref$1,createElementVNode:_createElementVNode$2,toDisplayString:_toDisplayString$2,Fragment:_Fragment$2,openBlock:_openBlock$2,createElementBlock:_createElementBlock$2,createCommentVNode:_createCommentVNode$2,createBlock:_createBlock$2,renderList:_renderList$2,withModifiers:_withModifiers,normalizeClass:_normalizeClass} = await importShared('vue');
 
@@ -2462,7 +2462,6 @@ const DEFAULT_CONFIG = {
   lib_dir: '',
   ass_dir: '',
   archive_mode: 'copy',
-  monitor_enabled: false,
   notify_enabled: false,
 };
 const pluginConfig = ref({ ...DEFAULT_CONFIG, ...(props.initialConfig || {}) });
@@ -2811,6 +2810,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-a294402a"]]);
+const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-8e5a1008"]]);
 
 export { Page as default };

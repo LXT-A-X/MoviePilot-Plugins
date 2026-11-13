@@ -146,7 +146,6 @@ from .harfbuzz_engine import (
     default_output_path as hb_output_path,
     hb_available,
     refresh_backend as hb_refresh_backend,
-    subset_ass_file as hb_subset_ass_file,
 )
 from .subset_worker_client import (
     SubsetWorkerClient,
@@ -161,10 +160,6 @@ _DEFAULT_CONFIG = {
     "lib_dir": "",
     "ass_dir": "",
     "subset_dir": "",
-    # 缺失字体专用接收目录（独立于字体库/监控目录）：放入的字体先等写入稳定，
-    # 再逐 face 严格校验是否命中当前缺失目标并真实覆盖至少一个缺失字符；
-    # 通过 → 直接归档入字体库；未通过 → 移入该目录下 rejected/ 留档，不入库不索引
-    "missing_font_dir": "",
     # 字体元数据统一由 fontTools 解析（font_metadata.inspect_font），不再提供「文件名解析」模式，
     # 老配置里的 scan_mode 键不再读取
     "archive_mode": "copy",
@@ -177,9 +172,12 @@ _DEFAULT_CONFIG = {
     # move 归档判重跳过（字体库已存在同名同后缀）时，监控目录的源文件会残留，
     # 开关开=删除残留；关=保留（复制模式不受影响，源文件本就保留）
     "move_delete_duplicate": True,
-    "monitor_enabled": False,  # 是否启用监控（总开关）：统一控制字体监控目录 / ASS字幕目录监控 / ASS目录监控子集的启停
-    # 老版本监控开关（auto_monitor/auto_check）已合并进 monitor_enabled，不再作为配置项暴露；
-    # init_plugin 迁移时仍从宿主旧配置读取一次
+    # 压缩包处理（只作用于「字体监控目录」里的 zip/7z/rar）：
+    # 解压出的字体直接归档 / 进待确认，取决于「是否自动执行监控结果」；
+    # 清理压缩包（移到「已处理压缩包」子目录 或 直接删除）只在「自动执行开 + 全部处理无失败」时执行，
+    # 放错目录、进待确认、有失败时一律保留并提醒。
+    "archive_cleanup_enabled": False,
+    "archive_cleanup_action": "move",  # move=移到 已处理压缩包/（可找回，默认）；delete=直接删除
     "auto_inbound": True,
     "auto_collect": True,
     "notify_enabled": False,
@@ -189,9 +187,8 @@ _DEFAULT_CONFIG = {
     "weekly_reconcile": True,
     # 子集化设置
     "auto_subset": False,
-    # 子集化在独立工作进程中执行（uharfbuzz 段错误/病态字体只影响当前字幕，
-    # 不拖垮 MoviePilot 主进程）；工作进程无法启动时自动回退进程内执行
-    "subset_process_isolation": True,
+    # 子集化始终在独立工作进程中执行（uharfbuzz 段错误/病态字体只影响当前字幕，
+    # 不拖垮 MoviePilot 主进程）；工作进程无法启动时直接报错，不回退主进程。
     # MP 入库成品是否直接替换媒体库原字幕（独立开关：不影响目录监控与手动上传）
     "inbound_subset_overwrite": False,
     "subset_out_dir": "",
@@ -232,6 +229,17 @@ _ARCH_DUP_DEL_FAILED = -4  # 同上跳过，但删除重复源文件失败
 _ARCHIVE_DONE_SETTING = "monitored_archive_done"
 _ARCHIVE_DONE_LIMIT = 300
 _ARCHIVE_MAX_MEMBERS = 500  # 与上传解压一致：一个包最多 500 个成员
+# 清理压缩包时移入的子目录名（位于「字体监控目录」下；插件会整体忽略该目录）
+_ARCHIVE_DONE_DIR_NAME = "已处理压缩包"
+# 已废弃的配置键（v3.3.0 起删除对应功能）：读取/保存配置时统一剔除，
+# 避免旧宿主配置/数据库镜像把已删除的开关又写回来
+_DEPRECATED_CONFIG_KEYS = (
+    "monitor_enabled",
+    "auto_monitor",
+    "auto_check",
+    "missing_font_dir",
+    "subset_process_isolation",
+)
 
 
 def _path_within(path: Path, base: Path) -> bool:
@@ -432,7 +440,7 @@ class Zitifenlei(_PluginBase):
     plugin_name = "字体分类管家"
     plugin_desc = "字体归档整理与 ASS 字幕字体检查插件：扫描/上传字体到字体库，检查字幕缺失字体。"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/zitifenlei.png"
-    plugin_version = "3.2.3"
+    plugin_version = "3.3.0"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "zitifenlei_"
@@ -515,6 +523,9 @@ class Zitifenlei(_PluginBase):
             "subs_subset": [],  # 已子集化字幕文件名
             "subs_ok": [],  # 字体齐全（已完成字形级验证）字幕文件名
             "subs_unverified": [],  # 仅名称匹配、未完成字形级验证的字幕文件名
+            # v3.3.0 压缩包处理（与普通目录字体通知分开）：
+            "archives": [],  # [{"name","total","added","skipped","pending","failed","action"}]
+            "archives_wrong_dir": [],  # [{"name","label"}] 压缩包放错目录（不删除）
             "timer": None,
         }
         self._notify_agg_delay = 6  # 聚合窗口（秒）
@@ -660,9 +671,9 @@ class Zitifenlei(_PluginBase):
             if config:
                 # 宿主配置为权威（原生保存协议 PUT 后宿主会带上完整配置重新 init_plugin）
                 merged = {**dict(_DEFAULT_CONFIG), **dict(config)}
-                # 老配置迁移：宿主没有「是否启用监控」总开关时，用旧的 auto_monitor/auto_check 合并推导
-                if "monitor_enabled" not in (config or {}):
-                    merged["monitor_enabled"] = bool(merged.get("auto_monitor")) or bool(merged.get("auto_check"))
+                # v3.3.0：剔除已删除功能的旧配置键，避免旧宿主配置/镜像把它们带回来
+                for _old_key in _DEPRECATED_CONFIG_KEYS:
+                    merged.pop(_old_key, None)
                 self._config = merged
                 # 同步镜像：镜像始终等于最近一次宿主传进来的完整配置，重启/重载兜底恢复
                 if self._db:
@@ -675,8 +686,8 @@ class Zitifenlei(_PluginBase):
                 saved_cfg = self._db.get_full_config() if self._db else None
                 if saved_cfg:
                     merged = {**dict(_DEFAULT_CONFIG), **saved_cfg}
-                    if "monitor_enabled" not in (saved_cfg or {}):
-                        merged["monitor_enabled"] = bool(merged.get("auto_monitor")) or bool(merged.get("auto_check"))
+                    for _old_key in _DEPRECATED_CONFIG_KEYS:
+                        merged.pop(_old_key, None)
                     self._config = merged
 
             # 字体大小上限：无论配置来自宿主还是本地镜像，都按最终生效配置同步一次
@@ -970,6 +981,20 @@ class Zitifenlei(_PluginBase):
                         pass
             except Exception:
                 pass
+            # 监控压缩包解压中断残留：只清 6 小时前的 watch_archive_* 目录
+            try:
+                cutoff = time.time() - 6 * 3600
+                for d in Path(self._tmp_dir).iterdir():
+                    if not d.is_dir() or not d.name.startswith("watch_archive_"):
+                        continue
+                    try:
+                        if d.stat().st_mtime < cutoff:
+                            shutil.rmtree(d, ignore_errors=True)
+                            removed += 1
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             if removed:
                 _logger.debug("字体分类管家清理 %d 个临时文件", removed)
         except Exception as err:
@@ -986,7 +1011,10 @@ class Zitifenlei(_PluginBase):
 
     def get_form(self) -> Tuple[Optional[List[dict]], Dict[str, Any]]:
         """返回宿主配置接口的 model：默认值合并当前运行时配置（对齐 subscribeplus 范式）。"""
-        return None, {**dict(_DEFAULT_CONFIG), **dict(self._config)}
+        merged = {**dict(_DEFAULT_CONFIG), **dict(self._config)}
+        for _old_key in _DEPRECATED_CONFIG_KEYS:
+            merged.pop(_old_key, None)
+        return None, merged
 
     # ─── 定时服务 ────────────────────────────────────────
     def get_service(self) -> List[Dict[str, Any]]:
@@ -1037,26 +1065,13 @@ class Zitifenlei(_PluginBase):
         return self._config.get(key)
 
     def __auto_monitor_scan(self) -> None:
-        """自动监控：扫描输入目录中的字体并自动归档"""
-        # 缺失字体专用目录兜底扫描（事件漏发/网络盘无事件时也能严格校验收录）：
-        # 独立于「目录自动收集」开关——它是单独的严格接收通道，不放宽为普通归档
-        try:
-            missing_dir = self.get_resource_or_config("missing_font_dir") or ""
-            if missing_dir and Path(missing_dir).is_dir():
-                for f in list(Path(missing_dir).iterdir()):
-                    if self._stopping:
-                        break
-                    if f.is_file() and is_font_file(f.name):
-                        self._handle_missing_dir_font(f)
-        except Exception as err:
-            try:
-                if self._db is not None:
-                    self._db.add_log(f"缺失字体目录扫描失败: {err}", "warning")
-            except Exception:
-                pass
-        # 「是否自动执行监控结果」关闭：监控字体改走「待确认」，由实时监控逐文件登记，
-        # 轮询兜底不再整体重扫监控目录（避免每 60s rglob 整目录 + 「归档 N 个」计数虚高）
+        """自动监控：扫描输入目录中的字体并自动归档（轮询兜底路径）"""
+        # 「是否自动执行监控结果」关闭：普通字体改走「待确认」，由实时监控逐文件登记，
+        # 轮询兜底不再整体重扫监控目录（避免每 60s rglob 整目录 + 「归档 N 个」计数虚高）；
+        # 但字体监控目录里的压缩包仍要处理（解压后字体进待确认，压缩包保留），
+        # 交给 _process_monitor_archives（有指纹去重，不会重复解压）。
         if self.get_resource_or_config("auto_collect") is False:
+            self._process_monitor_archives()
             return
         stats: Optional[Dict[str, Any]] = None
         with self._lock:
@@ -1160,6 +1175,30 @@ class Zitifenlei(_PluginBase):
                     pass
             self._watch_timers.clear()
 
+    def _monitor_dirs(self) -> List[Path]:
+        """当前实际生效的监控目录（去重、只保留存在的）：字体监控 / ASS 检查 / 自动子集化 / 字体库。
+
+        v3.3.0 起没有「是否启用监控」总开关：填了哪个目录就监控哪个，全空则不启动监控。
+        """
+        dirs: List[Path] = []
+        seen: set = set()
+        for key in ("input_dir", "ass_dir", "subset_dir", "lib_dir"):
+            raw = self.get_resource_or_config(key) or ""
+            if not raw:
+                continue
+            try:
+                p = Path(str(raw))
+                if not p.is_dir():
+                    continue
+                rp = str(p.resolve())
+                if rp in seen:
+                    continue
+                seen.add(rp)
+                dirs.append(p)
+            except Exception:
+                continue
+        return dirs
+
     def _start_watcher(self) -> None:
         """启动实时监控：三级降级——Observer（事件驱动）→ PollingObserver（watchdog 内置轮询，兼容
         SMB/远程共享目录）→ 自写目录轮询（watchdog 包不可用时的最后兜底），保证任何环境都不漏事件。
@@ -1173,53 +1212,32 @@ class Zitifenlei(_PluginBase):
         self._stop_polling()
         if not self._enabled or self._db is None:
             return
-        monitor_enabled = bool(self.get_resource_or_config("monitor_enabled"))
-        if not monitor_enabled:
-            self._db.add_log(
-                "目录监控未启动：「是否启用监控」未开启（总开关，统一控制字体监控目录 / ASS字幕目录监控 / ASS目录监控子集）",
-                "info",
-            )
-            return
-        # 配置预检：开关开了但对应目标目录缺失 → 放文件也不会真正处理，提前暴露
+        # v3.3.0：没有「是否启用监控」总开关——填了哪个目录就监控哪个，全空则不启动。
         lib_dir_cfg = self.get_resource_or_config("lib_dir") or ""
         ass_dir_cfg = self.get_resource_or_config("ass_dir") or ""
         subset_dir_cfg = self.get_resource_or_config("subset_dir") or ""
-        if monitor_enabled and not lib_dir_cfg:
+        input_dir = self.get_resource_or_config("input_dir") or ""
+        # 配置预检：已配目录但关键目标缺失 → 放文件也不会真正处理，提前暴露
+        if input_dir and not lib_dir_cfg:
             self._db.add_log(
-                "「是否启用监控」已开启但未配置「字体库目录」：监控到的字体将无法直接归档，请到设置 → 目录配置补上字体库目录",
+                "已配置「字体监控目录」但未配置「字体库目录」：监控到的字体无法直接归档，"
+                "请到 设置 → 目录配置 补上字体库目录",
                 "warning",
             )
-        if monitor_enabled and not ass_dir_cfg:
+        if not ass_dir_cfg and not subset_dir_cfg:
             self._db.add_log(
-                "「是否启用监控」已开启，但「ASS字幕目录监控」未配置：字幕放入后无法自动检查", "warning"
+                "未配置字幕目录（ASS 字幕检查 / 自动子集化）：字幕放入后不会被自动检查或子集化", "info"
             )
         if subset_dir_cfg and not Path(subset_dir_cfg).is_dir():
             self._db.add_log(
                 f"已配置「ASS目录监控子集」但目录不可达（{subset_dir_cfg}）：放入的字幕无法自动子集化", "warning"
             )
-        input_dir = self.get_resource_or_config("input_dir") or ""
-        ass_dir = self.get_resource_or_config("ass_dir") or ""
-        missing_dir_cfg = self.get_resource_or_config("missing_font_dir") or ""
-        if missing_dir_cfg and not Path(missing_dir_cfg).is_dir():
-            self._db.add_log(
-                f"已配置「缺失字体接收目录」但目录不可达（{missing_dir_cfg}）：放入的字体无法严格校验", "warning"
-            )
-        paths: List[Path] = []
-        if input_dir and Path(input_dir).is_dir():
-            paths.append(Path(input_dir))
-        if ass_dir and Path(ass_dir).is_dir():
-            paths.append(Path(ass_dir))
-        if subset_dir_cfg and Path(subset_dir_cfg).is_dir():
-            paths.append(Path(subset_dir_cfg))
-        if missing_dir_cfg and Path(missing_dir_cfg).is_dir():
-            paths.append(Path(missing_dir_cfg))
-        # 字体库目录也纳入监控：外部直接放入/替换的字体事件级发现（只增量索引，不归档）
-        if lib_dir_cfg and Path(lib_dir_cfg).is_dir():
-            paths.append(Path(lib_dir_cfg))
+        paths = self._monitor_dirs()
         if not paths:
             self._db.add_log(
-                f"目录监控未启动：监控目录不可达（input_dir={input_dir or '(空)'}，ass_dir={ass_dir or '(空)'}）",
-                "warning",
+                "目录监控未启动：未配置任何监控目录"
+                "（字体监控目录 / ASS 字幕检查目录 / ASS 自动子集化目录 / 字体库目录 均为空或不可达）",
+                "info",
             )
             return
         if _HAS_WATCHDOG:
@@ -1283,9 +1301,8 @@ class Zitifenlei(_PluginBase):
     def _start_polling(self) -> None:
         """启动目录轮询线程：watchdog 未装/启动失败时每 60s 扫描一次，保证「放进去能处理」。"""
         self._stop_polling()
-        if not (
-            self._enabled and self.get_resource_or_config("monitor_enabled")
-        ):
+        # v3.3.0：不看总开关，只要配置了任意可用监控目录就启动轮询兜底
+        if not (self._enabled and self._monitor_dirs()):
             return
         self._poll_stop = threading.Event()
         t = threading.Thread(target=self._poll_loop, name="zt-poll", daemon=True)
@@ -1323,7 +1340,7 @@ class Zitifenlei(_PluginBase):
                     return  # 停止信号
                 if not self._enabled or self._db is None:
                     return
-                if self.get_resource_or_config("monitor_enabled"):
+                if self._monitor_dirs():
                     self.__auto_monitor_scan()
                     self.__auto_ass_check()
             except Exception:
@@ -1380,7 +1397,6 @@ class Zitifenlei(_PluginBase):
                 is_ass = is_ass_file(p.name)
                 is_arch = arch.is_any_archive(p.name)
                 _dir_allows = {
-                    "missing": is_font,
                     "lib": is_font,
                     "subset": is_ass,
                     "input": is_font or is_arch,
@@ -1393,15 +1409,6 @@ class Zitifenlei(_PluginBase):
                 # 字体监控目录里的压缩包：安全解压后逐个归档（大字体包上传受限时的替代通道）
                 if kind == "input" and is_arch:
                     success = self._handle_font_archive(p)
-                    return
-                # 缺失字体专用目录：先稳定等待，再逐 face 严格校验（不与普通归档重复处理）
-                missing_dir_cfg = self.get_resource_or_config("missing_font_dir") or ""
-                if (
-                    missing_dir_cfg
-                    and is_font_file(p.name)
-                    and _path_within(p, Path(missing_dir_cfg))
-                ):
-                    success = self._handle_missing_dir_font(p)
                     return
                 # 字体库目录内直接放入/替换的字体（用户手动放/外部工具同步）：
                 # 只做增量索引，不归档、不移动、不删源文件（同一目录不被两套流程重复处理）
@@ -1581,67 +1588,6 @@ class Zitifenlei(_PluginBase):
                 except Exception:
                     pass
             return None
-
-    def _handle_missing_dir_font(self, file_path: Path) -> bool:
-        """缺失字体专用目录：等稳定 → 逐 face 严格校验 → 收录或拒绝。
-
-        与普通字体库目录的区别（两套策略互不重复处理，靠目录归属路由）：
-        - 普通库/监控目录：常规归档，只校验指纹与元数据；
-        - 缺失专用目录：必须命中当前缺失目标，且同一 face 真实覆盖至少一个缺失字符；
-          无关/损坏/未覆盖任何缺字的字体拒绝入库，移入同目录 rejected/ 留档（不删用户文件）。
-        返回 True=已处理完毕（收录/拒绝），False=本次未完成（外层安排有限重试）。
-        """
-        if self._db is None:
-            return False
-        # 稳定性探测：写入中的半截字体不校验（半文件必然解析失败，白等一次重试）
-        if not _wait_file_stable(file_path):
-            return False
-        try:
-            targets = self._missing_glyph_targets()
-        except Exception as err:
-            self._db.add_log(f"缺失字体目录校验失败（读取缺失目标异常）: {err}", "warning")
-            return False
-        verdict = self._evaluate_font_for_targets(
-            file_path, targets, file_name=file_path.name
-        ) if targets else {
-            "ok": False,
-            "reason": "当前没有缺失字体目标（缺失列表为空）",
-            "name": "",
-        }
-        if not verdict.get("ok"):
-            reason = str(verdict.get("reason") or "未覆盖任何缺字")
-            missing_dir = Path(self.get_resource_or_config("missing_font_dir") or "")
-            try:
-                rejected_dir = missing_dir / "rejected"
-                rejected_dir.mkdir(parents=True, exist_ok=True)
-                dest = rejected_dir / file_path.name
-                if dest.exists():
-                    dest = rejected_dir / f"{file_path.stem}-{int(time.time())}{file_path.suffix}"
-                shutil.move(str(file_path), str(dest))
-                self._db.add_log(
-                    f"缺失字体目录拒绝 {file_path.name}：{reason}（已移至 rejected/ 留档）", "warning"
-                )
-            except Exception as err:
-                self._db.add_log(
-                    f"缺失字体目录拒绝 {file_path.name}：{reason}（留档移动失败: {err}）", "warning"
-                )
-            return True
-        ret = self._archive_font_file(file_path, source="missing")
-        if ret is not None and ret > 0:
-            self._schedule_index_rebuild()
-            self._db.add_log(
-                f"缺失字体目录收录 {file_path.name} → 解决「{verdict.get('matched')}」"
-                f"（覆盖 {verdict.get('covered_chars') or '缺失字符'}）",
-                "info",
-            )
-            return True
-        if ret in (_ARCH_PENDING, _ARCH_DUP, _ARCH_DUP_DELETED, _ARCH_DUP_DEL_FAILED):
-            if ret == _ARCH_PENDING:
-                self._db.add_log(
-                    f"缺失字体目录收录 {file_path.name} → 已加入「待确认」（目录自动收集关闭）", "info"
-                )
-            return True
-        return False
 
     def _archive_font_file(
         self, file_path: Path, source: str = "auto", force_pending: bool = False
@@ -1897,7 +1843,15 @@ class Zitifenlei(_PluginBase):
             if not f.is_file():
                 continue
             if is_font_file(f.name):
-                ret = self._archive_font_file(f, source=source, force_pending=force_pending)
+                target = f
+                if force_pending:
+                    # 种子收集/临时暂存目录会被清理：进待确认前先复制到稳定路径，
+                    # 否则待确认记录会指向已删除文件（幽灵条目）
+                    target = self._stable_pending_copy(f)
+                    if target is None:
+                        stats["failed"] += 1
+                        continue
+                ret = self._archive_font_file(target, source=source, force_pending=force_pending)
                 if ret is not None and ret > 0:
                     stats["added"].append(f.name)
                 elif ret == _ARCH_PENDING:
@@ -1924,14 +1878,12 @@ class Zitifenlei(_PluginBase):
 
     # ─── 监控目录类型 / 目录内压缩包（v3.2.3）────────────────
     _WATCH_DIR_LABELS = {
-        "missing": "缺失字体接收目录",
         "lib": "字体库目录",
         "subset": "ASS 自动子集化目录",
         "input": "字体监控目录",
         "ass": "ASS 字幕检查目录",
     }
     _WATCH_DIR_EXPECT = {
-        "missing": "字体文件",
         "lib": "字体文件",
         "subset": ".ass 字幕",
         "input": "字体文件或字体压缩包(.zip/.7z/.rar)",
@@ -1939,15 +1891,14 @@ class Zitifenlei(_PluginBase):
     }
 
     def _watch_dir_kind(self, path: Path) -> str:
-        """判断文件属于哪个配置目录：missing / lib / subset / input / ass；都不属于返回 ""。
+        """判断文件属于哪个配置目录：lib / subset / input / ass；都不属于返回 ""。
 
         目录可能嵌套（例如字体库目录配在字体监控目录里面），按「更具体/更严格」优先：
-        缺失字体接收目录 > 字体库目录 > ASS 自动子集化目录 > 字体监控目录 > ASS 字幕检查目录。
+        字体库目录 > ASS 自动子集化目录 > 字体监控目录 > ASS 字幕检查目录。
         监控事件按「所在目录」决定允许的文件类型，而不是只看后缀——放错目录直接跳过。
         """
         try:
             for kind, key in (
-                ("missing", "missing_font_dir"),
                 ("lib", "lib_dir"),
                 ("subset", "subset_dir"),
                 ("input", "input_dir"),
@@ -1963,11 +1914,32 @@ class Zitifenlei(_PluginBase):
     def _log_dir_mismatch(
         self, p: Path, kind: str, is_font: bool, is_ass: bool, is_arch: bool
     ) -> None:
-        """放错目录的文件：只对字体/字幕/压缩包记日志，其它杂项（.txt/.url/缩略图等）静默跳过。"""
+        """放错目录的文件：只对字体/字幕/压缩包记日志，其它杂项（.txt/.url/缩略图等）静默跳过。
+
+        压缩包放错目录额外提醒（文字日志 + 系统通知聚合），并且**绝不删除/移动**该压缩包。
+        """
         if not (is_font or is_ass or is_arch) or self._db is None:
             return
         label = self._WATCH_DIR_LABELS.get(kind, kind)
         expect = self._WATCH_DIR_EXPECT.get(kind, "")
+        if is_arch:
+            try:
+                self._db.add_log(
+                    f"压缩包放错目录，已跳过且未删除: {p.name}"
+                    f"（{label}只处理{expect}；字体压缩包请放「字体监控目录」）",
+                    "warning",
+                )
+            except Exception:
+                pass
+            try:
+                with self._lock:
+                    self._notify_agg.setdefault("archives_wrong_dir", []).append(
+                        {"name": p.name, "label": label}
+                    )
+                self._queue_agg_notify()
+            except Exception:
+                pass
+            return
         try:
             self._db.add_log(
                 f"目录类型不匹配，已跳过: {p.name}（{label}只处理{expect}）",
@@ -2012,14 +1984,100 @@ class Zitifenlei(_PluginBase):
         except Exception:
             pass
 
-    def _handle_font_archive(self, archive_path: Path) -> bool:
-        """处理「字体监控目录」里的压缩包：安全解压后把里面的字体逐个归档。
+    def _stable_pending_copy(self, src: Path) -> Optional[Path]:
+        """把即将进「待确认」的临时字体复制到插件临时目录下的稳定路径。
 
-        - 上传受反向代理 413/大文件限制时，把字体包直接丢进字体监控目录即可；
-        - 复用上传同款安全解压（只解一层、防 Zip Slip、成员/体积上限、后缀白名单）；
-        - 处理成功后记录指纹，全量扫描/重启不会重复解压；
-        - 返回 True=本次已处理完（含跳过/失败已写日志，不再重试）；
-          返回 False=仍在写入等可重试原因，交给监控重试机制。
+        压缩包解压目录 / 种子暂存目录在处理结束后会被清理；待确认记录如果仍指向那里，
+        文件一删条目就成了幽灵（打开待确认列表会被自动清理，用户永远看不到）。
+        这里先复制到 tmp/pending_archive_*，再让 _queue_auto_pending 登记该稳定路径。
+        """
+        try:
+            tmp_root = Path(self._tmp_dir) if self._tmp_dir else Path(tempfile.gettempdir())
+            tmp_root.mkdir(parents=True, exist_ok=True)
+            dest = tmp_root / f"pending_archive_{uuid.uuid4().hex}_{src.name}"
+            shutil.copy2(src, dest)
+            return dest
+        except Exception as err:
+            if self._db is not None:
+                try:
+                    self._db.add_log(f"待确认字体复制失败 {src.name}: {err}", "error")
+                except Exception:
+                    pass
+            return None
+
+    def _apply_archive_cleanup(self, archive_path: Path) -> Tuple[str, str]:
+        """按配置清理已处理完的压缩包，返回 (action, keep_reason)。
+
+        action: "deleted" / "moved" / ""（保留）；keep_reason 仅在保留时给出原因。
+        调用方需先确认「自动执行开 + 0 失败 + 有归档/去重结果」。
+        """
+        if not bool(self.get_resource_or_config("archive_cleanup_enabled")):
+            return "", "未开启「解压整理后自动清理压缩包」"
+        action = str(self.get_resource_or_config("archive_cleanup_action") or "move")
+        if action == "delete":
+            try:
+                archive_path.unlink()
+                return "deleted", ""
+            except Exception as err:
+                if self._db is not None:
+                    try:
+                        self._db.add_log(
+                            f"删除压缩包失败 {archive_path.name}: {err}（已保留）", "warning"
+                        )
+                    except Exception:
+                        pass
+                return "", f"删除失败: {err}"
+        # 默认 move：移到 <字体监控目录>/已处理压缩包/
+        try:
+            input_dir = self.get_resource_or_config("input_dir") or ""
+            base = Path(input_dir) if input_dir else archive_path.parent
+            done_dir = base / _ARCHIVE_DONE_DIR_NAME
+            done_dir.mkdir(parents=True, exist_ok=True)
+            dest = done_dir / archive_path.name
+            if dest.exists():
+                dest = done_dir / f"{archive_path.stem}-{int(time.time())}{archive_path.suffix}"
+            shutil.move(str(archive_path), str(dest))
+            return "moved", ""
+        except Exception as err:
+            if self._db is not None:
+                try:
+                    self._db.add_log(
+                        f"移动压缩包到「{_ARCHIVE_DONE_DIR_NAME}/」失败 {archive_path.name}: "
+                        f"{err}（已保留）",
+                        "warning",
+                    )
+                except Exception:
+                    pass
+            return "", f"移动失败: {err}"
+
+    def _process_monitor_archives(self) -> None:
+        """扫描「字体监控目录」里的压缩包并逐个处理（轮询兜底 / auto_collect 关闭时用）。"""
+        try:
+            input_dir = self.get_resource_or_config("input_dir") or ""
+            if not input_dir or not Path(input_dir).is_dir():
+                return
+            for f in sorted(Path(input_dir).rglob("*")):
+                if self._stopping:
+                    break
+                if not f.is_file() or self._is_system_hidden_path(f):
+                    continue
+                if arch.is_any_archive(f.name):
+                    self._handle_font_archive(f)
+        except Exception as err:
+            if self._db is not None:
+                try:
+                    self._db.add_log(f"监控压缩包扫描失败: {err}", "warning")
+                except Exception:
+                    pass
+
+    def _handle_font_archive(self, archive_path: Path) -> bool:
+        """处理「字体监控目录」里的压缩包：安全解压后逐个归档 / 进待确认，并按配置清理包。
+
+        - 「是否自动执行监控结果」开：解出的字体直接归档；关：字体复制到稳定临时路径后进「待确认」；
+        - 清理开关开且（自动执行为开 + 0 失败 + 有归档/去重结果）时，按清理方式
+          移到 <字体监控目录>/已处理压缩包/ 或 直接删除；其余情况一律保留并写明原因；
+        - 放错目录的压缩包由目录门禁拦截（只提醒、不删除），不会走到这里；
+        - 返回 True=已处理完（含跳过/失败，不再重试）；False=仍在写入等可重试原因。
         """
         name = archive_path.name
         if not arch.is_any_archive(name) or self._db is None:
@@ -2046,7 +2104,7 @@ class Zitifenlei(_PluginBase):
         if size > MAX_UPLOAD_TOTAL_BYTES:
             self._db.add_log(
                 f"监控压缩包 {name}: 超过单次处理总量上限"
-                f"（{MAX_UPLOAD_TOTAL_BYTES // (1024 * 1024)}MB），已跳过",
+                f"（{MAX_UPLOAD_TOTAL_BYTES // (1024 * 1024)}MB），已跳过（压缩包保留）",
                 "warning",
             )
             return True
@@ -2056,6 +2114,7 @@ class Zitifenlei(_PluginBase):
         except Exception:
             pass
         dest = tmp_root / f"watch_archive_{uuid.uuid4().hex}"
+        auto_collect = self.get_resource_or_config("auto_collect") is not False
         try:
             result = arch.extract_archive(
                 archive_path,
@@ -2066,24 +2125,20 @@ class Zitifenlei(_PluginBase):
                 max_member_bytes=max_font_file_bytes(),
             )
             fonts = [Path(item.path) for item in result.files]
-            if not fonts:
-                detail = "；".join(
-                    f"{member}: {reason}"
-                    for member, reason in (result.skipped + result.errors)[:5]
-                )
-                self._db.add_log(
-                    f"监控压缩包 {name}: 解出 0 个字体" + (f"（{detail}）" if detail else ""),
-                    "warning",
-                )
-                self._mark_archive_done(sig)
-                return True
             added = 0
             dup = 0
             pending = 0
             failed = 0
             added_names: List[str] = []
             for font in fonts:
-                ret = self._archive_font_file(font, source="monitor_archive")
+                target = font
+                if not auto_collect:
+                    # 待确认会保留源文件引用：先复制到稳定路径，避免解压目录清理后变幽灵
+                    target = self._stable_pending_copy(font)
+                    if target is None:
+                        failed += 1
+                        continue
+                ret = self._archive_font_file(target, source="monitor_archive")
                 if ret is not None and ret > 0:
                     added += 1
                     added_names.append(font.name)
@@ -2093,24 +2148,64 @@ class Zitifenlei(_PluginBase):
                     dup += 1
                 else:
                     failed += 1
+            # 清理策略：只有「直接整理 + 无失败 + 至少有归档/去重结果」才动压缩包；
+            # 进待确认 / 有失败 / 开关关闭 / 包内无字体 → 保留并在通知里说明原因。
+            cleanup_action = ""
+            keep_reason = ""
+            if not fonts:
+                keep_reason = "包内没有可处理的字体"
+            elif not auto_collect:
+                keep_reason = "字体已进「待确认」，确认前保留压缩包"
+            elif failed > 0:
+                keep_reason = f"有 {failed} 个字体处理失败"
+            elif added + dup <= 0:
+                keep_reason = "没有成功归档的字体"
+            else:
+                cleanup_action, keep_reason = self._apply_archive_cleanup(archive_path)
             self._mark_archive_done(sig)
-            self._db.add_log(
-                f"监控压缩包 {name}: 解出 {len(fonts)} 个字体"
-                f"（归档 {added}，跳过 {dup + pending}，失败 {failed}）",
-                "info" if not failed else "warning",
-            )
+            if not fonts:
+                detail = "；".join(
+                    f"{member}: {reason}" for member, reason in (result.skipped + result.errors)[:5]
+                )
+                self._db.add_log(
+                    f"监控压缩包 {name}: 解出 0 个字体" + (f"（{detail}）" if detail else "")
+                    + "（压缩包保留）",
+                    "warning",
+                )
+            else:
+                pending_note = f"待确认 {pending}，" if pending else ""
+                if cleanup_action == "deleted":
+                    tail = "；压缩包已删除"
+                elif cleanup_action == "moved":
+                    tail = f"；压缩包已移到「{_ARCHIVE_DONE_DIR_NAME}/」"
+                elif keep_reason:
+                    tail = f"；压缩包保留（{keep_reason}）"
+                else:
+                    tail = "；压缩包保留"
+                self._db.add_log(
+                    f"监控压缩包 {name}: 解出 {len(fonts)} 个字体"
+                    f"（归档 {added}，{pending_note}跳过 {dup}，失败 {failed}）" + tail,
+                    "info" if not failed else "warning",
+                )
+            with self._lock:
+                self._notify_agg.setdefault("archives", []).append(
+                    {
+                        "name": name,
+                        "total": len(fonts),
+                        "added": added,
+                        "skipped": dup,
+                        "pending": pending,
+                        "failed": failed,
+                        "action": cleanup_action,
+                        "keep_reason": keep_reason,
+                    }
+                )
             if added:
                 try:
-                    with self._lock:
-                        self._notify_agg["fonts"].extend(added_names)
-                        if not self._notify_agg.get("archive_mode"):
-                            self._notify_agg["archive_mode"] = (
-                                self.get_resource_or_config("archive_mode") or "copy"
-                            )
                     self._schedule_index_rebuild()
-                    self._queue_agg_notify()
                 except Exception:
                     pass
+            self._queue_agg_notify()
             return True
         except Exception as err:
             self._db.add_log(f"监控压缩包处理失败 {name}: {err}", "error")
@@ -2126,6 +2221,9 @@ class Zitifenlei(_PluginBase):
             for part in p.parts:
                 low = part.lower()
                 if low in ("@eadir", "@justabit", "@pleasereadme", "#recycle", "@tmphds", "@sharebin"):
+                    return True
+                # 压缩包清理后移入的「已处理压缩包/」子目录：整体忽略，避免被再次扫描/监控
+                if part == _ARCHIVE_DONE_DIR_NAME:
                     return True
                 if part.startswith(".") and part not in (".", ".."):
                     return True
@@ -2229,6 +2327,8 @@ class Zitifenlei(_PluginBase):
             subs_subset = list(buf.get("subs_subset") or [])
             subs_ok = list(buf.get("subs_ok") or [])
             subs_unverified = list(buf.get("subs_unverified") or [])
+            archives = list(buf.get("archives") or [])
+            archives_wrong_dir = list(buf.get("archives_wrong_dir") or [])
             buf["fonts"] = []
             buf["fonts_skipped"] = []
             buf["fonts_dup_deleted"] = 0
@@ -2240,6 +2340,8 @@ class Zitifenlei(_PluginBase):
             buf["subs_subset"] = []
             buf["subs_ok"] = []
             buf["subs_unverified"] = []
+            buf["archives"] = []
+            buf["archives_wrong_dir"] = []
             buf["timer"] = None
         if not (
             fonts
@@ -2252,10 +2354,45 @@ class Zitifenlei(_PluginBase):
             or subs_subset
             or subs_ok
             or subs_unverified
+            or archives
+            or archives_wrong_dir
         ):
             return
         if not self.get_resource_or_config("notify_enabled"):
             return
+        # 压缩包处理单独一条通知（与目录监控的普通字体/字幕通知分开）
+        if archives or archives_wrong_dir:
+            lines: List[str] = []
+            for item in archives_wrong_dir[:10]:
+                lines.append(
+                    f"⚠ 压缩包放错目录：{item.get('name') or '压缩包'}"
+                    f" 在「{item.get('label') or '其他目录'}」；"
+                    "字体压缩包请放「字体监控目录」，已跳过且未删除"
+                )
+            for item in archives[:10]:
+                total = int(item.get("total") or 0)
+                parts = [f"归档 {int(item.get('added') or 0)}"]
+                if int(item.get("skipped") or 0):
+                    parts.append(f"跳过 {int(item.get('skipped') or 0)}")
+                if int(item.get("pending") or 0):
+                    parts.append(f"待确认 {int(item.get('pending') or 0)}")
+                if int(item.get("failed") or 0):
+                    parts.append(f"失败 {int(item.get('failed') or 0)}")
+                action = str(item.get("action") or "")
+                if action == "deleted":
+                    tail = "压缩包已删除"
+                elif action == "moved":
+                    tail = f"压缩包已移到「{_ARCHIVE_DONE_DIR_NAME}/」"
+                else:
+                    reason = str(item.get("keep_reason") or "")
+                    tail = "压缩包保留" + (f"（{reason}）" if reason else "")
+                lines.append(
+                    f"📦 {item.get('name') or '压缩包'}：解出 {total} 个字体 → "
+                    f"{'，'.join(parts)}；{tail}"
+                )
+            if len(archives) > 10:
+                lines.append(f"… 等 {len(archives)} 个压缩包")
+            self._notify("字体分类管家：压缩包处理", "\n".join(lines))
         # 字体与字幕分开通知：字体一条、字幕一条，不混在同一消息里
         if fonts or fonts_skipped or font_failed or fonts_dup_deleted or fonts_delete_failed:
             # 字体归档通知（仅字体）：新增/跳过/失败分项，只有跳过时也发（用户需要知道去向）
@@ -3050,10 +3187,9 @@ class Zitifenlei(_PluginBase):
         """用 HarfBuzz 引擎子集化一份字幕，返回与其他子集化引擎同构的字典。
 
         任一字体完全缺失 → status=missing（不产出半成品）；仅部分字符未覆盖 →
-        success + warning（已覆盖字符正常内嵌）。默认在独立工作进程中执行，
-        uharfbuzz 段错误/病态字体只影响当前字幕；隔离开启时工作进程无法启动直接
-        报错（不允许回退主进程执行），只有显式关闭隔离开关才走进程内模式
-        （两条路径共用 subset_ass_with_plan，结果口径一致）。
+        success + warning（已覆盖字符正常内嵌）。v3.3.0 起**始终**在独立工作进程中执行，
+        uharfbuzz 段错误/病态字体只影响当前字幕；工作进程无法启动时直接报错，
+        不再回退到 MoviePilot 主进程。
         """
         try:
             raw = src.read_bytes()
@@ -3100,24 +3236,19 @@ class Zitifenlei(_PluginBase):
                     "reason": "缺字体: " + "、".join(missing_pre),
                     "missing_fonts": missing_pre,
                 }
-            result: Optional[SubsetResult] = None
-            if self.get_resource_or_config("subset_process_isolation"):
-                result = self._subset_via_worker(src, out_path, plan, plan_warnings)
-                if result is None:
-                    # P2-15：隔离开启时禁止回退主进程执行——最需要隔离的正是
-                    # worker 起不来的环境（依赖/路径问题），此时回到主进程跑
-                    # uharfbuzz 等于把段错误风险重新引回 MoviePilot 宿主。
-                    return {
-                        "status": "error",
-                        "out": "",
-                        "reason": "子集化进程隔离已开启，但工作进程无法启动"
-                        "（请检查插件目录下的 subset_worker.py 与 Python 解释器/uharfbuzz 依赖）；"
-                        "已拒绝在主进程内执行。如需进程内模式请在设置中关闭「子集化进程隔离」",
-                        "missing_fonts": [],
-                    }
-            else:
-                # 用户显式关闭隔离：进程内执行（与旧版本行为一致）
-                result = hb_subset_ass_file(src, out_path, usage_map, self._lookup_face_refs)
+            # v3.3.0：始终使用独立工作进程。进程起不来就直接报错——
+            # 最需要隔离的正是 worker 起不来的环境（依赖/路径问题），此时回主进程跑
+            # uharfbuzz 等于把段错误风险重新引回 MoviePilot 宿主。
+            result = self._subset_via_worker(src, out_path, plan, plan_warnings)
+            if result is None:
+                return {
+                    "status": "error",
+                    "out": "",
+                    "reason": "子集化工作进程无法启动"
+                    "（请检查插件目录下的 subset_worker.py 与 Python 解释器/uharfbuzz 依赖）；"
+                    "已拒绝在主进程内执行",
+                    "missing_fonts": [],
+                }
         except Exception as err:
             return {"status": "error", "out": "", "reason": f"HarfBuzz 子集化异常: {err}", "missing_fonts": []}
         if result.missing_fonts:
@@ -3162,9 +3293,9 @@ class Zitifenlei(_PluginBase):
     ) -> Optional[SubsetResult]:
         """在常驻工作进程中执行子集化。
 
-        返回 None 表示工作进程无法启动（脚本缺失/解释器不可用），调用方回退进程内；
-        崩溃、超时、协议异常返回带 errors 的 SubsetResult（已隔离，不影响宿主进程）。
-        进程崩溃/超时后客户端会杀掉当前进程，下一次请求自动重启。
+        返回 None 表示工作进程无法启动（脚本缺失/解释器不可用），调用方必须按失败处理
+        （v3.3.0 起不再回退进程内执行）；崩溃、超时、协议异常返回带 errors 的 SubsetResult
+        （已隔离，不影响宿主进程）。进程崩溃/超时后客户端会杀掉当前进程，下一次请求自动重启。
         """
         client = self._get_subset_worker()
         if client is None:
@@ -3191,8 +3322,8 @@ class Zitifenlei(_PluginBase):
                 errors=[f"子集化超时（{int(timeout)} 秒），工作进程已终止（已隔离）"]
             )
         except SubsetWorkerStartError as err:
-            # 启动失败：交给调用方回退进程内，避免插件功能不可用
-            _logger.warning("子集化工作进程启动失败，回退进程内执行: %s", err)
+            # v3.3.0：启动失败直接按错误处理，不回退主进程执行
+            _logger.error("子集化工作进程启动失败（不回退主进程）: %s", err)
             return None
         except SubsetWorkerCrashed as err:
             self._cleanup_subset_temp(out_path, since=started)
@@ -3209,10 +3340,10 @@ class Zitifenlei(_PluginBase):
         return result
 
     def _get_subset_worker(self) -> Optional[SubsetWorkerClient]:
-        """懒启动常驻工作进程；脚本缺失返回 None（调用方回退进程内执行）。"""
+        """懒启动常驻工作进程；脚本缺失返回 None（调用方按失败处理，不回退主进程）。"""
         worker = Path(__file__).resolve().parent / "subset_worker.py"
         if not worker.is_file():
-            _logger.warning("子集化工作进程不存在，回退进程内执行: %s", worker)
+            _logger.error("子集化工作进程脚本不存在（不回退主进程）: %s", worker)
             return None
         client = self._subset_worker
         if client is None:
@@ -4673,9 +4804,11 @@ class Zitifenlei(_PluginBase):
             cfg = dict(self.get_config() or {})
         except Exception:
             pass
-        # 运行时 _config 已含默认值合并与老开关迁移推导（monitor_enabled），优先于宿主原始配置兜底，
-        # 避免宿主旧保存缺总开关键时 UI 误显示「关闭」
+        # 运行时 _config 已含默认值合并，优先于宿主原始配置兜底；
+        # v3.3.0：剔除已删除功能的旧配置键，避免旧宿主配置把已删开关又带回来
         cfg = {**dict(_DEFAULT_CONFIG), **dict(self._config), **cfg}
+        for _old_key in _DEPRECATED_CONFIG_KEYS:
+            cfg.pop(_old_key, None)
         # 总开关以运行时状态为准（与宿主原生保存联动，init_plugin 时已同步）
         cfg["enabled"] = self._enabled
         dirs = [
@@ -4709,6 +4842,9 @@ class Zitifenlei(_PluginBase):
             **dict(self._config),
             **{k: v for k, v in body.items()},
         }
+        # v3.3.0：已删除功能的旧配置键不再落库/落宿主配置
+        for _old_key in _DEPRECATED_CONFIG_KEYS:
+            new_cfg.pop(_old_key, None)
         persisted = True
         persist_error = ""
         # 1) 写入宿主原生配置（与宿主 PUT /plugin 同等的持久化路径，重启保留）
@@ -4719,6 +4855,7 @@ class Zitifenlei(_PluginBase):
             persist_error = str(err)
             _logger.warning("宿主配置写入失败: %s", err)
         # 2) 更新运行时并热生效
+        old_cleanup = bool((self._config or {}).get("archive_cleanup_enabled"))
         self._config = new_cfg
         self._apply_font_limits()
         if self._db:
@@ -4738,6 +4875,12 @@ class Zitifenlei(_PluginBase):
             if self._db is not None:
                 self._db.set_setting("enabled", self._enabled)
             self._db.add_log("插件配置已更新", "info")
+            if bool(new_cfg.get("archive_cleanup_enabled")) and not old_cleanup:
+                self._db.add_log(
+                    "已开启「解压整理后自动清理压缩包」：只对之后处理成功的压缩包生效；"
+                    "此前已处理并保留的压缩包不会自动清理（可手动移入「已处理压缩包/」）",
+                    "info",
+                )
             self._start_watcher()
         except Exception as err:
             _logger.warning("配置生效失败: %s", err)
