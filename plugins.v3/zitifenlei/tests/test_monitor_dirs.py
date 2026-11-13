@@ -322,3 +322,17 @@ def test_subtitle_filter_matching_presets_and_boundary(tmp_path):
     assert plugin._subtitle_name_matches("ep.简体.ass", ["简体"]) is True
     assert plugin._subtitle_name_matches("ep01.tc.ass", ["tc"]) is True
     assert plugin._subtitle_name_matches("ep01.zh-hans.ass", ["zh-hans"]) is True
+
+
+def test_subtitle_archive_srt_only_explains_not_ass(tmp_path):
+    plugin, checked, queued = _subtitle_plugin(tmp_path)
+    archive = tmp_path / "ass" / "crunchyroll.zip"
+    _make_zip(archive, names=("sc/ep01.srt", "sc/ep02.srt"))
+
+    assert plugin._handle_subtitle_archive(archive, "ass") is True
+    assert archive.is_file()
+    assert not checked and not queued
+    entry = plugin._notify_agg["archives"][-1]
+    assert entry["total"] == 0
+    assert ".srt" in entry["keep_reason"] and ".ass" in entry["keep_reason"]
+    assert any(".srt" in msg for _, msg in plugin._db.logs)

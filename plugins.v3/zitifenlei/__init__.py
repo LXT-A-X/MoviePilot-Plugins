@@ -452,7 +452,7 @@ class Zitifenlei(_PluginBase):
     plugin_name = "字体分类管家"
     plugin_desc = "字体归档整理与 ASS 字幕字体检查插件：扫描/上传字体到字体库，检查字幕缺失字体。"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/zitifenlei.png"
-    plugin_version = "3.4.0"
+    plugin_version = "3.4.1"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "zitifenlei_"
@@ -2293,8 +2293,22 @@ class Zitifenlei(_PluginBase):
                         failed += 1
             cleanup_action = ""
             keep_reason = ""
+            non_ass_exts = sorted(
+                {
+                    Path(str(member)).suffix.lower()
+                    for member, _reason in (list(result.skipped) + list(result.errors))
+                    if Path(str(member)).suffix.lower()
+                    in (".srt", ".ssa", ".vtt", ".sub", ".sup", ".lrc")
+                }
+            )
             if not all_ass:
-                keep_reason = "包内没有可处理的字幕（.ass）"
+                if non_ass_exts:
+                    keep_reason = (
+                        f"包内是 {'/'.join(non_ass_exts)} 字幕，不是 .ass；"
+                        "插件只处理 ASS 字幕（请先转换为 .ass）"
+                    )
+                else:
+                    keep_reason = "包内没有可处理的字幕（.ass）"
             elif not matched:
                 keep_reason = f"没有符合筛选条件的字幕（{filter_label}）"
             elif copy_failed:
@@ -2318,7 +2332,7 @@ class Zitifenlei(_PluginBase):
                 )
                 self._db.add_log(
                     f"{prefix} {name}: 解出 0 个字幕" + (f"（{detail}）" if detail else "")
-                    + "（压缩包保留）",
+                    + "（压缩包保留）" + (f"；{keep_reason}" if keep_reason else ""),
                     "warning",
                 )
             elif not matched:
@@ -8907,12 +8921,215 @@ class Zitifenlei(_PluginBase):
             pass
         return self._ok({"baseline_ts": ts}, "基线已重置")
 
+    def _processed_archive_roots(self) -> List[Dict[str, Any]]:
+        """三个支持压缩包的监控目录及其「已处理压缩包/」子目录。"""
+        roots: List[Dict[str, Any]] = []
+        for key, label in (
+            ("input_dir", "字体监控目录"),
+            ("ass_dir", "ASS 字幕检查目录"),
+            ("subset_dir", "ASS 自动子集化目录"),
+        ):
+            base = str(self.get_resource_or_config(key) or "").strip()
+            if not base:
+                continue
+            try:
+                base_path = Path(base)
+                done = base_path / _ARCHIVE_DONE_DIR_NAME
+                if done.is_dir():
+                    roots.append({"key": key, "label": label, "base": base_path, "done": done})
+            except Exception:
+                continue
+        return roots
+
+    def _safe_processed_archive(self, raw_path: str) -> Optional[Tuple[Dict[str, Any], Path]]:
+        """校验路径必须位于某个「已处理压缩包/」目录内，返回 (root, path)。"""
+        try:
+            target = Path(str(raw_path or "")).resolve()
+        except Exception:
+            return None
+        for root in self._processed_archive_roots():
+            try:
+                done = root["done"].resolve()
+                if target != done and done not in target.parents:
+                    continue
+                if target.is_file():
+                    return root, target
+            except Exception:
+                continue
+        return None
+
+    @staticmethod
+    def _prune_empty_dirs(start: Path, stop: Path) -> None:
+        try:
+            cur = Path(start)
+            stop = Path(stop)
+            while cur != stop and cur.is_dir() and not any(cur.iterdir()):
+                cur.rmdir()
+                cur = cur.parent
+        except Exception:
+            pass
+
+    def api_processed_archives(self) -> Dict[str, Any]:
+        """列出各监控目录「已处理压缩包/」里的压缩包，供管理/恢复/删除。"""
+        if not self._enabled:
+            return self._err("插件已停用，请先在设置中启用")
+        items: List[Dict[str, Any]] = []
+        for root in self._processed_archive_roots():
+            try:
+                for f in root["done"].rglob("*"):
+                    # 注意：不能套用 _is_system_hidden_path —— 它把「已处理压缩包」本身
+                    # 当系统隐藏目录忽略（监控/扫描时正确），管理列表必须能读到其中文件。
+                    if not f.is_file():
+                        continue
+                    try:
+                        st = f.stat()
+                    except Exception:
+                        continue
+                    items.append(
+                        {
+                            "path": str(f),
+                            "name": f.name,
+                            "source": root["label"],
+                            "source_key": root["key"],
+                            "size": int(st.st_size),
+                            "mtime": int(st.st_mtime),
+                        }
+                    )
+            except Exception as err:
+                _logger.debug("读取已处理压缩包失败 %s: %s", root.get("label"), err)
+        items.sort(key=lambda item: item.get("mtime") or 0, reverse=True)
+        return self._ok(
+            {
+                "items": items,
+                "count": len(items),
+                "total_size": sum(int(item.get("size") or 0) for item in items),
+            }
+        )
+
+    async def api_processed_archive_remove(self, request: Request = None) -> Dict[str, Any]:
+        """删除「已处理压缩包/」里的指定压缩包（不碰原监控目录里的文件）。"""
+        if not self._enabled:
+            return self._err("插件已停用，请先在设置中启用")
+        body: Dict[str, Any] = {}
+        try:
+            if request is not None:
+                data = await request.json()
+                if isinstance(data, dict):
+                    body = data
+        except Exception:
+            body = {}
+        raw_paths = body.get("paths")
+        if not isinstance(raw_paths, list):
+            raw_paths = [body.get("path")] if body.get("path") else []
+        removed = 0
+        errors: List[str] = []
+        for raw in raw_paths[:200]:
+            found = self._safe_processed_archive(str(raw or ""))
+            if not found:
+                errors.append(f"{raw}: 不在「已处理压缩包」目录内，已忽略")
+                continue
+            root, target = found
+            try:
+                target.unlink()
+                removed += 1
+                self._prune_empty_dirs(target.parent, root["done"])
+            except Exception as err:
+                errors.append(f"{target.name}: {err}")
+        if removed and self._db:
+            try:
+                self._db.add_log(f"已处理压缩包：删除 {removed} 个", "info")
+            except Exception:
+                pass
+        payload = {"removed": removed, "errors": errors}
+        if not removed and errors:
+            result = self._err(errors[0])
+            result["data"] = payload
+            return result
+        return self._ok(payload, f"已删除 {removed} 个压缩包")
+
+    async def api_processed_archive_restore(self, request: Request = None) -> Dict[str, Any]:
+        """把「已处理压缩包/」里的压缩包移回原监控目录。"""
+        if not self._enabled:
+            return self._err("插件已停用，请先在设置中启用")
+        body: Dict[str, Any] = {}
+        try:
+            if request is not None:
+                data = await request.json()
+                if isinstance(data, dict):
+                    body = data
+        except Exception:
+            body = {}
+        found = self._safe_processed_archive(str(body.get("path") or ""))
+        if not found:
+            return self._err("压缩包不存在或不在「已处理压缩包」目录内")
+        root, target = found
+        try:
+            dest = root["base"] / target.name
+            if dest.exists():
+                dest = root["base"] / f"{target.stem}-{int(time.time())}{target.suffix}"
+            shutil.move(str(target), str(dest))
+            self._prune_empty_dirs(target.parent, root["done"])
+            if self._db:
+                try:
+                    self._db.add_log(
+                        f"已处理压缩包恢复：{target.name} → {root['label']}", "info"
+                    )
+                except Exception:
+                    pass
+            return self._ok({"path": str(dest)}, f"已恢复到{root['label']}")
+        except Exception as err:
+            return self._err(f"恢复失败: {err}")
+
+    async def api_processed_archive_clear(self, request: Request = None) -> Dict[str, Any]:
+        """清空「已处理压缩包/」：可只清某个来源目录（source = input_dir/ass_dir/subset_dir）。"""
+        if not self._enabled:
+            return self._err("插件已停用，请先在设置中启用")
+        body: Dict[str, Any] = {}
+        try:
+            if request is not None:
+                data = await request.json()
+                if isinstance(data, dict):
+                    body = data
+        except Exception:
+            body = {}
+        source = str(body.get("source") or "")
+        removed = 0
+        errors: List[str] = []
+        for root in self._processed_archive_roots():
+            if source and root["key"] != source:
+                continue
+            try:
+                for f in list(root["done"].rglob("*")):
+                    if not f.is_file():
+                        continue
+                    try:
+                        f.unlink()
+                        removed += 1
+                    except Exception as err:
+                        errors.append(f"{f.name}: {err}")
+                self._prune_empty_dirs(root["done"], root["base"])
+            except Exception as err:
+                errors.append(f"{root['label']}: {err}")
+        if removed and self._db:
+            try:
+                self._db.add_log(f"已处理压缩包：清空 {removed} 个", "info")
+            except Exception:
+                pass
+        return self._ok(
+            {"removed": removed, "errors": errors},
+            f"已清空 {removed} 个压缩包",
+        )
+
     def get_api(self) -> List[Dict[str, Any]]:
         apis = [
             {"path": "/deps/check", "endpoint": self.api_deps_check, "methods": ["GET"], "auth": "bear", "summary": "检测运行依赖是否安装"},
             {"path": "/deps/install", "endpoint": self.api_deps_install, "methods": ["POST"], "auth": "bear", "summary": "重新安装运行依赖（pip）"},
             {"path": "/archive/tools", "endpoint": self.api_archive_tools_status, "methods": ["GET"], "auth": "bear", "summary": "解压工具探测状态（7z/rar 能力）"},
             {"path": "/archive/tools/install", "endpoint": self.api_archive_tools_install, "methods": ["POST"], "auth": "bear", "summary": "一键安装解压工具（apt/apk）"},
+            {"path": "/archives/processed", "endpoint": self.api_processed_archives, "methods": ["GET"], "auth": "bear", "summary": "已处理压缩包列表（三个监控目录下的 已处理压缩包/）"},
+            {"path": "/archives/processed/remove", "endpoint": self.api_processed_archive_remove, "methods": ["POST"], "auth": "bear", "summary": "删除已处理压缩包"},
+            {"path": "/archives/processed/restore", "endpoint": self.api_processed_archive_restore, "methods": ["POST"], "auth": "bear", "summary": "把已处理压缩包恢复到原监控目录"},
+            {"path": "/archives/processed/clear", "endpoint": self.api_processed_archive_clear, "methods": ["POST"], "auth": "bear", "summary": "清空已处理压缩包"},
             {"path": "/task/status", "endpoint": self.api_task_status, "methods": ["GET"], "auth": "bear", "summary": "后台任务状态（供前端拦截停用插件）"},
             {"path": "/stats", "endpoint": self.api_stats, "methods": ["GET"], "auth": "bear", "summary": "仪表盘统计"},
             {"path": "/vendors", "endpoint": self.api_vendors, "methods": ["GET"], "auth": "bear", "summary": "厂商分布"},
