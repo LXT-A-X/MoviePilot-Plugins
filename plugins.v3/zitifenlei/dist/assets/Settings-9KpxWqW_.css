@@ -453,64 +453,64 @@
   max-width: 100%;
 }
 
-.zt-card-title[data-v-bc7b3b27] {
+.zt-card-title[data-v-9bba25eb] {
   font-size: 15px;
   font-weight: 600;
 }
 /* 插件停用时：其他配置黑化且不可点击 */
-.zt-disabled-zone.is-off[data-v-bc7b3b27] {
+.zt-disabled-zone.is-off[data-v-9bba25eb] {
   pointer-events: none;
   opacity: 0.45;
   filter: grayscale(0.9);
 }
-.zt-option-label[data-v-bc7b3b27] {
+.zt-option-label[data-v-9bba25eb] {
   font-size: 13px;
   color: inherit;
   opacity: 0.8;
 }
-.zt-radio-title[data-v-bc7b3b27] {
+.zt-radio-title[data-v-9bba25eb] {
   font-size: 13px;
 }
-.zt-radio-desc[data-v-bc7b3b27] {
+.zt-radio-desc[data-v-9bba25eb] {
   font-size: 12px;
   opacity: 0.65;
 }
 /* 开关行统一：长描述换行时开关与标题首行对齐（不再垂直居中浮动） */
-.zt-switch-row[data-v-bc7b3b27] {
+.zt-switch-row[data-v-9bba25eb] {
   display: flex;
   align-items: flex-start;
   gap: 16px;
   padding: 10px 0;
 }
 /* 左侧文字容器吃满剩余宽度，长英文/路径可折行不撑破布局 */
-.zt-switch-row > .flex-grow-1[data-v-bc7b3b27] {
+.zt-switch-row > .flex-grow-1[data-v-9bba25eb] {
   min-width: 0;
 }
 /* 右侧开关固定不收缩；上移 4px 对齐标题首行（compact 开关自身有顶部留白） */
-.zt-switch-title[data-v-bc7b3b27] {
+.zt-switch-title[data-v-9bba25eb] {
   font-size: 14px;
   font-weight: 500;
 }
-.zt-switch-desc[data-v-bc7b3b27] {
+.zt-switch-desc[data-v-9bba25eb] {
   font-size: 12px;
   opacity: 0.7;
 }
 /* 子块（压缩包处理 / 解压工具）与上方字段的分隔 */
-.zt-subblock[data-v-bc7b3b27] {
+.zt-subblock[data-v-9bba25eb] {
   border-top: 1px solid rgba(128, 128, 128, 0.18);
   padding-top: 12px;
 }
 /* 压缩包清理方式：总开关关闭时整体置灰（单选本身也被 disabled） */
-.zt-cleanup-radios.is-off[data-v-bc7b3b27] {
+.zt-cleanup-radios.is-off[data-v-9bba25eb] {
   opacity: 0.45;
 }
 /* 条件提示（如「仅移动模式生效」） */
-.zt-inline-flag[data-v-bc7b3b27] {
+.zt-inline-flag[data-v-9bba25eb] {
   font-weight: 500;
   opacity: 0.95;
 }
 /* 种子卡折叠标题行：整行可点，右侧箭头按钮 */
-.zt-collapse-head[data-v-bc7b3b27] {
+.zt-collapse-head[data-v-9bba25eb] {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -519,27 +519,27 @@
   cursor: pointer;
   user-select: none;
 }
-.zt-collapse-head > .zt-card-title[data-v-bc7b3b27] {
+.zt-collapse-head > .zt-card-title[data-v-9bba25eb] {
   flex: 1 1 auto;
   min-width: 0;
 }
 /* 高级/维护折叠面板：保持卡片观感 */
-.zt-expand-panel[data-v-bc7b3b27] {
+.zt-expand-panel[data-v-9bba25eb] {
   border-radius: 10px !important;
   overflow: hidden;
 }
-.zt-hint[data-v-bc7b3b27] {
+.zt-hint[data-v-9bba25eb] {
   font-size: 12px;
   opacity: 0.6;
   margin-top: 8px;
   line-height: 1.6;
 }
-.zt-record-line[data-v-bc7b3b27] {
+.zt-record-line[data-v-9bba25eb] {
   line-height: 1.5;
 }
 /* 手机端：开关行间距收紧，保证长描述换行时仍与标题首行对齐 */
 @media (max-width: 600px) {
-.zt-switch-row[data-v-bc7b3b27] {
+.zt-switch-row[data-v-9bba25eb] {
     gap: 8px;
 }
 }

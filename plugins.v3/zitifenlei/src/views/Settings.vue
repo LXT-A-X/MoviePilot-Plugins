@@ -19,8 +19,11 @@ const DEFAULT_CONFIG = {
   subset_dir: '',
   // 字体监控目录内的压缩包：解压整理成功后是否自动清理（只作用于直接归档成功的包）
   archive_cleanup_enabled: false,
-  // 清理方式：move = 移到「字体监控目录/已处理压缩包/」；delete = 直接删除
+  // 清理方式：move = 移到对应监控目录下的「已处理压缩包/」；delete = 直接删除
   archive_cleanup_action: 'move',
+  // 字幕压缩包筛选：all=全部 / sc=仅简体 / tc=仅繁体 / custom=自定义关键词
+  subtitle_archive_filter: 'all',
+  subtitle_archive_keywords: '',
   archive_mode: 'copy',
   // 移动归档时删除判重跳过的残留源文件（只作用于「移动原文件」模式）
   move_delete_duplicate: true,
@@ -62,8 +65,15 @@ const archiveModes = [
 ]
 // 压缩包清理方式（archive_cleanup_action）：长文案用单选而非下拉，手机端不截断
 const archiveCleanupActions = [
-  { title: '移动到「已处理压缩包」/（可找回，推荐）', value: 'move', description: '在「字体监控目录」下单独存放，确认无用后可自行删除' },
-  { title: '直接删除（不可恢复）', value: 'delete', description: '归档成功后立即删除原压缩包：省空间，但删了找不回' },
+  { title: '移动到「已处理压缩包」/（可找回，推荐）', value: 'move', description: '在对应监控目录下单独存放，确认无用后可自行删除' },
+  { title: '直接删除（不可恢复）', value: 'delete', description: '处理成功后立即删除原压缩包：省空间，但删了找不回' },
+]
+// 字幕压缩包：一个包常同时有 SC（简体）/ TC（繁体）两个字幕，按文件名选择要处理的
+const subtitleArchiveFilters = [
+  { title: '全部字幕（默认）', value: 'all' },
+  { title: '仅简体（SC / CHS / 简 / zh-hans）', value: 'sc' },
+  { title: '仅繁体（TC / CHT / 繁 / zh-hant）', value: 'tc' },
+  { title: '自定义关键词（自己填）', value: 'custom' },
 ]
 const subsetOutModes = [
   { title: '复制到输出目录', value: 'copy', description: '成品复制到输出目录，监控目录的源字幕保留（默认）' },
@@ -392,7 +402,7 @@ watch(() => config.value.auto_subset, (v) => {
       </v-card-title>
       <v-card-text>
         <div class="zt-hint mb-2">
-          监控按「目录类型」严格处理：字体监控目录只收字体/字体压缩包，字幕目录只收 .ass；
+          监控按「目录类型」严格处理：字体监控目录收字体/字体压缩包，ASS 字幕检查目录与自动子集化目录收 .ass/字幕压缩包；
           放错目录的文件会跳过并写入「最近操作日志」，不会误归档或误检查。
         </div>
         <v-row dense>
@@ -425,7 +435,7 @@ watch(() => config.value.auto_subset, (v) => {
               placeholder="/media/subtitles"
               density="compact"
               variant="outlined"
-              hint="放入 .ass 自动检查缺字体（只收字幕；放错类型的文件会跳过）"
+              hint="放入 .ass 或字幕压缩包（.zip/.7z/.rar，只解 .ass）自动检查缺字体"
               persistent-hint
             ></v-text-field>
           </v-col>
@@ -436,7 +446,7 @@ watch(() => config.value.auto_subset, (v) => {
               placeholder="/media/subtitles/subset"
               density="compact"
               variant="outlined"
-              hint="放入字幕自动子集化并内嵌字体，成品按「输出目录/剧名/」输出"
+              hint="放入 .ass 或字幕压缩包（.zip/.7z/.rar，只解 .ass）自动子集化并内嵌字体，成品按「输出目录/剧名/」输出"
               persistent-hint
             ></v-text-field>
           </v-col>
@@ -459,7 +469,7 @@ watch(() => config.value.auto_subset, (v) => {
           <div class="zt-switch-row">
             <div class="flex-grow-1">
               <div class="zt-switch-title">解压整理后自动清理压缩包</div>
-              <div class="zt-switch-desc">只作用于「字体监控目录」里的字体压缩包：解压并逐个归档成功后清理原包，避免长期占用磁盘；其余情况一律保留原包</div>
+              <div class="zt-switch-desc">作用于字体监控目录（只解字体）和两个 ASS 字幕目录（只解 .ass）：处理成功后清理原包；字体包、字幕包都按各自目录下的「已处理压缩包/」或直接删除处理，其余情况一律保留</div>
             </div>
             <v-switch v-model="config.archive_cleanup_enabled" color="primary" density="compact" hide-details></v-switch>
           </div>
@@ -483,8 +493,35 @@ watch(() => config.value.auto_subset, (v) => {
             </v-radio>
           </v-radio-group>
           <div class="zt-hint">
-            开 = 仅在「字体监控目录」且直接归档成功（无失败、自动执行开启）时清理：移到「字体监控目录/已处理压缩包/」或直接删除；
-            放错目录、进待确认、有失败时一律保留并提醒；该子目录会被插件忽略，请勿在其中放其他文件。
+            开 = 字体包在字体监控目录、字幕包在对应 ASS 目录，且自动执行开启、处理无失败时清理：移到该目录下「已处理压缩包/」或直接删除；
+            放错目录、进待确认/待检查/待处理、有失败时一律保留并提醒；该子目录会被插件忽略，请勿在其中放其他文件。
+          </div>
+
+          <div class="zt-option-label mb-1 mt-4">字幕压缩包：处理哪些字幕</div>
+          <v-select
+            v-model="config.subtitle_archive_filter"
+            :items="subtitleArchiveFilters"
+            item-title="title"
+            item-value="value"
+            density="compact"
+            variant="outlined"
+            hide-details
+          ></v-select>
+          <v-text-field
+            v-if="config.subtitle_archive_filter === 'custom'"
+            v-model="config.subtitle_archive_keywords"
+            label="自定义关键词（逗号/空格分隔）"
+            placeholder="例如：sc,chs,简,zh-hans"
+            density="compact"
+            variant="outlined"
+            class="mt-2"
+            hint="按字幕文件名匹配（英文按单词边界，中文按子串）；留空则不解压处理"
+            persistent-hint
+          ></v-text-field>
+          <div class="zt-hint">
+            只作用于「ASS 字幕检查目录」「ASS 自动子集化目录」里的字幕压缩包：一般一个包含 SC（简体）/ TC（繁体）两个字幕，
+            可按预设只处理简体/繁体，或选「自定义关键词」自己填（如 chs、简、zh-hans）；字体监控目录不受影响。
+            没有符合筛选的字幕时压缩包会保留并提示。
           </div>
         </div>
 

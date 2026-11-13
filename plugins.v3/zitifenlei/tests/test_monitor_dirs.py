@@ -59,6 +59,33 @@ def _page_plugin(tmp: Path, cfg=None, archive_ret=1):
     return plugin, handled
 
 
+def _subtitle_plugin(tmp: Path, cfg=None):
+    plugin = _plugin()
+    plugin._db = _FakeDB()
+    plugin._tmp_dir = str(tmp / "tmp")
+    plugin._notify_agg = {"fonts": [], "archives": [], "archives_wrong_dir": []}
+    plugin._lock = threading.RLock()
+    plugin._stopping = False
+    plugin._schedule_index_rebuild = lambda: None
+    plugin._queue_agg_notify = lambda: None
+    conf = {
+        "ass_dir": str(tmp / "ass"),
+        "subset_dir": str(tmp / "subset"),
+        "input_dir": str(tmp / "input"),
+        "lib_dir": str(tmp / "lib"),
+    }
+    conf.update(cfg or {})
+    plugin.get_resource_or_config = lambda key: conf.get(key, "")
+    checked = []
+    queued = []
+    plugin._check_ass_file = lambda f, source="auto": (
+        checked.append(Path(f)),
+        {"status": "ok"},
+    )[1]
+    plugin._schedule_subset_watch = lambda f: queued.append(Path(f))
+    return plugin, checked, queued
+
+
 def test_watch_dir_kind_without_missing(tmp_path):
     dirs = {
         "input_dir": str(tmp_path / "fonts"),
@@ -181,9 +208,13 @@ def test_archive_in_wrong_dir_notified_and_kept(tmp_path):
     archive = tmp_path / "subs" / "fonts.zip"
     _make_zip(archive)
 
-    plugin._log_dir_mismatch(archive, "ass", False, False, True)
+    # v3.4.0 起 ASS 字幕目录已支持字幕压缩包；字体库目录仍是明确放错目录
+    (tmp_path / "lib").mkdir()
+    archive = tmp_path / "lib" / "fonts.zip"
+    _make_zip(archive)
+    plugin._log_dir_mismatch(archive, "lib", False, False, True)
     assert archive.is_file()
-    assert plugin._notify_agg["archives_wrong_dir"][-1]["label"] == "ASS 字幕检查目录"
+    assert plugin._notify_agg["archives_wrong_dir"][-1]["label"] == "字体库目录"
     assert any("放错目录" in msg for _, msg in plugin._db.logs)
     assert any("字幕压缩包" in msg for _, msg in plugin._db.logs)
 
@@ -202,3 +233,92 @@ def test_deprecated_config_keys_stripped():
     for key in ("monitor_enabled", "missing_font_dir", "subset_process_isolation"):
         assert key not in form
     assert form.get("input_dir") == "/tmp/fonts"
+
+
+def test_subtitle_archive_sc_filter_and_cleanup(tmp_path):
+    plugin, checked, queued = _subtitle_plugin(
+        tmp_path,
+        {
+            "subtitle_archive_filter": "sc",
+            "archive_cleanup_enabled": True,
+            "archive_cleanup_action": "move",
+        },
+    )
+    archive = tmp_path / "ass" / "show.zip"
+    _make_zip(archive, names=("ep01.sc.ass", "ep01.tc.ass", "readme.txt"))
+
+    assert plugin._handle_subtitle_archive(archive, "ass") is True
+    assert [p.name for p in checked] == ["ep01.sc.ass"]
+    assert not queued
+    # 字幕检查在稳定副本上完成，原压缩包按策略移入该 ASS 目录的 已处理压缩包/
+    assert (tmp_path / "ass" / "已处理压缩包" / "show.zip").is_file()
+    entry = plugin._notify_agg["archives"][-1]
+    assert entry["kind"] == "subtitle"
+    assert entry["matched"] == 1
+    assert entry["filtered_out"] == 1
+    assert entry["action"] == "moved"
+
+
+def test_subtitle_archive_custom_keywords_subset(tmp_path):
+    plugin, checked, queued = _subtitle_plugin(
+        tmp_path,
+        {
+            "subtitle_archive_filter": "custom",
+            "subtitle_archive_keywords": "chs, 简",
+        },
+    )
+    archive = tmp_path / "subset" / "show.zip"
+    _make_zip(archive, names=("ep.chs.ass", "ep.cht.ass"))
+
+    assert plugin._handle_subtitle_archive(archive, "subset") is True
+    assert [p.name for p in queued] == ["ep.chs.ass"]
+    assert not checked
+    # 未开启清理：原包保留
+    assert archive.is_file()
+    entry = plugin._notify_agg["archives"][-1]
+    assert entry["queued"] == 1
+    assert entry["action"] == ""
+
+
+def test_subtitle_archive_no_match_keeps_package(tmp_path):
+    plugin, checked, queued = _subtitle_plugin(
+        tmp_path, {"subtitle_archive_filter": "tc"}
+    )
+    archive = tmp_path / "ass" / "only_sc.zip"
+    _make_zip(archive, names=("ep01.sc.ass",))
+
+    assert plugin._handle_subtitle_archive(archive, "ass") is True
+    assert archive.is_file()
+    assert not checked
+    assert not queued
+    entry = plugin._notify_agg["archives"][-1]
+    assert entry["matched"] == 0
+    assert "筛选" in entry["keep_reason"]
+
+
+def test_subtitle_archive_auto_collect_off_keeps_package(tmp_path):
+    plugin, checked, queued = _subtitle_plugin(
+        tmp_path,
+        {
+            "subtitle_archive_filter": "all",
+            "auto_collect": False,
+            "archive_cleanup_enabled": True,
+        },
+    )
+    archive = tmp_path / "subset" / "show.zip"
+    _make_zip(archive, names=("ep01.sc.ass",))
+
+    assert plugin._handle_subtitle_archive(archive, "subset") is True
+    assert archive.is_file()
+    assert [p.name for p in queued] == ["ep01.sc.ass"]
+    entry = plugin._notify_agg["archives"][-1]
+    assert "待" in entry["keep_reason"]
+
+
+def test_subtitle_filter_matching_presets_and_boundary(tmp_path):
+    plugin, _, _ = _subtitle_plugin(tmp_path)
+    assert plugin._subtitle_name_matches("Show.S01E01.SC.ass", ["sc"]) is True
+    assert plugin._subtitle_name_matches("school.ass", ["sc"]) is False
+    assert plugin._subtitle_name_matches("ep.简体.ass", ["简体"]) is True
+    assert plugin._subtitle_name_matches("ep01.tc.ass", ["tc"]) is True
+    assert plugin._subtitle_name_matches("ep01.zh-hans.ass", ["zh-hans"]) is True

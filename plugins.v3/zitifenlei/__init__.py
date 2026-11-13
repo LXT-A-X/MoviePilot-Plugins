@@ -172,12 +172,17 @@ _DEFAULT_CONFIG = {
     # move 归档判重跳过（字体库已存在同名同后缀）时，监控目录的源文件会残留，
     # 开关开=删除残留；关=保留（复制模式不受影响，源文件本就保留）
     "move_delete_duplicate": True,
-    # 压缩包处理（只作用于「字体监控目录」里的 zip/7z/rar）：
-    # 解压出的字体直接归档 / 进待确认，取决于「是否自动执行监控结果」；
+    # 压缩包处理（作用于「字体监控目录」「ASS 字幕检查目录」「ASS 自动子集化目录」里的 zip/7z/rar）：
+    # 字体监控目录只解字体；字幕目录只解 .ass。
+    # 解压出的字体/字幕直接处理 / 进待确认 / 待检查 / 待处理，取决于「是否自动执行监控结果」；
     # 清理压缩包（移到「已处理压缩包」子目录 或 直接删除）只在「自动执行开 + 全部处理无失败」时执行，
-    # 放错目录、进待确认、有失败时一律保留并提醒。
+    # 放错目录、待定、有失败时一律保留并提醒。
     "archive_cleanup_enabled": False,
     "archive_cleanup_action": "move",  # move=移到 已处理压缩包/（可找回，默认）；delete=直接删除
+    # 字幕压缩包内常同时有 SC（简体）和 TC（繁体）两个字幕；按文件名筛选要处理哪一个：
+    # all=全部；sc=仅简体；tc=仅繁体；custom=自定义关键词（subtitle_archive_keywords，逗号/空格分隔）
+    "subtitle_archive_filter": "all",
+    "subtitle_archive_keywords": "",
     "auto_inbound": True,
     "auto_collect": True,
     "notify_enabled": False,
@@ -229,8 +234,15 @@ _ARCH_DUP_DEL_FAILED = -4  # 同上跳过，但删除重复源文件失败
 _ARCHIVE_DONE_SETTING = "monitored_archive_done"
 _ARCHIVE_DONE_LIMIT = 300
 _ARCHIVE_MAX_MEMBERS = 500  # 与上传解压一致：一个包最多 500 个成员
-# 清理压缩包时移入的子目录名（位于「字体监控目录」下；插件会整体忽略该目录）
+# 清理压缩包时移入的子目录名（位于对应监控目录下；插件会整体忽略该目录）
 _ARCHIVE_DONE_DIR_NAME = "已处理压缩包"
+# 字幕压缩包筛选预设关键词：按文件名子串/单词边界匹配（SC=简体，TC=繁体）
+_SUBTITLE_SC_KEYWORDS = (
+    "sc", "chs", "simp", "simplified", "zh-hans", "gb", "gb2312", "简体", "简中",
+)
+_SUBTITLE_TC_KEYWORDS = (
+    "tc", "cht", "trad", "traditional", "zh-hant", "big5", "繁体", "繁中",
+)
 # 已废弃的配置键（v3.3.0 起删除对应功能）：读取/保存配置时统一剔除，
 # 避免旧宿主配置/数据库镜像把已删除的开关又写回来
 _DEPRECATED_CONFIG_KEYS = (
@@ -440,7 +452,7 @@ class Zitifenlei(_PluginBase):
     plugin_name = "字体分类管家"
     plugin_desc = "字体归档整理与 ASS 字幕字体检查插件：扫描/上传字体到字体库，检查字幕缺失字体。"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/zitifenlei.png"
-    plugin_version = "3.3.1"
+    plugin_version = "3.4.0"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "zitifenlei_"
@@ -995,6 +1007,35 @@ class Zitifenlei(_PluginBase):
                         pass
             except Exception:
                 pass
+            # 字幕压缩包稳定副本（watch_ass_*）：被检查/待处理记录引用的保留，其余清理
+            try:
+                for d in Path(self._tmp_dir).iterdir():
+                    if not d.is_dir() or not d.name.startswith("watch_ass_"):
+                        continue
+                    for f in list(d.rglob("*")):
+                        if not f.is_file():
+                            continue
+                        if str(f.resolve()) in referenced:
+                            continue
+                        try:
+                            f.unlink()
+                            removed += 1
+                        except Exception:
+                            pass
+                    try:
+                        for sub in sorted(
+                            [p for p in d.rglob("*") if p.is_dir()],
+                            key=lambda p: len(p.parts),
+                            reverse=True,
+                        ):
+                            if not any(sub.iterdir()):
+                                sub.rmdir()
+                        if not any(d.iterdir()):
+                            d.rmdir()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             if removed:
                 _logger.debug("字体分类管家清理 %d 个临时文件", removed)
         except Exception as err:
@@ -1117,6 +1158,8 @@ class Zitifenlei(_PluginBase):
                     self._db.add_log(f"自动ASS检查：检查 {count} 个字幕文件", "info")
                     if self.get_resource_or_config("notify_enabled"):
                         self._notify("字体分类管家：自动ASS检查完成", f"✅ 自动ASS检查完成\n已检查 {count} 个字幕文件")
+                # 字幕压缩包：轮询兜底时也解压检查（有指纹去重，不会重复解压）
+                self._process_subtitle_archives("ass")
             except Exception as err:
                 self._db.add_log(f"自动ASS检查失败: {err}", "error")
 
@@ -1343,6 +1386,8 @@ class Zitifenlei(_PluginBase):
                 if self._monitor_dirs():
                     self.__auto_monitor_scan()
                     self.__auto_ass_check()
+                    # 自动子集化目录里的压缩包（轮询兜底；实时监控正常时也会走事件）
+                    self._process_subtitle_archives("subset")
             except Exception:
                 _logger.debug("目录轮询异常跳过", exc_info=True)
 
@@ -1398,9 +1443,9 @@ class Zitifenlei(_PluginBase):
                 is_arch = arch.is_any_archive(p.name)
                 _dir_allows = {
                     "lib": is_font,
-                    "subset": is_ass,
+                    "subset": is_ass or is_arch,
                     "input": is_font or is_arch,
-                    "ass": is_ass,
+                    "ass": is_ass or is_arch,
                 }
                 if kind in _dir_allows and not _dir_allows[kind]:
                     self._log_dir_mismatch(p, kind, is_font, is_ass, is_arch)
@@ -1409,6 +1454,10 @@ class Zitifenlei(_PluginBase):
                 # 字体监控目录里的压缩包：安全解压后逐个归档（大字体包上传受限时的替代通道）
                 if kind == "input" and is_arch:
                     success = self._handle_font_archive(p)
+                    return
+                # ASS 检查目录 / 自动子集化目录里的压缩包：只解 .ass，按筛选检查/子集化
+                if kind in ("ass", "subset") and is_arch:
+                    success = self._handle_subtitle_archive(p, kind)
                     return
                 # 字体库目录内直接放入/替换的字体（用户手动放/外部工具同步）：
                 # 只做增量索引，不归档、不移动、不删源文件（同一目录不被两套流程重复处理）
@@ -1885,9 +1934,9 @@ class Zitifenlei(_PluginBase):
     }
     _WATCH_DIR_EXPECT = {
         "lib": "字体文件",
-        "subset": ".ass 字幕",
+        "subset": ".ass 字幕或字幕压缩包(.zip/.7z/.rar)",
         "input": "字体文件或字体压缩包(.zip/.7z/.rar)",
-        "ass": ".ass 字幕",
+        "ass": ".ass 字幕或字幕压缩包(.zip/.7z/.rar)",
     }
 
     def _watch_dir_kind(self, path: Path) -> str:
@@ -1927,7 +1976,7 @@ class Zitifenlei(_PluginBase):
                 self._db.add_log(
                     f"压缩包放错目录，已跳过且未删除: {p.name}"
                     f"（{label}只处理{expect}）；字体压缩包请放「字体监控目录」，"
-                    "字幕压缩包请到「检查 / 子集化」页上传",
+                    "字幕压缩包请放「ASS 字幕检查目录」或「ASS 自动子集化目录」",
                     "warning",
                 )
             except Exception:
@@ -2006,11 +2055,14 @@ class Zitifenlei(_PluginBase):
                     pass
             return None
 
-    def _apply_archive_cleanup(self, archive_path: Path) -> Tuple[str, str]:
+    def _apply_archive_cleanup(
+        self, archive_path: Path, base_dir: Path = None
+    ) -> Tuple[str, str]:
         """按配置清理已处理完的压缩包，返回 (action, keep_reason)。
 
         action: "deleted" / "moved" / ""（保留）；keep_reason 仅在保留时给出原因。
-        调用方需先确认「自动执行开 + 0 失败 + 有归档/去重结果」。
+        base_dir: 清理时移动到哪个目录下的「已处理压缩包/」；字体包默认字体监控目录，
+        字幕包传入对应的 ASS 目录。调用方需先确认「自动执行开 + 0 失败 + 有处理结果」。
         """
         if not bool(self.get_resource_or_config("archive_cleanup_enabled")):
             return "", "未开启「解压整理后自动清理压缩包」"
@@ -2028,10 +2080,13 @@ class Zitifenlei(_PluginBase):
                     except Exception:
                         pass
                 return "", f"删除失败: {err}"
-        # 默认 move：移到 <字体监控目录>/已处理压缩包/
+        # 默认 move：移到 <对应监控目录>/已处理压缩包/
         try:
-            input_dir = self.get_resource_or_config("input_dir") or ""
-            base = Path(input_dir) if input_dir else archive_path.parent
+            if base_dir is not None:
+                base = Path(base_dir)
+            else:
+                input_dir = self.get_resource_or_config("input_dir") or ""
+                base = Path(input_dir) if input_dir else archive_path.parent
             done_dir = base / _ARCHIVE_DONE_DIR_NAME
             done_dir.mkdir(parents=True, exist_ok=True)
             dest = done_dir / archive_path.name
@@ -2070,6 +2125,251 @@ class Zitifenlei(_PluginBase):
                     self._db.add_log(f"监控压缩包扫描失败: {err}", "warning")
                 except Exception:
                     pass
+
+    def _subtitle_filter_info(self) -> Tuple[str, str, List[str]]:
+        """返回字幕压缩包筛选 (mode, 可读标签, 关键词列表)；custom 未填时关键词为空。"""
+        mode = str(self.get_resource_or_config("subtitle_archive_filter") or "all").strip().lower()
+        raw = str(self.get_resource_or_config("subtitle_archive_keywords") or "")
+        custom = [item.strip() for item in re.split(r"[,，;；\s]+", raw) if item.strip()]
+        if mode == "sc":
+            return "sc", "仅简体（SC/CHS/简）", list(_SUBTITLE_SC_KEYWORDS)
+        if mode == "tc":
+            return "tc", "仅繁体（TC/CHT/繁）", list(_SUBTITLE_TC_KEYWORDS)
+        if mode == "custom":
+            label = "自定义关键词：" + ("、".join(custom[:6]) if custom else "（未填写）")
+            return "custom", label, custom
+        return "all", "全部字幕", []
+
+    def _subtitle_name_matches(self, file_name: str, keywords: List[str]) -> bool:
+        """文件名是否命中筛选关键词：英文/数字按单词边界，中文按子串。"""
+        stem = Path(str(file_name)).stem.lower()
+        for raw in keywords:
+            kw = str(raw).strip().lower()
+            if not kw:
+                continue
+            if re.fullmatch(r"[a-z0-9][a-z0-9._-]*", kw):
+                pattern = rf"(?<![a-z0-9]){re.escape(kw)}(?![a-z0-9])"
+                if re.search(pattern, stem):
+                    return True
+            elif kw in stem:
+                return True
+        return False
+
+    def _stable_subtitle_copy(self, src: Path, root: Path) -> Optional[Path]:
+        """把压缩包内的 .ass 复制到稳定目录（解压目录随后会被清理）。"""
+        try:
+            dest = root / src.name
+            if dest.exists():
+                dest = root / f"{src.stem}-{uuid.uuid4().hex[:8]}{src.suffix}"
+            shutil.copy2(src, dest)
+            return dest
+        except Exception as err:
+            if self._db is not None:
+                try:
+                    self._db.add_log(f"字幕稳定副本复制失败 {src.name}: {err}", "error")
+                except Exception:
+                    pass
+            return None
+
+    def _process_subtitle_archives(self, dir_kind: str) -> None:
+        """扫描 ASS 检查目录 / 自动子集化目录里的压缩包（轮询兜底用）。"""
+        try:
+            key = "ass_dir" if dir_kind == "ass" else "subset_dir"
+            base = self.get_resource_or_config(key) or ""
+            if not base or not Path(base).is_dir():
+                return
+            for f in sorted(Path(base).rglob("*")):
+                if self._stopping:
+                    break
+                if not f.is_file() or self._is_system_hidden_path(f):
+                    continue
+                if arch.is_any_archive(f.name):
+                    self._handle_subtitle_archive(f, dir_kind)
+        except Exception as err:
+            if self._db is not None:
+                try:
+                    self._db.add_log(f"字幕压缩包扫描失败: {err}", "warning")
+                except Exception:
+                    pass
+
+    def _handle_subtitle_archive(self, archive_path: Path, dir_kind: str) -> bool:
+        """处理 ASS 检查目录 / 自动子集化目录里的压缩包：只解 .ass，并按筛选处理。
+
+        - 字幕压缩包常同时带 SC（简体）/ TC（繁体）：按「字幕压缩包处理」设置筛选；
+        - 每个匹配的 .ass 先复制到 tmp/watch_ass_<uuid>/ 稳定目录，再交给检查/子集化流程；
+        - 自动执行关（进待检查/待处理）时保留压缩包；自动执行开且处理成功时按清理开关清理；
+        - 包内没有 .ass / 没有匹配项 / 有失败 → 保留并提醒。
+        """
+        name = archive_path.name
+        if not arch.is_any_archive(name) or self._db is None:
+            return True
+        prefix = "监控字幕压缩包" if dir_kind == "ass" else "监控子集压缩包"
+        suffix = Path(name).suffix or "该格式"
+        if not arch.is_archive(name):
+            self._db.add_log(
+                f"{prefix}跳过 {name}: 未检测到可解 {suffix} 的解压工具"
+                "（可在「仪表盘 → 依赖 → 解压工具」点「安装/修复解压工具」）",
+                "warning",
+            )
+            return True
+        sig = self._archive_signature(archive_path)
+        if sig in self._archive_done_list():
+            return True
+        if not _wait_file_stable(archive_path):
+            self._db.add_log(f"{prefix} {name}: 仍在写入，稍后重试", "info")
+            return False
+        try:
+            size = archive_path.stat().st_size
+        except Exception as err:
+            self._db.add_log(f"{prefix} {name}: 读取大小失败 {err}", "warning")
+            return True
+        if size > MAX_UPLOAD_TOTAL_BYTES:
+            self._db.add_log(
+                f"{prefix} {name}: 超过单次处理总量上限"
+                f"（{MAX_UPLOAD_TOTAL_BYTES // (1024 * 1024)}MB），已跳过（压缩包保留）",
+                "warning",
+            )
+            return True
+        tmp_root = Path(self._tmp_dir) if self._tmp_dir else Path(tempfile.gettempdir())
+        try:
+            tmp_root.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        extract_dir = tmp_root / f"watch_archive_{uuid.uuid4().hex}"
+        stable_root = tmp_root / f"watch_ass_{uuid.uuid4().hex}"
+        mode, filter_label, keywords = self._subtitle_filter_info()
+        auto_collect = self.get_resource_or_config("auto_collect") is not False
+        base_dir = Path(
+            self.get_resource_or_config("ass_dir" if dir_kind == "ass" else "subset_dir") or ""
+        )
+        try:
+            result = arch.extract_archive(
+                archive_path,
+                extract_dir,
+                ASS_EXTENSIONS,
+                max_members=_ARCHIVE_MAX_MEMBERS,
+                max_total_bytes=MAX_UPLOAD_TOTAL_BYTES,
+                max_member_bytes=MAX_ASS_FILE_BYTES,
+            )
+            all_ass = [Path(item.path) for item in result.files]
+            matched = [
+                item
+                for item in all_ass
+                if mode == "all" or self._subtitle_name_matches(item.name, keywords)
+            ]
+            filtered_out = len(all_ass) - len(matched)
+            copy_failed = 0
+            stable_files: List[Path] = []
+            if matched:
+                try:
+                    stable_root.mkdir(parents=True, exist_ok=True)
+                except Exception:
+                    pass
+            for item in matched:
+                stable = self._stable_subtitle_copy(item, stable_root)
+                if stable is None:
+                    copy_failed += 1
+                else:
+                    stable_files.append(stable)
+            checked = pending = queued = 0
+            failed = copy_failed
+            if dir_kind == "ass":
+                for stable in stable_files:
+                    res = self._check_ass_file(stable, source="auto")
+                    if res is None:
+                        failed += 1
+                        continue
+                    checked += 1
+                    if res.get("status") == "pending":
+                        pending += 1
+                    if self.get_resource_or_config("auto_subset"):
+                        self._schedule_subset_watch(stable)
+            else:
+                for stable in stable_files:
+                    try:
+                        self._schedule_subset_watch(stable)
+                        queued += 1
+                    except Exception:
+                        failed += 1
+            cleanup_action = ""
+            keep_reason = ""
+            if not all_ass:
+                keep_reason = "包内没有可处理的字幕（.ass）"
+            elif not matched:
+                keep_reason = f"没有符合筛选条件的字幕（{filter_label}）"
+            elif copy_failed:
+                keep_reason = f"有 {copy_failed} 个字幕复制失败"
+            elif not auto_collect:
+                keep_reason = "字幕已登记待检查/待处理，确认前保留压缩包"
+            elif failed > 0:
+                keep_reason = f"有 {failed} 个字幕处理失败"
+            elif dir_kind == "ass" and checked <= 0:
+                keep_reason = "没有成功检查的字幕"
+            elif dir_kind == "subset" and queued <= 0:
+                keep_reason = "没有成功进入子集化流程的字幕"
+            else:
+                cleanup_action, keep_reason = self._apply_archive_cleanup(
+                    archive_path, base_dir=base_dir
+                )
+            self._mark_archive_done(sig)
+            if not all_ass:
+                detail = "；".join(
+                    f"{member}: {reason}" for member, reason in (result.skipped + result.errors)[:5]
+                )
+                self._db.add_log(
+                    f"{prefix} {name}: 解出 0 个字幕" + (f"（{detail}）" if detail else "")
+                    + "（压缩包保留）",
+                    "warning",
+                )
+            elif not matched:
+                self._db.add_log(
+                    f"{prefix} {name}: 解出 {len(all_ass)} 个字幕，但{keep_reason}（压缩包保留）",
+                    "warning",
+                )
+            else:
+                if cleanup_action == "deleted":
+                    tail = "；压缩包已删除"
+                elif cleanup_action == "moved":
+                    tail = f"；压缩包已移到「{_ARCHIVE_DONE_DIR_NAME}/」"
+                elif keep_reason:
+                    tail = f"；压缩包保留（{keep_reason}）"
+                else:
+                    tail = "；压缩包保留"
+                detail = (
+                    f"检查 {checked}（待检查 {pending}）"
+                    if dir_kind == "ass"
+                    else f"子集化入队 {queued}"
+                )
+                self._db.add_log(
+                    f"{prefix} {name}: 解出 {len(all_ass)} 个字幕"
+                    f"（筛选 {filter_label}，匹配 {len(matched)}，跳过 {filtered_out}）；"
+                    f"{detail}，失败 {failed}" + tail,
+                    "info" if not failed else "warning",
+                )
+            with self._lock:
+                self._notify_agg.setdefault("archives", []).append(
+                    {
+                        "kind": "subtitle",
+                        "name": name,
+                        "dir_label": self._WATCH_DIR_LABELS.get(dir_kind, dir_kind),
+                        "total": len(all_ass),
+                        "matched": len(matched),
+                        "filtered_out": filtered_out,
+                        "checked": checked,
+                        "queued": queued,
+                        "pending": pending,
+                        "failed": failed,
+                        "action": cleanup_action,
+                        "keep_reason": keep_reason,
+                    }
+                )
+            self._queue_agg_notify()
+            return True
+        except Exception as err:
+            self._db.add_log(f"{prefix}处理失败 {name}: {err}", "error")
+            return False
+        finally:
+            shutil.rmtree(extract_dir, ignore_errors=True)
 
     def _handle_font_archive(self, archive_path: Path) -> bool:
         """处理「字体监控目录」里的压缩包：安全解压后逐个归档 / 进待确认，并按配置清理包。
@@ -2382,17 +2682,10 @@ class Zitifenlei(_PluginBase):
                     f"⚠ 压缩包放错目录：{item.get('name') or '压缩包'}"
                     f" 在「{item.get('label') or '其他目录'}」；该目录只处理{expect}，"
                     "压缩包已跳过且未删除。字体压缩包请放「字体监控目录」，"
-                    "字幕压缩包请到「检查 / 子集化」页上传"
+                    "字幕压缩包请放「ASS 字幕检查目录」或「ASS 自动子集化目录」"
                 )
             for item in archives[:10]:
                 total = int(item.get("total") or 0)
-                parts = [f"归档 {int(item.get('added') or 0)}"]
-                if int(item.get("skipped") or 0):
-                    parts.append(f"跳过 {int(item.get('skipped') or 0)}")
-                if int(item.get("pending") or 0):
-                    parts.append(f"待确认 {int(item.get('pending') or 0)}")
-                if int(item.get("failed") or 0):
-                    parts.append(f"失败 {int(item.get('failed') or 0)}")
                 action = str(item.get("action") or "")
                 if action == "deleted":
                     tail = "压缩包已删除"
@@ -2401,6 +2694,32 @@ class Zitifenlei(_PluginBase):
                 else:
                     reason = str(item.get("keep_reason") or "")
                     tail = "压缩包保留" + (f"（{reason}）" if reason else "")
+                if item.get("kind") == "subtitle":
+                    parts = [f"匹配 {int(item.get('matched') or 0)}"]
+                    if int(item.get("filtered_out") or 0):
+                        parts.append(f"筛选跳过 {int(item.get('filtered_out') or 0)}")
+                    if int(item.get("checked") or 0):
+                        checked_text = f"检查 {int(item.get('checked') or 0)}"
+                        if int(item.get("pending") or 0):
+                            checked_text += f"（待检查 {int(item.get('pending') or 0)}）"
+                        parts.append(checked_text)
+                    if int(item.get("queued") or 0):
+                        parts.append(f"子集化入队 {int(item.get('queued') or 0)}")
+                    if int(item.get("failed") or 0):
+                        parts.append(f"失败 {int(item.get('failed') or 0)}")
+                    lines.append(
+                        f"📦 [字幕] {item.get('name') or '压缩包'}"
+                        f"（{item.get('dir_label') or '字幕目录'}）：解出 {total} 个字幕 → "
+                        f"{'，'.join(parts)}；{tail}"
+                    )
+                    continue
+                parts = [f"归档 {int(item.get('added') or 0)}"]
+                if int(item.get("skipped") or 0):
+                    parts.append(f"跳过 {int(item.get('skipped') or 0)}")
+                if int(item.get("pending") or 0):
+                    parts.append(f"待确认 {int(item.get('pending') or 0)}")
+                if int(item.get("failed") or 0):
+                    parts.append(f"失败 {int(item.get('failed') or 0)}")
                 lines.append(
                     f"📦 {item.get('name') or '压缩包'}：解出 {total} 个字体 → "
                     f"{'，'.join(parts)}；{tail}"
@@ -6117,6 +6436,9 @@ class Zitifenlei(_PluginBase):
                 f"全量扫描：归档 {added} 个字体，跳过已存在 {len(stats['skipped'])} 个，失败 {stats['failed']} 个",
                 "info",
             )
+            # 字幕压缩包也一并处理（检查目录 + 自动子集化目录；有指纹去重）
+            self._process_subtitle_archives("ass")
+            self._process_subtitle_archives("subset")
             if added:
                 # 补齐字体后重建/增量更新索引，并重检受影响字幕（缺失页/检查页即时消除）
                 self._rebuild_subset_index_silent()
@@ -6161,6 +6483,8 @@ class Zitifenlei(_PluginBase):
                 if result:
                     checked += 1
                     missing_total += int(result.get("missing_count") or 0)
+            # 字幕目录里的压缩包：全量扫描时也解压检查（有指纹去重）
+            self._process_subtitle_archives("ass")
             self._db.add_log(
                 f"全量扫描字幕：检查 {checked} 个，共缺 {missing_total} 种字体",
                 "warning" if missing_total else "info",
