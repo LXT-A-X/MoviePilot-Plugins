@@ -440,7 +440,7 @@ class Zitifenlei(_PluginBase):
     plugin_name = "字体分类管家"
     plugin_desc = "字体归档整理与 ASS 字幕字体检查插件：扫描/上传字体到字体库，检查字幕缺失字体。"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/zitifenlei.png"
-    plugin_version = "3.3.0"
+    plugin_version = "3.3.1"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "zitifenlei_"
@@ -1926,7 +1926,8 @@ class Zitifenlei(_PluginBase):
             try:
                 self._db.add_log(
                     f"压缩包放错目录，已跳过且未删除: {p.name}"
-                    f"（{label}只处理{expect}；字体压缩包请放「字体监控目录」）",
+                    f"（{label}只处理{expect}）；字体压缩包请放「字体监控目录」，"
+                    "字幕压缩包请到「检查 / 子集化」页上传",
                     "warning",
                 )
             except Exception:
@@ -1934,7 +1935,7 @@ class Zitifenlei(_PluginBase):
             try:
                 with self._lock:
                     self._notify_agg.setdefault("archives_wrong_dir", []).append(
-                        {"name": p.name, "label": label}
+                        {"name": p.name, "label": label, "expect": expect}
                     )
                 self._queue_agg_notify()
             except Exception:
@@ -2152,8 +2153,20 @@ class Zitifenlei(_PluginBase):
             # 进待确认 / 有失败 / 开关关闭 / 包内无字体 → 保留并在通知里说明原因。
             cleanup_action = ""
             keep_reason = ""
+            ass_only_hint = ""
             if not fonts:
-                keep_reason = "包内没有可处理的字体"
+                ass_members = [
+                    str(member)
+                    for member, _reason in (list(result.skipped) + list(result.errors))
+                    if Path(str(member)).suffix.lower() == ".ass"
+                ]
+                if ass_members:
+                    keep_reason = (
+                        "包内是字幕（.ass），不是字体；字幕压缩包请到「检查 / 子集化」页上传"
+                    )
+                    ass_only_hint = "（字幕压缩包请到「检查 / 子集化」页上传）"
+                else:
+                    keep_reason = "包内没有可处理的字体"
             elif not auto_collect:
                 keep_reason = "字体已进「待确认」，确认前保留压缩包"
             elif failed > 0:
@@ -2169,7 +2182,7 @@ class Zitifenlei(_PluginBase):
                 )
                 self._db.add_log(
                     f"监控压缩包 {name}: 解出 0 个字体" + (f"（{detail}）" if detail else "")
-                    + "（压缩包保留）",
+                    + "（压缩包保留）" + ass_only_hint,
                     "warning",
                 )
             else:
@@ -2364,10 +2377,12 @@ class Zitifenlei(_PluginBase):
         if archives or archives_wrong_dir:
             lines: List[str] = []
             for item in archives_wrong_dir[:10]:
+                expect = str(item.get("expect") or "对应类型的文件")
                 lines.append(
                     f"⚠ 压缩包放错目录：{item.get('name') or '压缩包'}"
-                    f" 在「{item.get('label') or '其他目录'}」；"
-                    "字体压缩包请放「字体监控目录」，已跳过且未删除"
+                    f" 在「{item.get('label') or '其他目录'}」；该目录只处理{expect}，"
+                    "压缩包已跳过且未删除。字体压缩包请放「字体监控目录」，"
+                    "字幕压缩包请到「检查 / 子集化」页上传"
                 )
             for item in archives[:10]:
                 total = int(item.get("total") or 0)

@@ -3955,7 +3955,7 @@ const {createTextVNode:_createTextVNode,resolveComponent:_resolveComponent,withC
 
 const _hoisted_1 = {
   class: "zt-settings",
-  style: {"max-width":"720px"}
+  style: {"max-width":"min(100%, 960px)"}
 };
 const _hoisted_2 = { class: "zt-switch-row" };
 const _hoisted_3 = { class: "zt-subblock mt-4" };
@@ -5294,6 +5294,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Settings = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-b5ac0ee5"]]);
+const Settings = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-bc7b3b27"]]);
 
 export { Check as C, Dashboard as D, FontLibrary as F, Settings as S, _export_sfc as _, DESKTOP_ACCEPT_ASS as a, apiModule as b, DESKTOP_ACCEPT_FONT as c, formatNotes as f, uploadAcceptFor as u };

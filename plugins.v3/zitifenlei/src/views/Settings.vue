@@ -350,7 +350,7 @@ watch(() => config.value.auto_subset, (v) => {
 </script>
 
 <template>
-  <div class="zt-settings" style="max-width: 720px">
+  <div class="zt-settings" style="max-width: min(100%, 960px)">
     <!-- 1. 插件总开关 -->
     <v-card class="zt-card-bg">
       <v-card-title class="zt-card-title">

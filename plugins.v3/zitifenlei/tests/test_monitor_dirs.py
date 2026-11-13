@@ -161,6 +161,20 @@ def test_archive_failure_keeps_package(tmp_path):
     assert "失败" in entry["keep_reason"]
 
 
+def test_font_dir_subtitle_archive_kept_with_upload_hint(tmp_path):
+    plugin, handled = _page_plugin(tmp_path)
+    archive = tmp_path / "input" / "subtitle.zip"
+    _make_zip(archive, names=("ep.ass", "readme.txt"))
+
+    assert plugin._handle_font_archive(archive) is True
+    assert archive.is_file()
+    assert not handled
+    entry = plugin._notify_agg["archives"][-1]
+    assert entry["total"] == 0
+    assert entry["keep_reason"] and "字幕" in entry["keep_reason"]
+    assert any("检查 / 子集化" in msg for _, msg in plugin._db.logs)
+
+
 def test_archive_in_wrong_dir_notified_and_kept(tmp_path):
     plugin, _ = _page_plugin(tmp_path, {"ass_dir": str(tmp_path / "subs")})
     (tmp_path / "subs").mkdir()
@@ -171,6 +185,7 @@ def test_archive_in_wrong_dir_notified_and_kept(tmp_path):
     assert archive.is_file()
     assert plugin._notify_agg["archives_wrong_dir"][-1]["label"] == "ASS 字幕检查目录"
     assert any("放错目录" in msg for _, msg in plugin._db.logs)
+    assert any("字幕压缩包" in msg for _, msg in plugin._db.logs)
 
 
 def test_deprecated_config_keys_stripped():
