@@ -19,8 +19,11 @@ const DEFAULT_CONFIG = {
   subset_dir: '',
   // 字体监控目录内的压缩包：解压整理成功后是否自动清理（只作用于直接归档成功的包）
   archive_cleanup_enabled: false,
-  // 清理方式：move = 移到对应监控目录下的「已处理压缩包/」；delete = 直接删除
-  archive_cleanup_action: 'move',
+  // 清理方式：delete = 正常清理（直接删除）；move = 保留（移到「已处理/」）
+  archive_cleanup_action: 'delete',
+  // 已处理压缩包根目录：system=各监控目录下；custom=统一自定义目录
+  archive_done_mode: 'system',
+  archive_done_dir: '',
   // 字幕压缩包筛选：all=全部 / sc=仅简体 / tc=仅繁体 / custom=自定义关键词
   subtitle_archive_filter: 'all',
   subtitle_archive_keywords: '',
@@ -65,10 +68,15 @@ const archiveModes = [
 ]
 // 压缩包清理方式（archive_cleanup_action）：长文案用单选而非下拉，手机端不截断
 const archiveCleanupActions = [
-  { title: '移动到「已处理压缩包」/（可找回，推荐）', value: 'move', description: '在对应监控目录下单独存放，确认无用后可自行删除' },
-  { title: '直接删除（不可恢复）', value: 'delete', description: '处理成功后立即删除原压缩包：省空间，但删了找不回' },
+  { title: '正常清理：直接删除（不保留，默认）', value: 'delete', description: '处理成功后立即删除原压缩包：不再占用空间，但删了找不回' },
+  { title: '保留：移到「已处理」/（可找回）', value: 'move', description: '在系统目录或自定义根目录下的「已处理/」单独存放，确认无用后可自行删除' },
 ]
 // 字幕压缩包：一个包常同时有 SC（简体）/ TC（繁体）两个字幕，按文件名选择要处理的
+// 已处理压缩包根目录
+const archiveDoneModes = [
+  { title: '系统目录（跟随各监控目录）', value: 'system' },
+  { title: '自定义目录（统一存放）', value: 'custom' },
+]
 const subtitleArchiveFilters = [
   { title: '全部字幕（默认）', value: 'all' },
   { title: '仅简体（SC / CHS / 简 / zh-hans）', value: 'sc' },
@@ -363,8 +371,20 @@ watch(() => config.value.auto_subset, (v) => {
 const processedArchives = ref([])
 const processedLoading = ref(false)
 const processedBusy = ref('')
+const processedFilter = ref('all')
+const processedFilters = [
+  { title: '全部', value: 'all' },
+  { title: '已处理', value: '已处理' },
+  { title: '错误', value: '错误' },
+  { title: '未分类（旧版）', value: '未分类' },
+]
+const filteredProcessedArchives = computed(() => (
+  processedFilter.value === 'all'
+    ? processedArchives.value
+    : processedArchives.value.filter((item) => (item.category || '未分类') === processedFilter.value)
+))
 const totalProcessedSize = computed(() => (
-  processedArchives.value.reduce((sum, item) => sum + (Number(item.size) || 0), 0)
+  filteredProcessedArchives.value.reduce((sum, item) => sum + (Number(item.size) || 0), 0)
 ))
 function formatProcessedSize(value) {
   const num = Number(value) || 0
@@ -421,11 +441,13 @@ async function restoreProcessedArchive(item) {
   }
 }
 async function clearProcessedArchives() {
-  if (!processedArchives.value.length) return
-  if (!window.confirm('清空全部已处理压缩包？共 ' + processedArchives.value.length + ' 个，不可恢复。\n\n（只删「已处理压缩包/」里的副本，不影响原目录）')) return
+  const scope = processedFilter.value === 'all' ? '' : processedFilter.value
+  const target = scope || '全部'
+  if (!filteredProcessedArchives.value.length) return
+  if (!window.confirm('清空「' + target + '」已处理压缩包？共 ' + filteredProcessedArchives.value.length + ' 个，不可恢复。\n\n（只删「已处理压缩包/」里的副本，不影响原目录）')) return
   processedBusy.value = 'clear'
   try {
-    const res = await apiModule.post(props.api, '/archives/processed/clear', {})
+    const res = await apiModule.post(props.api, '/archives/processed/clear', { category: scope })
     emit('notify', res.message || '已清空已处理压缩包', 'success')
     await loadProcessedArchives()
   } catch (e) {
@@ -547,7 +569,7 @@ async function clearProcessedArchives() {
           <div class="zt-switch-row">
             <div class="flex-grow-1">
               <div class="zt-switch-title">解压整理后自动清理压缩包</div>
-              <div class="zt-switch-desc">作用于字体监控目录（只解字体）和两个 ASS 字幕目录（只解 .ass）：处理成功后清理原包；字体包、字幕包都按各自目录下的「已处理压缩包/」或直接删除处理，其余情况一律保留</div>
+              <div class="zt-switch-desc">作用于字体监控目录（只解字体）和两个 ASS 字幕目录（只解 .ass）：处理成功后按下面方式清理；正常清理默认直接删除，选「保留」才移到「已处理/」；待定/失败/放错目录不会走这条</div>
             </div>
             <v-switch v-model="config.archive_cleanup_enabled" color="primary" density="compact" hide-details></v-switch>
           </div>
@@ -571,8 +593,34 @@ async function clearProcessedArchives() {
             </v-radio>
           </v-radio-group>
           <div class="zt-hint">
-            开 = 字体包在字体监控目录、字幕包在对应 ASS 目录，且自动执行开启、处理无失败时清理：移到该目录下「已处理压缩包/」或直接删除；
-            放错目录、进待确认/待检查/待处理、有失败时一律保留并提醒；该子目录会被插件忽略，请勿在其中放其他文件。
+            开 = 自动执行开启、处理无失败时清理：默认直接删除；选「保留」才移到「已处理/」。
+            放错目录、不支持格式 → 移到「错误/」；待确认/待检查/待处理、有失败 → 保留。
+          </div>
+
+          <div class="zt-option-label mb-1 mt-4">已处理压缩包根目录</div>
+          <v-select
+            v-model="config.archive_done_mode"
+            :items="archiveDoneModes"
+            item-title="title"
+            item-value="value"
+            density="compact"
+            variant="outlined"
+            hide-details
+          ></v-select>
+          <v-text-field
+            v-if="config.archive_done_mode === 'custom'"
+            v-model="config.archive_done_dir"
+            label="自定义根目录"
+            placeholder="/media/archives/zitifenlei-done"
+            density="compact"
+            variant="outlined"
+            class="mt-2"
+            hint="插件会自动在该目录下创建「已处理/」「错误/」两个子目录；留空则回退到系统目录"
+            persistent-hint
+          ></v-text-field>
+          <div class="zt-hint">
+            系统目录 = 各监控目录下的「已处理压缩包/」；自定义目录 = 三个来源统一放一个根目录。
+            放错目录的压缩包会移到「错误/」并提醒，不再留在原目录。
           </div>
 
           <div class="zt-option-label mb-1 mt-4">字幕压缩包：处理哪些字幕</div>
@@ -680,27 +728,40 @@ async function clearProcessedArchives() {
       </v-card-title>
       <v-card-text>
         <div class="zt-hint mb-2">
-          这里管理自动清理时移动到各监控目录「已处理压缩包/」里的压缩包；可恢复到原目录（会重新被监控处理）或删除。
-          原监控目录里的压缩包不在这里，插件不会误删。
+          这里管理「已处理压缩包」根目录下的副本：已处理/（成功）、错误/（放错目录/不支持格式）、未分类（旧版）。
+          可按分类筛选、恢复回原目录（会重新被监控处理）或删除；原监控目录里的压缩包不在这里，插件不会误删。
         </div>
         <div class="d-flex flex-wrap align-center ga-2">
+          <v-select
+            v-model="processedFilter"
+            :items="processedFilters"
+            item-title="title"
+            item-value="value"
+            density="compact"
+            variant="outlined"
+            hide-details
+            style="max-width: 170px"
+          ></v-select>
           <v-btn size="small" variant="tonal" :loading="processedLoading" @click="loadProcessedArchives">
             <v-icon start size="16">mdi-refresh</v-icon>刷新
           </v-btn>
-          <v-btn size="small" color="error" variant="text" :disabled="!processedArchives.length" :loading="processedBusy === 'clear'" @click="clearProcessedArchives">
-            <v-icon start size="16">mdi-delete-sweep</v-icon>清空全部
+          <v-btn size="small" color="error" variant="text" :disabled="!filteredProcessedArchives.length" :loading="processedBusy === 'clear'" @click="clearProcessedArchives">
+            <v-icon start size="16">mdi-delete-sweep</v-icon>清空当前分类
           </v-btn>
-          <span class="zt-hint ml-auto">共 {{ processedArchives.length }} 个 · {{ formatProcessedSize(totalProcessedSize) }}</span>
+          <span class="zt-hint ml-auto">共 {{ filteredProcessedArchives.length }} 个 · {{ formatProcessedSize(totalProcessedSize) }}</span>
         </div>
         <div v-if="processedLoading && !processedArchives.length" class="zt-hint mt-3">读取中…</div>
-        <div v-else-if="!processedArchives.length" class="zt-hint mt-3">暂无已处理压缩包</div>
+        <div v-else-if="!filteredProcessedArchives.length" class="zt-hint mt-3">当前分类暂无已处理压缩包</div>
         <div v-else class="mt-2 zt-archive-list">
-          <div v-for="item in processedArchives" :key="item.path" class="zt-archive-row">
+          <div v-for="item in filteredProcessedArchives" :key="item.path" class="zt-archive-row">
             <div class="flex-grow-1">
               <div class="zt-archive-name">{{ item.name }}</div>
-              <div class="zt-hint">{{ item.source }} · {{ formatProcessedSize(item.size) }} · {{ formatProcessedTime(item.mtime) }}</div>
+              <div class="zt-hint">
+                <span class="zt-archive-cat">{{ item.category || '未分类' }}</span>
+                · {{ item.source }} · {{ formatProcessedSize(item.size) }} · {{ formatProcessedTime(item.mtime) }}
+              </div>
             </div>
-            <v-btn size="x-small" variant="tonal" :loading="processedBusy === item.path" @click="restoreProcessedArchive(item)">恢复</v-btn>
+            <v-btn size="x-small" variant="tonal" :disabled="!item.can_restore" :title="item.can_restore ? '恢复到原目录' : '自定义目录缺少原目录记录，无法恢复'" :loading="processedBusy === item.path" @click="restoreProcessedArchive(item)">恢复</v-btn>
             <v-btn size="x-small" variant="text" color="error" :loading="processedBusy === item.path" @click="removeProcessedArchive(item)">删除</v-btn>
           </div>
         </div>
@@ -1100,6 +1161,13 @@ async function clearProcessedArchives() {
   font-size: 13px;
   font-weight: 500;
   word-break: break-all;
+}
+.zt-archive-cat {
+  display: inline-block;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: rgba(128, 128, 128, 0.18);
+  font-size: 11px;
 }
 @media (max-width: 600px) {
   .zt-switch-row {

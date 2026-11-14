@@ -178,7 +178,12 @@ _DEFAULT_CONFIG = {
     # 清理压缩包（移到「已处理压缩包」子目录 或 直接删除）只在「自动执行开 + 全部处理无失败」时执行，
     # 放错目录、待定、有失败时一律保留并提醒。
     "archive_cleanup_enabled": False,
-    "archive_cleanup_action": "move",  # move=移到 已处理压缩包/（可找回，默认）；delete=直接删除
+    # delete=正常清理（直接删除，默认）；move=保留（移到 已处理/，可找回）
+    "archive_cleanup_action": "delete",
+    # 已处理压缩包根目录：system=跟随各监控目录（<目录>/已处理压缩包/）；
+    # custom=统一放到 archive_done_dir；根目录下自动分「已处理/」「错误/」
+    "archive_done_mode": "system",
+    "archive_done_dir": "",
     # 字幕压缩包内常同时有 SC（简体）和 TC（繁体）两个字幕；按文件名筛选要处理哪一个：
     # all=全部；sc=仅简体；tc=仅繁体；custom=自定义关键词（subtitle_archive_keywords，逗号/空格分隔）
     "subtitle_archive_filter": "all",
@@ -236,6 +241,9 @@ _ARCHIVE_DONE_LIMIT = 300
 _ARCHIVE_MAX_MEMBERS = 500  # 与上传解压一致：一个包最多 500 个成员
 # 清理压缩包时移入的子目录名（位于对应监控目录下；插件会整体忽略该目录）
 _ARCHIVE_DONE_DIR_NAME = "已处理压缩包"
+# 「已处理压缩包」下的分类子目录：成功清理 / 放错或不支持格式
+_ARCHIVE_DONE_OK_DIR_NAME = "已处理"
+_ARCHIVE_DONE_ERR_DIR_NAME = "错误"
 # 字幕压缩包筛选预设关键词：按文件名子串/单词边界匹配（SC=简体，TC=繁体）
 _SUBTITLE_SC_KEYWORDS = (
     "sc", "chs", "simp", "simplified", "zh-hans", "gb", "gb2312", "简体", "简中",
@@ -452,7 +460,7 @@ class Zitifenlei(_PluginBase):
     plugin_name = "字体分类管家"
     plugin_desc = "字体归档整理与 ASS 字幕字体检查插件：扫描/上传字体到字体库，检查字幕缺失字体。"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/zitifenlei.png"
-    plugin_version = "3.4.1"
+    plugin_version = "3.5.0"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "zitifenlei_"
@@ -535,6 +543,8 @@ class Zitifenlei(_PluginBase):
             "subs_subset": [],  # 已子集化字幕文件名
             "subs_ok": [],  # 字体齐全（已完成字形级验证）字幕文件名
             "subs_unverified": [],  # 仅名称匹配、未完成字形级验证的字幕文件名
+            "subs_pending": [],  # 自动执行关闭时登记「待检查」的字幕文件名
+            "subs_subset_pending": [],  # 自动执行关闭时放入「子集化-待处理」的字幕文件名
             # v3.3.0 压缩包处理（与普通目录字体通知分开）：
             "archives": [],  # [{"name","total","added","skipped","pending","failed","action"}]
             "archives_wrong_dir": [],  # [{"name","label"}] 压缩包放错目录（不删除）
@@ -1156,8 +1166,7 @@ class Zitifenlei(_PluginBase):
                         count += 1
                 if count:
                     self._db.add_log(f"自动ASS检查：检查 {count} 个字幕文件", "info")
-                    if self.get_resource_or_config("notify_enabled"):
-                        self._notify("字体分类管家：自动ASS检查完成", f"✅ 自动ASS检查完成\n已检查 {count} 个字幕文件")
+                    # 不再单独发「自动ASS检查完成」：结果统一由聚合的「字幕检查」通知发送
                 # 字幕压缩包：轮询兜底时也解压检查（有指纹去重，不会重复解压）
                 self._process_subtitle_archives("ass")
             except Exception as err:
@@ -1399,6 +1408,18 @@ class Zitifenlei(_PluginBase):
         finally:
             self._job_end()
 
+    def _is_archive_managed_path(self, p: Path) -> bool:
+        """文件是否位于「已处理压缩包」管理目录（含自定义根目录），避免二次处理。"""
+        try:
+            if any(part == _ARCHIVE_DONE_DIR_NAME for part in Path(p).parts):
+                return True
+            raw = str(self.get_resource_or_config("archive_done_dir") or "").strip()
+            if raw and _path_within(Path(p), Path(raw)):
+                return True
+        except Exception:
+            pass
+        return False
+
     def _on_watch_event_impl(self, path: str) -> None:
         """单文件事件：字体 → 自动归档；字幕 → 自动检查
 
@@ -1421,6 +1442,8 @@ class Zitifenlei(_PluginBase):
         success = False
         try:
             p = Path(path)
+            if self._is_archive_managed_path(p):
+                return
             if not p.is_file():
                 return
             # 双观察者（Observer + PollingObserver）会对同一文件各触发一次：
@@ -1511,6 +1534,10 @@ class Zitifenlei(_PluginBase):
                     if subset_dir_cfg and _path_within(p, Path(subset_dir_cfg)):
                         # 「ASS目录监控子集」：放入即进入子集化流程——
                         # 「目录自动收集」开 → 立即后台自动子集化；关 → 进子集化页「待处理」等手动
+                        if self.get_resource_or_config("auto_collect") is False:
+                            with self._lock:
+                                self._notify_agg["subs_subset_pending"].append(p.name)
+                            self._queue_agg_notify()
                         self._schedule_subset_watch(p)
                         success = True
                         self._db.add_log(f"子集监控: {p.name} → 已进入子集化流程", "info")
@@ -1538,8 +1565,10 @@ class Zitifenlei(_PluginBase):
                             elif result.get("status") == "partial_check":
                                 # 仅名称匹配、未完成字形级验证：不能报「字体齐全」
                                 self._notify_agg["subs_unverified"].append(p.name)
-                            elif result.get("status") != "pending":
-                                # 待检查状态（目录自动收集关闭时的登记）不通知「字体齐全」，避免误导
+                            elif result.get("status") == "pending":
+                                # 自动执行关闭：只登记「待检查」，不发「字体齐全」
+                                self._notify_agg["subs_pending"].append(p.name)
+                            else:
                                 self._notify_agg["subs_ok"].append(p.name)
                         self._queue_agg_notify()
                         # 子集化自动处理（设置 auto_subset 开启时）：跟随「目录自动收集」开关——
@@ -1887,7 +1916,7 @@ class Zitifenlei(_PluginBase):
                     break
             except Exception:
                 pass
-            if self._is_system_hidden_path(f):
+            if self._is_system_hidden_path(f) or self._is_archive_managed_path(f):
                 continue
             if not f.is_file():
                 continue
@@ -1965,16 +1994,22 @@ class Zitifenlei(_PluginBase):
     ) -> None:
         """放错目录的文件：只对字体/字幕/压缩包记日志，其它杂项（.txt/.url/缩略图等）静默跳过。
 
-        压缩包放错目录额外提醒（文字日志 + 系统通知聚合），并且**绝不删除/移动**该压缩包。
+        压缩包放错目录：不再留在原目录，直接移到「已处理压缩包/错误/」并提醒；
+        移动失败才保留原处（绝不删除）。
         """
         if not (is_font or is_ass or is_arch) or self._db is None:
             return
         label = self._WATCH_DIR_LABELS.get(kind, kind)
         expect = self._WATCH_DIR_EXPECT.get(kind, "")
         if is_arch:
+            action, error_dest = self._move_archive_to_done(
+                p, _ARCHIVE_DONE_ERR_DIR_NAME
+            )
+            moved = action == "moved"
+            hint = "已移到「已处理压缩包/错误/」" if moved else "移动失败，已保留"
             try:
                 self._db.add_log(
-                    f"压缩包放错目录，已跳过且未删除: {p.name}"
+                    f"压缩包放错目录，{hint}: {p.name}"
                     f"（{label}只处理{expect}）；字体压缩包请放「字体监控目录」，"
                     "字幕压缩包请放「ASS 字幕检查目录」或「ASS 自动子集化目录」",
                     "warning",
@@ -1984,7 +2019,13 @@ class Zitifenlei(_PluginBase):
             try:
                 with self._lock:
                     self._notify_agg.setdefault("archives_wrong_dir", []).append(
-                        {"name": p.name, "label": label, "expect": expect}
+                        {
+                            "name": p.name,
+                            "label": label,
+                            "expect": expect,
+                            "action": "moved_error" if moved else "",
+                            "dest": error_dest,
+                        }
                     )
                 self._queue_agg_notify()
             except Exception:
@@ -2055,22 +2096,122 @@ class Zitifenlei(_PluginBase):
                     pass
             return None
 
+    def _archive_done_custom_root(self) -> Optional[Path]:
+        """自定义「已处理压缩包」根目录；未配置/不可用时返回 None（回退系统目录）。"""
+        mode = str(self.get_resource_or_config("archive_done_mode") or "system").strip().lower()
+        if mode != "custom":
+            return None
+        raw = str(self.get_resource_or_config("archive_done_dir") or "").strip()
+        if not raw:
+            return None
+        try:
+            root = Path(raw)
+            root.mkdir(parents=True, exist_ok=True)
+            return root
+        except Exception as err:
+            if self._db is not None:
+                try:
+                    self._db.add_log(
+                        f"自定义已处理压缩包目录不可用（{raw}），已回退系统目录: {err}", "warning"
+                    )
+                except Exception:
+                    pass
+            return None
+
+    def _archive_done_root(self, source_dir: Optional[Path] = None) -> Tuple[Path, str]:
+        """返回 (已处理压缩包根目录, 模式)；模式 system/custom。"""
+        custom = self._archive_done_custom_root()
+        if custom is not None:
+            return custom, "custom"
+        if source_dir is not None:
+            return Path(source_dir) / _ARCHIVE_DONE_DIR_NAME, "system"
+        input_dir = self.get_resource_or_config("input_dir") or ""
+        base = Path(input_dir) if input_dir else Path(".")
+        return base / _ARCHIVE_DONE_DIR_NAME, "system"
+
+    def _archive_source_dir_for_path(self, archive_path: Path) -> Path:
+        """压缩包所在监控目录（用于系统模式下的 已处理压缩包/ 位置）。"""
+        kind = self._watch_dir_kind(archive_path)
+        key = {
+            "input": "input_dir",
+            "ass": "ass_dir",
+            "subset": "subset_dir",
+            "lib": "lib_dir",
+        }.get(kind, "input_dir")
+        raw = self.get_resource_or_config(key) or ""
+        if raw:
+            return Path(raw)
+        return archive_path.parent
+
+    @staticmethod
+    def _unique_archive_dest(done_dir: Path, name: str) -> Path:
+        dest = done_dir / name
+        if dest.exists():
+            dest = done_dir / f"{Path(name).stem}-{int(time.time())}{Path(name).suffix}"
+        return dest
+
+    @staticmethod
+    def _archive_origin_sidecar(dest: Path) -> Path:
+        return dest.parent / (dest.name + ".origin.json")
+
+    def _write_archive_origin(self, dest: Path, source_dir: Path, category: str, mode: str) -> None:
+        """自定义目录记录原目录，供管理页「恢复」使用。"""
+        try:
+            sidecar = self._archive_origin_sidecar(dest)
+            sidecar.write_text(
+                json.dumps(
+                    {"original_dir": str(source_dir), "category": category, "mode": mode},
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+    def _move_archive_to_done(self, archive_path: Path, category: str) -> Tuple[str, str]:
+        """把压缩包移到已处理压缩包根目录下的分类子目录，返回 (action, dest)。
+
+        category: _ARCHIVE_DONE_OK_DIR_NAME / _ARCHIVE_DONE_ERR_DIR_NAME
+        action: "moved" / ""（失败保留原处）
+        """
+        source_dir = self._archive_source_dir_for_path(archive_path)
+        try:
+            root, mode = self._archive_done_root(source_dir)
+            done_dir = root / category
+            done_dir.mkdir(parents=True, exist_ok=True)
+            dest = self._unique_archive_dest(done_dir, archive_path.name)
+            shutil.move(str(archive_path), str(dest))
+            if mode == "custom":
+                self._write_archive_origin(dest, source_dir, category, mode)
+            return "moved", str(dest)
+        except Exception as err:
+            if self._db is not None:
+                try:
+                    self._db.add_log(
+                        f"移动压缩包到「{category}/」失败 {archive_path.name}: {err}（已保留）",
+                        "warning",
+                    )
+                except Exception:
+                    pass
+            return "", ""
+
     def _apply_archive_cleanup(
         self, archive_path: Path, base_dir: Path = None
-    ) -> Tuple[str, str]:
-        """按配置清理已处理完的压缩包，返回 (action, keep_reason)。
+    ) -> Tuple[str, str, str]:
+        """按配置清理已处理完的压缩包，返回 (action, keep_reason, dest)。
 
-        action: "deleted" / "moved" / ""（保留）；keep_reason 仅在保留时给出原因。
-        base_dir: 清理时移动到哪个目录下的「已处理压缩包/」；字体包默认字体监控目录，
-        字幕包传入对应的 ASS 目录。调用方需先确认「自动执行开 + 0 失败 + 有处理结果」。
+        action: "deleted" / "moved" / ""（保留）；keep_reason 仅在保留时给出原因；
+        dest: 移动到「已处理压缩包/已处理/」后的完整路径（action=moved 时）。
+        base_dir: 系统模式下压缩包来源监控目录（决定 已处理压缩包/ 位置）；
+        自定义模式下统一使用 archive_done_dir。
         """
         if not bool(self.get_resource_or_config("archive_cleanup_enabled")):
-            return "", "未开启「解压整理后自动清理压缩包」"
-        action = str(self.get_resource_or_config("archive_cleanup_action") or "move")
+            return "", "未开启「解压整理后自动清理压缩包」", ""
+        action = str(self.get_resource_or_config("archive_cleanup_action") or "delete")
         if action == "delete":
             try:
                 archive_path.unlink()
-                return "deleted", ""
+                return "deleted", "", ""
             except Exception as err:
                 if self._db is not None:
                     try:
@@ -2079,32 +2220,28 @@ class Zitifenlei(_PluginBase):
                         )
                     except Exception:
                         pass
-                return "", f"删除失败: {err}"
-        # 默认 move：移到 <对应监控目录>/已处理压缩包/
+                return "", f"删除失败: {err}", ""
+        # 默认 move：系统模式 → <来源目录>/已处理压缩包/已处理/；自定义模式 → <自定义根>/已处理/
         try:
-            if base_dir is not None:
-                base = Path(base_dir)
-            else:
-                input_dir = self.get_resource_or_config("input_dir") or ""
-                base = Path(input_dir) if input_dir else archive_path.parent
-            done_dir = base / _ARCHIVE_DONE_DIR_NAME
+            src_dir = Path(base_dir) if base_dir is not None else self._archive_source_dir_for_path(archive_path)
+            root, mode = self._archive_done_root(src_dir)
+            done_dir = root / _ARCHIVE_DONE_OK_DIR_NAME
             done_dir.mkdir(parents=True, exist_ok=True)
-            dest = done_dir / archive_path.name
-            if dest.exists():
-                dest = done_dir / f"{archive_path.stem}-{int(time.time())}{archive_path.suffix}"
+            dest = self._unique_archive_dest(done_dir, archive_path.name)
             shutil.move(str(archive_path), str(dest))
-            return "moved", ""
+            if mode == "custom":
+                self._write_archive_origin(dest, src_dir, _ARCHIVE_DONE_OK_DIR_NAME, mode)
+            return "moved", "", str(dest)
         except Exception as err:
             if self._db is not None:
                 try:
                     self._db.add_log(
-                        f"移动压缩包到「{_ARCHIVE_DONE_DIR_NAME}/」失败 {archive_path.name}: "
-                        f"{err}（已保留）",
+                        f"移动压缩包到「已处理/」失败 {archive_path.name}: {err}（已保留）",
                         "warning",
                     )
                 except Exception:
                     pass
-            return "", f"移动失败: {err}"
+            return "", f"移动失败: {err}", ""
 
     def _process_monitor_archives(self) -> None:
         """扫描「字体监控目录」里的压缩包并逐个处理（轮询兜底 / auto_collect 关闭时用）。"""
@@ -2115,7 +2252,11 @@ class Zitifenlei(_PluginBase):
             for f in sorted(Path(input_dir).rglob("*")):
                 if self._stopping:
                     break
-                if not f.is_file() or self._is_system_hidden_path(f):
+                if (
+                    not f.is_file()
+                    or self._is_system_hidden_path(f)
+                    or self._is_archive_managed_path(f)
+                ):
                     continue
                 if arch.is_any_archive(f.name):
                     self._handle_font_archive(f)
@@ -2181,7 +2322,11 @@ class Zitifenlei(_PluginBase):
             for f in sorted(Path(base).rglob("*")):
                 if self._stopping:
                     break
-                if not f.is_file() or self._is_system_hidden_path(f):
+                if (
+                    not f.is_file()
+                    or self._is_system_hidden_path(f)
+                    or self._is_archive_managed_path(f)
+                ):
                     continue
                 if arch.is_any_archive(f.name):
                     self._handle_subtitle_archive(f, dir_kind)
@@ -2272,6 +2417,7 @@ class Zitifenlei(_PluginBase):
                 else:
                     stable_files.append(stable)
             checked = pending = queued = 0
+            check_ok = check_missing = check_unverified = 0
             failed = copy_failed
             if dir_kind == "ass":
                 for stable in stable_files:
@@ -2280,8 +2426,15 @@ class Zitifenlei(_PluginBase):
                         failed += 1
                         continue
                     checked += 1
-                    if res.get("status") == "pending":
+                    status = str(res.get("status") or "")
+                    if status == "pending":
                         pending += 1
+                    elif status == "missing":
+                        check_missing += 1
+                    elif status == "partial_check":
+                        check_unverified += 1
+                    else:
+                        check_ok += 1
                     if self.get_resource_or_config("auto_subset"):
                         self._schedule_subset_watch(stable)
             else:
@@ -2293,6 +2446,7 @@ class Zitifenlei(_PluginBase):
                         failed += 1
             cleanup_action = ""
             keep_reason = ""
+            cleanup_dest = ""
             non_ass_exts = sorted(
                 {
                     Path(str(member)).suffix.lower()
@@ -2309,6 +2463,13 @@ class Zitifenlei(_PluginBase):
                     )
                 else:
                     keep_reason = "包内没有可处理的字幕（.ass）"
+                # 放错格式/包内无 .ass：移到「错误/」，不再留在原目录
+                move_action, error_dest = self._move_archive_to_done(
+                    archive_path, _ARCHIVE_DONE_ERR_DIR_NAME
+                )
+                if move_action:
+                    cleanup_action = "moved_error"
+                    cleanup_dest = error_dest
             elif not matched:
                 keep_reason = f"没有符合筛选条件的字幕（{filter_label}）"
             elif copy_failed:
@@ -2322,7 +2483,7 @@ class Zitifenlei(_PluginBase):
             elif dir_kind == "subset" and queued <= 0:
                 keep_reason = "没有成功进入子集化流程的字幕"
             else:
-                cleanup_action, keep_reason = self._apply_archive_cleanup(
+                cleanup_action, keep_reason, cleanup_dest = self._apply_archive_cleanup(
                     archive_path, base_dir=base_dir
                 )
             self._mark_archive_done(sig)
@@ -2330,9 +2491,14 @@ class Zitifenlei(_PluginBase):
                 detail = "；".join(
                     f"{member}: {reason}" for member, reason in (result.skipped + result.errors)[:5]
                 )
+                tail = (
+                    "（压缩包已移到「错误/」）"
+                    if cleanup_action == "moved_error"
+                    else "（压缩包保留）"
+                )
                 self._db.add_log(
                     f"{prefix} {name}: 解出 0 个字幕" + (f"（{detail}）" if detail else "")
-                    + "（压缩包保留）" + (f"；{keep_reason}" if keep_reason else ""),
+                    + tail + (f"；{keep_reason}" if keep_reason else ""),
                     "warning",
                 )
             elif not matched:
@@ -2344,7 +2510,9 @@ class Zitifenlei(_PluginBase):
                 if cleanup_action == "deleted":
                     tail = "；压缩包已删除"
                 elif cleanup_action == "moved":
-                    tail = f"；压缩包已移到「{_ARCHIVE_DONE_DIR_NAME}/」"
+                    tail = f"；压缩包已移到「{_ARCHIVE_DONE_OK_DIR_NAME}/」"
+                elif cleanup_action == "moved_error":
+                    tail = f"；压缩包已移到「{_ARCHIVE_DONE_ERR_DIR_NAME}/」"
                 elif keep_reason:
                     tail = f"；压缩包保留（{keep_reason}）"
                 else:
@@ -2370,11 +2538,22 @@ class Zitifenlei(_PluginBase):
                         "matched": len(matched),
                         "filtered_out": filtered_out,
                         "checked": checked,
+                        "check_ok": check_ok,
+                        "check_missing": check_missing,
+                        "check_unverified": check_unverified,
                         "queued": queued,
                         "pending": pending,
                         "failed": failed,
                         "action": cleanup_action,
                         "keep_reason": keep_reason,
+                        "dest": cleanup_dest,
+                        "dest_category": (
+                            _ARCHIVE_DONE_ERR_DIR_NAME
+                            if cleanup_action == "moved_error"
+                            else _ARCHIVE_DONE_OK_DIR_NAME
+                            if cleanup_action == "moved"
+                            else ""
+                        ),
                     }
                 )
             self._queue_agg_notify()
@@ -2467,6 +2646,7 @@ class Zitifenlei(_PluginBase):
             # 进待确认 / 有失败 / 开关关闭 / 包内无字体 → 保留并在通知里说明原因。
             cleanup_action = ""
             keep_reason = ""
+            cleanup_dest = ""
             ass_only_hint = ""
             if not fonts:
                 ass_members = [
@@ -2481,6 +2661,13 @@ class Zitifenlei(_PluginBase):
                     ass_only_hint = "（字幕压缩包请到「检查 / 子集化」页上传）"
                 else:
                     keep_reason = "包内没有可处理的字体"
+                # 包内没有字体（错目录/字幕包/空包）：移到「错误/」，不留在原目录
+                move_action, error_dest = self._move_archive_to_done(
+                    archive_path, _ARCHIVE_DONE_ERR_DIR_NAME
+                )
+                if move_action:
+                    cleanup_action = "moved_error"
+                    cleanup_dest = error_dest
             elif not auto_collect:
                 keep_reason = "字体已进「待确认」，确认前保留压缩包"
             elif failed > 0:
@@ -2488,15 +2675,20 @@ class Zitifenlei(_PluginBase):
             elif added + dup <= 0:
                 keep_reason = "没有成功归档的字体"
             else:
-                cleanup_action, keep_reason = self._apply_archive_cleanup(archive_path)
+                cleanup_action, keep_reason, cleanup_dest = self._apply_archive_cleanup(archive_path)
             self._mark_archive_done(sig)
             if not fonts:
                 detail = "；".join(
                     f"{member}: {reason}" for member, reason in (result.skipped + result.errors)[:5]
                 )
+                tail = (
+                    "（压缩包已移到「错误/」）"
+                    if cleanup_action == "moved_error"
+                    else "（压缩包保留）"
+                )
                 self._db.add_log(
                     f"监控压缩包 {name}: 解出 0 个字体" + (f"（{detail}）" if detail else "")
-                    + "（压缩包保留）" + ass_only_hint,
+                    + tail + ass_only_hint,
                     "warning",
                 )
             else:
@@ -2504,7 +2696,9 @@ class Zitifenlei(_PluginBase):
                 if cleanup_action == "deleted":
                     tail = "；压缩包已删除"
                 elif cleanup_action == "moved":
-                    tail = f"；压缩包已移到「{_ARCHIVE_DONE_DIR_NAME}/」"
+                    tail = f"；压缩包已移到「{_ARCHIVE_DONE_OK_DIR_NAME}/」"
+                elif cleanup_action == "moved_error":
+                    tail = f"；压缩包已移到「{_ARCHIVE_DONE_ERR_DIR_NAME}/」"
                 elif keep_reason:
                     tail = f"；压缩包保留（{keep_reason}）"
                 else:
@@ -2525,6 +2719,14 @@ class Zitifenlei(_PluginBase):
                         "failed": failed,
                         "action": cleanup_action,
                         "keep_reason": keep_reason,
+                        "dest": cleanup_dest,
+                        "dest_category": (
+                            _ARCHIVE_DONE_ERR_DIR_NAME
+                            if cleanup_action == "moved_error"
+                            else _ARCHIVE_DONE_OK_DIR_NAME
+                            if cleanup_action == "moved"
+                            else ""
+                        ),
                     }
                 )
             if added:
@@ -2593,6 +2795,16 @@ class Zitifenlei(_PluginBase):
         text = "、".join(str(n) for n in shown)
         return text + ("…" if len(names) > len(shown) else "")
 
+    def _notify_bullets(self, names: List[str], limit: int = 5) -> List[str]:
+        try:
+            items = [str(n) for n in names if str(n or "").strip()]
+        except Exception:
+            return []
+        lines = [f"• {n}" for n in items[:limit]]
+        if len(items) > limit:
+            lines.append(f"• … 等 {len(items)} 个")
+        return lines
+
     def _archive_notify(
         self,
         stats: Dict[str, Any],
@@ -2601,46 +2813,195 @@ class Zitifenlei(_PluginBase):
         title_prefix: str = "自动归档",
         extra: str = "",
     ) -> None:
-        """字体归档类通知统一模板（实时监控 / 全量检查 / 全量扫描共用）。
-
-        标题与正文首行都标明复制/移动模式；新增名最多 10 个、跳过名最多 3 个；
-        末尾「已删除监控目录中的重复源文件」仅在移动模式 + 删除开关开 + 实际删除时出现。
-        """
+        """字体归档通知（自动执行开）：简洁版。"""
         added = list(stats.get("added") or [])
         skipped = list(stats.get("skipped") or [])
         failed = int(stats.get("failed") or 0)
         dup_deleted = int(stats.get("dup_deleted") or 0)
         delete_failed = int(stats.get("delete_failed") or 0)
         total = len(added) + len(skipped) + failed
-        if not total:
-            return
-        if not self.get_resource_or_config("notify_enabled"):
+        if not total or not self.get_resource_or_config("notify_enabled"):
             return
         mode = mode or (self.get_resource_or_config("archive_mode") or "copy")
-        is_move = mode == "move"
-        mode_name = "移动模式" if is_move else "复制模式"
-        mode_desc = "移动模式：源文件已移入字体库" if is_move else "复制模式：源文件保留在监控目录"
-        lines = [f"📥 本次{source_label}到 {total} 个字体（{mode_desc}）", ""]
+        is_move = str(mode) == "move"
+        icon = "🔎" if ("检查" in title_prefix or "扫描" in title_prefix) else "📥"
+        lines = [
+            "────────────",
+            f"{icon}【{title_prefix} · {'移动' if is_move else '复制'}】",
+            f"归档 {len(added)}｜跳过 {len(skipped)}｜失败 {failed}",
+        ]
         if added:
-            lines.append(f"✅ 新增归档 {len(added)} 个：{self._short_names(added, 10)}")
+            lines.append(f"✅ 新增：{self._short_names(added, 8)}")
         if skipped:
-            lines.append(f"⏭ 库中已存在跳过 {len(skipped)} 个：{self._short_names(skipped, 3)}")
+            lines.append(f"⏭ 跳过：{self._short_names(skipped, 3)}")
         if failed:
-            lines.append(f"⚠ 处理失败 {failed} 个（详见插件日志）")
+            lines.append(f"❌ 失败 {failed} 个（详见日志）")
         if delete_failed:
-            lines.append(f"⚠ 删除重复源文件失败 {delete_failed} 个（详见插件日志）")
+            lines.append(f"⚠️ 删除重复失败 {delete_failed} 个")
         if extra:
             lines.append(extra)
+        lines.append("📁 源文件已移入字体库" if is_move else "📁 源文件保留在监控目录")
         if dup_deleted and is_move:
-            lines += ["", f"🗑 已删除监控目录中的重复源文件 {dup_deleted} 个"]
-        self._notify(f"字体分类管家：{title_prefix}（{mode_name}）", "\n".join(lines))
+            lines.append(f"🗑️ 删除重复源文件 {dup_deleted} 个")
+        self._notify("字体分类管家", "\n".join(lines))
+
+    def _notify_fonts_pending(self, names: List[str]) -> None:
+        if not names or not self.get_resource_or_config("notify_enabled"):
+            return
+        lines = [
+            "────────────",
+            "⏳【已进待确认】",
+            f"待确认 {len(names)}｜自动执行已关闭",
+            "────────────",
+        ] + self._notify_bullets(names, 5)
+        lines.append("💡 到「字体库 → 待确认」一键整理")
+        self._notify("字体分类管家", "\n".join(lines))
+
+    def _notify_subset_pending(self, names: List[str]) -> None:
+        if not names or not self.get_resource_or_config("notify_enabled"):
+            return
+        lines = [
+            "────────────",
+            "⏳【已进待处理】",
+            f"待处理 {len(names)}｜自动执行已关闭",
+            "────────────",
+        ] + self._notify_bullets(names, 5)
+        lines.append("💡 到「子集化 → 待处理」手动运行")
+        self._notify("字体分类管家", "\n".join(lines))
+
+    def _archive_status(self, item: Dict[str, Any]) -> str:
+        failed = int(item.get("failed") or 0)
+        action = str(item.get("action") or "")
+        if failed or action == "moved_error":
+            return "error"
+        if action in ("deleted", "moved"):
+            return "ok"
+        if int(item.get("added") or 0) or int(item.get("check_ok") or 0) or int(item.get("queued") or 0):
+            return "ok"
+        return "keep"
+
+    def _archive_notify_block(self, item: Dict[str, Any], icon: str = "✅") -> List[str]:
+        name = str(item.get("name") or "压缩包")
+        action = str(item.get("action") or "")
+        lines = [f"{icon}【{name}】"]
+        if item.get("kind") == "subtitle":
+            parts = [
+                f"{int(item.get('total') or 0)} 解出",
+                f"{int(item.get('matched') or 0)} 匹配",
+            ]
+            if int(item.get("filtered_out") or 0):
+                parts.append(f"{int(item.get('filtered_out') or 0)} 筛选跳过")
+            lines.append("字幕 " + "｜".join(parts))
+            if int(item.get("checked") or 0):
+                lines.append(
+                    f"检查 {int(item.get('check_ok') or 0)} 成功"
+                    f"（缺 {int(item.get('check_missing') or 0)} / 失败 {int(item.get('failed') or 0)}）"
+                )
+            if int(item.get("pending") or 0):
+                lines.append(f"待检查 {int(item.get('pending') or 0)}")
+            if int(item.get("queued") or 0):
+                lines.append(f"入队子集化 {int(item.get('queued') or 0)}（结果另发）")
+        else:
+            parts = [
+                f"{int(item.get('total') or 0)} 解出",
+                f"{int(item.get('added') or 0)} 归档",
+                f"{int(item.get('skipped') or 0)} 跳过",
+            ]
+            if int(item.get("pending") or 0):
+                parts.append(f"{int(item.get('pending') or 0)} 待确认")
+            if int(item.get("failed") or 0):
+                parts.append(f"{int(item.get('failed') or 0)} 失败")
+            lines.append("字体 " + "｜".join(parts))
+        if action == "deleted":
+            lines.append("压缩包已删除")
+        elif action == "moved":
+            lines.append(f"压缩包已移到「{_ARCHIVE_DONE_OK_DIR_NAME}/」")
+        elif action == "moved_error":
+            lines.append(f"压缩包已移到「{_ARCHIVE_DONE_ERR_DIR_NAME}/」")
+        else:
+            reason = str(item.get("keep_reason") or "")
+            lines.append("压缩包保留" + (f"（{reason}）" if reason else ""))
+        return lines
+
+    def _notify_archive_digest(
+        self, archives: List[Dict[str, Any]], wrong: List[Dict[str, Any]]
+    ) -> None:
+        if not self.get_resource_or_config("notify_enabled"):
+            return
+        ok: List[Dict[str, Any]] = []
+        keep: List[Dict[str, Any]] = []
+        err: List[Dict[str, Any]] = []
+        for item in archives:
+            status = self._archive_status(item)
+            (ok if status == "ok" else err if status == "error" else keep).append(item)
+        lines = [
+            "────────────",
+            "📦【压缩包处理】",
+            f"成功 {len(ok)}｜保留 {len(keep)}｜错误 {len(err) + len(wrong)}",
+        ]
+        for item in ok:
+            lines += ["────────────"] + self._archive_notify_block(item, "✅")
+        for item in keep:
+            lines += ["────────────"] + self._archive_notify_block(item, "⚠️")
+        for item in err:
+            lines += ["────────────"] + self._archive_notify_block(item, "❌")
+        for item in wrong[:10]:
+            dest = "已移到「错误/」" if item.get("action") == "moved_error" else "移动失败，已保留"
+            lines += [
+                "────────────",
+                f"❌【{item.get('name') or '压缩包'}】",
+                f"放错目录：{item.get('label') or '其他目录'}（只处理{item.get('expect') or '对应文件'}）",
+                f"压缩包{dest}",
+            ]
+        self._notify("字体分类管家", "\n".join(lines))
+
+    def _notify_subtitle_check(
+        self,
+        missing: List[Dict[str, Any]],
+        subset: List[str],
+        ok: List[str],
+        unverified: List[str],
+        pending: List[str] = None,
+    ) -> None:
+        if not self.get_resource_or_config("notify_enabled"):
+            return
+        pending = list(pending or [])
+        auto = self.get_resource_or_config("auto_collect") is not False
+        if not auto:
+            names = pending or (
+                [m.get("name") for m in missing] + list(ok) + list(subset) + list(unverified)
+            )
+            lines = [
+                "────────────",
+                "⏳【已登记待检查】",
+                f"待检查 {len(names)}｜自动执行已关闭",
+                "────────────",
+            ] + self._notify_bullets(names, 8)
+            lines.append("💡 到「检查」页手动检查")
+            self._notify("字体分类管家", "\n".join(lines))
+            return
+        total = len(missing) + len(ok) + len(subset) + len(unverified)
+        lines = [
+            "────────────",
+            "🔍【字幕检查】",
+            f"检查 {total}｜齐全 {len(ok) + len(subset)}｜缺字体 {len(missing)}｜未验证 {len(unverified)}",
+        ]
+        for m in missing[:5]:
+            fonts = list(m.get("fonts") or [])[:3]
+            detail = f"（{'、'.join(fonts)}）" if fonts else ""
+            lines.append(f"❌ {m.get('name') or '字幕'}：缺 {int(m.get('count') or 0)} 种{detail}")
+        for name in subset:
+            lines.append(f"🎬 {name}（已内嵌）")
+        for name in ok:
+            lines.append(f"✅ {name}")
+        for name in unverified:
+            lines.append(f"⚠️ {name}（未验证）")
+        if missing:
+            lines.append("💡 缺字体可到检查页上传")
+        self._notify("字体分类管家", "\n".join(lines))
 
     def _flush_agg_notify(self) -> None:
-        """聚合窗口到期：把缓冲内的归档/字幕检查结果归类成一条通知发送。
-
-        字体归档走统一模板 _archive_notify（区分复制/移动、新增/跳过/失败分项）；
-        字幕按缺失/子集化/齐全分类。数量大时折叠显示（前几个 + …），避免消息过长。
-        """
+        """聚合窗口到期：按「字体 / 待确认 / 字幕检查 / 压缩包」分别发送。"""
         with self._lock:
             buf = self._notify_agg
             fonts = list(buf.get("fonts") or [])
@@ -2654,6 +3015,8 @@ class Zitifenlei(_PluginBase):
             subs_subset = list(buf.get("subs_subset") or [])
             subs_ok = list(buf.get("subs_ok") or [])
             subs_unverified = list(buf.get("subs_unverified") or [])
+            subs_pending = list(buf.get("subs_pending") or [])
+            subs_subset_pending = list(buf.get("subs_subset_pending") or [])
             archives = list(buf.get("archives") or [])
             archives_wrong_dir = list(buf.get("archives_wrong_dir") or [])
             buf["fonts"] = []
@@ -2667,83 +3030,23 @@ class Zitifenlei(_PluginBase):
             buf["subs_subset"] = []
             buf["subs_ok"] = []
             buf["subs_unverified"] = []
+            buf["subs_pending"] = []
+            buf["subs_subset_pending"] = []
             buf["archives"] = []
             buf["archives_wrong_dir"] = []
             buf["timer"] = None
         if not (
-            fonts
-            or fonts_skipped
-            or font_failed
-            or fonts_dup_deleted
-            or fonts_delete_failed
-            or fonts_pending
-            or subs_missing
-            or subs_subset
-            or subs_ok
-            or subs_unverified
-            or archives
-            or archives_wrong_dir
+            fonts or fonts_skipped or font_failed or fonts_dup_deleted
+            or fonts_delete_failed or fonts_pending or subs_missing or subs_subset
+            or subs_ok or subs_unverified or subs_pending or subs_subset_pending
+            or archives or archives_wrong_dir
         ):
             return
         if not self.get_resource_or_config("notify_enabled"):
             return
-        # 压缩包处理单独一条通知（与目录监控的普通字体/字幕通知分开）
         if archives or archives_wrong_dir:
-            lines: List[str] = []
-            for item in archives_wrong_dir[:10]:
-                expect = str(item.get("expect") or "对应类型的文件")
-                lines.append(
-                    f"⚠ 压缩包放错目录：{item.get('name') or '压缩包'}"
-                    f" 在「{item.get('label') or '其他目录'}」；该目录只处理{expect}，"
-                    "压缩包已跳过且未删除。字体压缩包请放「字体监控目录」，"
-                    "字幕压缩包请放「ASS 字幕检查目录」或「ASS 自动子集化目录」"
-                )
-            for item in archives[:10]:
-                total = int(item.get("total") or 0)
-                action = str(item.get("action") or "")
-                if action == "deleted":
-                    tail = "压缩包已删除"
-                elif action == "moved":
-                    tail = f"压缩包已移到「{_ARCHIVE_DONE_DIR_NAME}/」"
-                else:
-                    reason = str(item.get("keep_reason") or "")
-                    tail = "压缩包保留" + (f"（{reason}）" if reason else "")
-                if item.get("kind") == "subtitle":
-                    parts = [f"匹配 {int(item.get('matched') or 0)}"]
-                    if int(item.get("filtered_out") or 0):
-                        parts.append(f"筛选跳过 {int(item.get('filtered_out') or 0)}")
-                    if int(item.get("checked") or 0):
-                        checked_text = f"检查 {int(item.get('checked') or 0)}"
-                        if int(item.get("pending") or 0):
-                            checked_text += f"（待检查 {int(item.get('pending') or 0)}）"
-                        parts.append(checked_text)
-                    if int(item.get("queued") or 0):
-                        parts.append(f"子集化入队 {int(item.get('queued') or 0)}")
-                    if int(item.get("failed") or 0):
-                        parts.append(f"失败 {int(item.get('failed') or 0)}")
-                    lines.append(
-                        f"📦 [字幕] {item.get('name') or '压缩包'}"
-                        f"（{item.get('dir_label') or '字幕目录'}）：解出 {total} 个字幕 → "
-                        f"{'，'.join(parts)}；{tail}"
-                    )
-                    continue
-                parts = [f"归档 {int(item.get('added') or 0)}"]
-                if int(item.get("skipped") or 0):
-                    parts.append(f"跳过 {int(item.get('skipped') or 0)}")
-                if int(item.get("pending") or 0):
-                    parts.append(f"待确认 {int(item.get('pending') or 0)}")
-                if int(item.get("failed") or 0):
-                    parts.append(f"失败 {int(item.get('failed') or 0)}")
-                lines.append(
-                    f"📦 {item.get('name') or '压缩包'}：解出 {total} 个字体 → "
-                    f"{'，'.join(parts)}；{tail}"
-                )
-            if len(archives) > 10:
-                lines.append(f"… 等 {len(archives)} 个压缩包")
-            self._notify("字体分类管家：压缩包处理", "\n".join(lines))
-        # 字体与字幕分开通知：字体一条、字幕一条，不混在同一消息里
+            self._notify_archive_digest(archives, archives_wrong_dir)
         if fonts or fonts_skipped or font_failed or fonts_dup_deleted or fonts_delete_failed:
-            # 字体归档通知（仅字体）：新增/跳过/失败分项，只有跳过时也发（用户需要知道去向）
             self._archive_notify(
                 {
                     "added": fonts,
@@ -2756,50 +3059,14 @@ class Zitifenlei(_PluginBase):
                 source_label="监控",
                 title_prefix="自动归档",
             )
-        # 目录自动收集关闭：监控到的字体只进「待确认」未归档，独立成条提示
         if fonts_pending:
-            shown = fonts_pending[:10]
-            more = len(fonts_pending) - len(shown)
-            self._notify(
-                "字体分类管家：新字体待确认",
-                f"⏳ 已加入待确认 {len(fonts_pending)} 个字体，等待一键整理：{'、'.join(shown)}"
-                + (f" 等 {more} 个" if more > 0 else ""),
+            self._notify_fonts_pending(fonts_pending)
+        if subs_missing or subs_subset or subs_ok or subs_unverified or subs_pending:
+            self._notify_subtitle_check(
+                subs_missing, subs_subset, subs_ok, subs_unverified, subs_pending
             )
-        if subs_missing or subs_subset or subs_ok or subs_unverified:
-            # 字幕检查通知（仅字幕，按缺失/子集化/齐全分类）
-            lines: List[str] = []
-            for m in subs_missing:
-                first = m.get("fonts") or []
-                detail = "、".join(first[:3])
-                more = len(first) - 3
-                lines.append(
-                    f"❌ {m['name']} → 缺 {m['count']} 个字体"
-                    + (f"（{detail}" + (f" 等 {more} 种" if more > 0 else "") + "）" if detail else "")
-                )
-            if subs_subset:
-                shown = subs_subset[:10]
-                more = len(subs_subset) - len(shown)
-                lines.append(
-                    f"✅ 已子集化（自带内嵌字体）{len(subs_subset)} 个：{'、'.join(shown)}"
-                    + (f" 等 {more} 个" if more > 0 else "")
-                )
-            if subs_ok:
-                shown = subs_ok[:10]
-                more = len(subs_ok) - len(shown)
-                lines.append(
-                    f"✅ 字体齐全（已逐字符验证）{len(subs_ok)} 个：{'、'.join(shown)}"
-                    + (f" 等 {more} 个" if more > 0 else "")
-                )
-            if subs_unverified:
-                shown = subs_unverified[:10]
-                more = len(subs_unverified) - len(shown)
-                lines.append(
-                    f"⚠️ 未验证字形（仅名称匹配）{len(subs_unverified)} 个：{'、'.join(shown)}"
-                    + (f" 等 {more} 个" if more > 0 else "")
-                )
-            if subs_missing:
-                lines.append("可在「检查页」上传缺失字体入库消除标记")
-            self._notify("字体分类管家：字幕检查", "\n".join(lines))
+        if subs_subset_pending:
+            self._notify_subset_pending(subs_subset_pending)
 
     # ─── 子集化引擎 ──────────────────────────────────────
     def _subset_engine_ready(self) -> Tuple[bool, str]:
@@ -3999,29 +4266,31 @@ class Zitifenlei(_PluginBase):
         return stats
 
     def _notify_subset_result(self, stats: Dict[str, Any], scope: str = "") -> None:
-        """子集化批量完成通知（单条汇总）"""
+        """子集化完成通知（简洁版）。"""
         try:
             if not self.get_resource_or_config("notify_enabled"):
                 return
-            lines: List[str] = []
-            title = f"字体分类管家：子集化完成{('（' + scope + '）') if scope else ''}"
-            if stats["success"]:
-                lines.append(f"✅ 已子集化 {stats['success']} 个字幕")
-            if stats["skipped"]:
-                lines.append(f"⏭ 跳过 {stats['skipped']} 个（已子集化）")
-            if stats["missing"]:
-                fonts = stats.get("missing_fonts") or []
-                shown = "、".join(fonts[:5])
-                more = len(fonts) - 5
-                lines.append(
-                    f"❌ 缺字体 {stats['missing']} 个字幕：{shown}"
-                    + (f" 等 {more} 种" if more > 0 else "")
-                    + "（可先上传缺失字体入库后重试）"
-                )
-            if stats["error"]:
-                lines.append(f"⚠ 失败 {stats['error']} 个（见子集化记录）")
-            if lines:
-                self._notify(title, "\n".join(lines))
+            success = int(stats.get("success") or 0)
+            skipped = int(stats.get("skipped") or 0)
+            missing = int(stats.get("missing") or 0)
+            error = int(stats.get("error") or 0)
+            if not (success or skipped or missing or error):
+                return
+            scope_label = f" · {scope}" if scope else ""
+            lines = [
+                "────────────",
+                f"🎬【子集化完成{scope_label}】",
+                f"成功 {success}｜跳过 {skipped}｜缺字体 {missing}｜失败 {error}",
+            ]
+            if missing:
+                fonts = list(stats.get("missing_fonts") or [])[:5]
+                detail = "、".join(str(f) for f in fonts)
+                if detail:
+                    lines.append(f"❌ 缺字体：{detail}")
+                lines.append("💡 上传缺失字体后可重试")
+            if error:
+                lines.append(f"⚠️ 失败 {error} 个（详见子集化记录）")
+            self._notify("字体分类管家", "\n".join(lines))
         except Exception:
             pass
 
@@ -4435,7 +4704,7 @@ class Zitifenlei(_PluginBase):
     def _torrent_notify_result(
         self, stats: Dict[str, Any], merged: Dict[str, Any], source: str
     ) -> None:
-        """非字幕入库来源（整理兜底/手动/定时）的收集结果通知。"""
+        """种子字体收集通知（简洁版）。"""
         try:
             if not self.get_resource_or_config("notify_enabled"):
                 return
@@ -4445,14 +4714,17 @@ class Zitifenlei(_PluginBase):
             if not added and not pending and not failed:
                 return
             label = {"transfer": "整理完成兜底", "manual": "手动检查", "poll": "定时检查"}.get(source, source)
-            lines = [f"📥 种子字体收集（{label}）：{stats.get('name') or '未知种子'}"]
+            lines = [
+                "────────────",
+                f"🌱【种子字体收集 · {label}】",
+                f"种子：{stats.get('name') or '未知种子'}",
+                f"新增 {len(added)}｜待整理 {pending}｜失败 {failed}",
+            ]
             if added:
-                lines.append(f"✅ 新增 {len(added)} 个：{self._short_names(added, 10)}")
-            if pending:
-                lines.append(f"📝 已加入待整理 {pending} 个（等待一键整理）")
+                lines += ["────────────"] + self._notify_bullets(added, 5)
             if failed:
-                lines.append(f"⚠ 处理失败 {failed} 个（详见插件日志）")
-            self._notify("字体分类管家：种子字体收集", "\n".join(lines))
+                lines.append(f"⚠️ 失败 {failed} 个（详见日志）")
+            self._notify("字体分类管家", "\n".join(lines))
         except Exception:
             pass
 
@@ -4606,33 +4878,23 @@ class Zitifenlei(_PluginBase):
         embedded: int,
         missing_map: Dict[str, str],
     ) -> None:
-        """汇总通知：missing_map = {归一化key: 展示名}（缺 N 种已按 key 去重）
-
-        格式对齐单字幕通知：状态符号 + 结果行 + 明细换行。剧级聚合字体可能较多，
-        缺失列表保持「最多 5 个 + 等 N 种」折叠，避免消息过长。
-        """
+        """剧集字幕检查汇总（简洁版）。"""
         try:
-            if not self.get_resource_or_config("notify_enabled"):
+            if not self.get_resource_or_config("notify_enabled") or total <= 0:
                 return
-            if total <= 0:
-                return  # 无 ASS 不通知
+            lines = [
+                "────────────",
+                f"📺【《{show}》字幕检查完成】",
+                f"{total} 个字幕" + (f"｜已内嵌 {embedded}" if embedded else ""),
+            ]
             if missing_map:
                 names = list(missing_map.values())[:5]
-                more = len(missing_map) - 5
-                text = "、".join(names) + (f" 等 {more} 种" if more > 0 else "")
-                lines = [
-                    f"❌ 共 {total} 个字幕" + (f"，其中 {embedded} 个已内嵌字体" if embedded else ""),
-                    f"缺失 {len(missing_map)} 种字体：{text}",
-                    "可在检查页上传缺失字体入库消除标记",
-                ]
+                more = len(missing_map) - len(names)
+                lines.append(f"❌ 缺失 {len(missing_map)} 种：{'、'.join(names)}" + (f" 等 {more} 种" if more > 0 else ""))
+                lines.append("💡 可在检查页上传缺失字体")
             else:
-                # 全部字幕已内嵌（子集化）：不再说「字体齐全」（观众根本看不出有没有子集化），明确告知
-                all_embedded = embedded > 0 and embedded == total
-                lines = [
-                    f"✅ 共 {total} 个字幕" + (f"，其中 {embedded} 个已内嵌字体" if embedded else ""),
-                    "全部字幕已子集化（自带内嵌字体）" if all_embedded else "字幕字体齐全",
-                ]
-            self._notify(f"《{show}》字幕检查完成", "\n".join(lines))
+                lines.append("✅ 全部已子集化" if embedded and embedded == total else "✅ 字体齐全")
+            self._notify("字体分类管家", "\n".join(lines))
         except Exception:
             pass
 
@@ -6411,9 +6673,17 @@ class Zitifenlei(_PluginBase):
                 self._db.add_log(f"检查归档：发现 {added} 个新字体（已加入待确认，目录自动收集已关闭）", "info")
                 if self.get_resource_or_config("notify_enabled"):
                     self._notify(
-                        "字体分类管家：全量检查完成",
-                        f"✅ 全量检查完成\n新增 {added} 个待确认字体"
-                        + (f"，已跳过 {skipped} 个已在待确认中的文件" if skipped else ""),
+                        "字体分类管家",
+                        "\n".join(
+                            [
+                                "────────────",
+                                "⏳【已进待确认】",
+                                f"新增 {added}｜待确认 {added}"
+                                + (f"｜跳过 {skipped}" if skipped else "")
+                                + "｜自动执行已关闭",
+                                "💡 到「字体库 → 待确认」一键整理",
+                            ]
+                        ),
                     )
                 return self._ok({"added": added, "skipped": skipped}, f"发现 {added} 个新字体")
             except Exception as err:
@@ -6457,8 +6727,22 @@ class Zitifenlei(_PluginBase):
                 # 补齐字体后重建/增量更新索引，并重检受影响字幕（缺失页/检查页即时消除）
                 self._rebuild_subset_index_silent()
                 self._recheck_missing_after_library_change("全量扫描归档")
-            # 全量扫描通知：与自动归档统一模板（新增/跳过/失败分项 + 明确模式）
-            self._archive_notify(stats, source_label="扫描", title_prefix="全量扫描完成")
+            # 全量扫描通知：自动执行开 → 归档模板；关 → 待确认模板
+            if self.get_resource_or_config("auto_collect") is False and int(stats.get("pending") or 0):
+                if self.get_resource_or_config("notify_enabled"):
+                    self._notify(
+                        "字体分类管家",
+                        "\n".join(
+                            [
+                                "────────────",
+                                "⏳【已进待确认】",
+                                f"待确认 {int(stats.get('pending') or 0)}｜自动执行已关闭",
+                                "💡 到「字体库 → 待确认」一键整理",
+                            ]
+                        ),
+                    )
+            else:
+                self._archive_notify(stats, source_label="扫描", title_prefix="全量扫描完成")
             return self._ok({"added": added}, f"全量扫描完成，已处理 {added} 个字体")
         except Exception as err:
             self._db.add_log(f"全量扫描失败: {err}", "error")
@@ -6505,8 +6789,15 @@ class Zitifenlei(_PluginBase):
             )
             if self.get_resource_or_config("notify_enabled"):
                 self._notify(
-                    "字体分类管家：全量扫描完成",
-                    f"✅ 字幕全量扫描完成\n已检查 {checked} 个字幕，缺失 {missing_total} 种字体",
+                    "字体分类管家",
+                    "\n".join(
+                        [
+                            "────────────",
+                            "🔎【全量扫描完成】",
+                            f"检查 {checked}｜缺 {missing_total} 种字体",
+                            "💡 缺失字体可在「检查」页上传",
+                        ]
+                    ),
                 )
             self._db.set_last_scan_time()  # 记录「上次全量检查」时间（仪表盘展示）
             return self._ok({"checked": checked, "missing_total": missing_total}, f"已检查 {checked} 个字幕")
@@ -8299,16 +8590,16 @@ class Zitifenlei(_PluginBase):
             )
             # 通知：入库结果 + 复核结果
             if ok_count and self.get_resource_or_config("notify_enabled"):
-                lines = [f"✅ 缺失字体已入库 {ok_count} 个"]
+                lines = ["────────────", "📥【缺失字体入库】", f"入库 {ok_count} 个"]
                 if recheck["checked"]:
                     lines.append(
-                        f"已重检受影响字幕 {recheck['checked']} 个：完整 {recheck['ok']}，仍缺 {recheck['missing']}"
+                        f"重检 {recheck['checked']}｜完整 {recheck['ok']}｜仍缺 {recheck['missing']}"
                     )
                 if idx_ok:
-                    lines.append("索引已自动刷新，请回到「子集化」页重新运行")
+                    lines.append("💡 索引已刷新，请回「子集化」页重新运行")
                 elif idx_msg:
-                    lines.append(f"⚠ 索引刷新失败：{idx_msg[:100]}")
-                self._notify("字体分类管家：缺失字体入库", "\n".join(lines))
+                    lines.append(f"⚠️ 索引刷新失败：{idx_msg[:100]}")
+                self._notify("字体分类管家", "\n".join(lines))
             return self._ok(
                 {
                     "classified": ok_count,
@@ -8922,36 +9213,80 @@ class Zitifenlei(_PluginBase):
         return self._ok({"baseline_ts": ts}, "基线已重置")
 
     def _processed_archive_roots(self) -> List[Dict[str, Any]]:
-        """三个支持压缩包的监控目录及其「已处理压缩包/」子目录。"""
+        """已处理压缩包目录：系统模式的各监控目录 + 自定义根目录，按「已处理/错误/未分类」分类。"""
         roots: List[Dict[str, Any]] = []
+        seen: set = set()
+
+        def add(label: str, source: str, source_key: str, category: str,
+                base: Path, directory: Path, mode: str) -> None:
+            try:
+                directory = Path(directory)
+                if not directory.is_dir():
+                    return
+                key = str(directory.resolve())
+                if key in seen:
+                    return
+                seen.add(key)
+                roots.append(
+                    {
+                        "label": label,
+                        "source": source,
+                        "source_key": source_key,
+                        "category": category,
+                        "base": Path(base),
+                        "dir": directory,
+                        "mode": mode,
+                    }
+                )
+            except Exception:
+                return
+
         for key, label in (
             ("input_dir", "字体监控目录"),
             ("ass_dir", "ASS 字幕检查目录"),
             ("subset_dir", "ASS 自动子集化目录"),
         ):
-            base = str(self.get_resource_or_config(key) or "").strip()
-            if not base:
+            raw = str(self.get_resource_or_config(key) or "").strip()
+            if not raw:
                 continue
-            try:
-                base_path = Path(base)
-                done = base_path / _ARCHIVE_DONE_DIR_NAME
-                if done.is_dir():
-                    roots.append({"key": key, "label": label, "base": base_path, "done": done})
-            except Exception:
+            base = Path(raw)
+            done = base / _ARCHIVE_DONE_DIR_NAME
+            if not done.is_dir():
                 continue
+            add(f"{label} · {_ARCHIVE_DONE_OK_DIR_NAME}", label, key,
+                _ARCHIVE_DONE_OK_DIR_NAME, base, done / _ARCHIVE_DONE_OK_DIR_NAME, "system")
+            add(f"{label} · {_ARCHIVE_DONE_ERR_DIR_NAME}", label, key,
+                _ARCHIVE_DONE_ERR_DIR_NAME, base, done / _ARCHIVE_DONE_ERR_DIR_NAME, "system")
+            add(f"{label} · 未分类", label, key, "", base, done, "system")
+
+        mode = str(self.get_resource_or_config("archive_done_mode") or "system").strip().lower()
+        raw = str(self.get_resource_or_config("archive_done_dir") or "").strip()
+        if mode == "custom" and raw:
+            base = Path(raw)
+            if base.is_dir():
+                add(f"自定义目录 · {_ARCHIVE_DONE_OK_DIR_NAME}", "自定义目录", "custom",
+                    _ARCHIVE_DONE_OK_DIR_NAME, base, base / _ARCHIVE_DONE_OK_DIR_NAME, "custom")
+                add(f"自定义目录 · {_ARCHIVE_DONE_ERR_DIR_NAME}", "自定义目录", "custom",
+                    _ARCHIVE_DONE_ERR_DIR_NAME, base, base / _ARCHIVE_DONE_ERR_DIR_NAME, "custom")
+                add("自定义目录 · 未分类", "自定义目录", "custom", "", base, base, "custom")
         return roots
 
     def _safe_processed_archive(self, raw_path: str) -> Optional[Tuple[Dict[str, Any], Path]]:
-        """校验路径必须位于某个「已处理压缩包/」目录内，返回 (root, path)。"""
+        """校验路径必须位于某个「已处理压缩包」分类目录内，返回 (root, path)。"""
         try:
             target = Path(str(raw_path or "")).resolve()
         except Exception:
             return None
         for root in self._processed_archive_roots():
             try:
-                done = root["done"].resolve()
-                if target != done and done not in target.parents:
-                    continue
+                folder = root["dir"].resolve()
+                if root.get("category"):
+                    if folder not in target.parents:
+                        continue
+                else:
+                    # 未分类只允许根目录下的直接文件，避免把 已处理/错误 里的文件误算到未分类
+                    if target.parent != folder:
+                        continue
                 if target.is_file():
                     return root, target
             except Exception:
@@ -8969,30 +9304,44 @@ class Zitifenlei(_PluginBase):
         except Exception:
             pass
 
+    @staticmethod
+    def _archive_sidecar_for(path: Path) -> Path:
+        return path.parent / (path.name + ".origin.json")
+
     def api_processed_archives(self) -> Dict[str, Any]:
-        """列出各监控目录「已处理压缩包/」里的压缩包，供管理/恢复/删除。"""
+        """列出已处理压缩包（已处理/错误/未分类），供管理/恢复/删除。"""
         if not self._enabled:
             return self._err("插件已停用，请先在设置中启用")
         items: List[Dict[str, Any]] = []
         for root in self._processed_archive_roots():
             try:
-                for f in root["done"].rglob("*"):
-                    # 注意：不能套用 _is_system_hidden_path —— 它把「已处理压缩包」本身
-                    # 当系统隐藏目录忽略（监控/扫描时正确），管理列表必须能读到其中文件。
-                    if not f.is_file():
+                if root.get("category"):
+                    files = list(root["dir"].rglob("*"))
+                else:
+                    files = list(root["dir"].iterdir())
+                for f in files:
+                    if not f.is_file() or f.name.endswith(".origin.json"):
                         continue
                     try:
                         st = f.stat()
                     except Exception:
                         continue
+                    can_restore = root.get("mode") == "system"
+                    if root.get("mode") == "custom":
+                        sidecar = self._archive_sidecar_for(f)
+                        can_restore = sidecar.is_file()
                     items.append(
                         {
                             "path": str(f),
                             "name": f.name,
-                            "source": root["label"],
-                            "source_key": root["key"],
+                            "source": root.get("source") or root.get("label"),
+                            "label": root.get("label"),
+                            "source_key": root.get("source_key"),
+                            "category": root.get("category") or "未分类",
+                            "mode": root.get("mode"),
                             "size": int(st.st_size),
                             "mtime": int(st.st_mtime),
+                            "can_restore": bool(can_restore),
                         }
                     )
             except Exception as err:
@@ -9003,11 +9352,12 @@ class Zitifenlei(_PluginBase):
                 "items": items,
                 "count": len(items),
                 "total_size": sum(int(item.get("size") or 0) for item in items),
+                "categories": [_ARCHIVE_DONE_OK_DIR_NAME, _ARCHIVE_DONE_ERR_DIR_NAME, "未分类"],
             }
         )
 
     async def api_processed_archive_remove(self, request: Request = None) -> Dict[str, Any]:
-        """删除「已处理压缩包/」里的指定压缩包（不碰原监控目录里的文件）。"""
+        """删除「已处理压缩包」里的指定文件（不碰原监控目录里的文件）。"""
         if not self._enabled:
             return self._err("插件已停用，请先在设置中启用")
         body: Dict[str, Any] = {}
@@ -9031,8 +9381,9 @@ class Zitifenlei(_PluginBase):
             root, target = found
             try:
                 target.unlink()
+                self._archive_sidecar_for(target).unlink(missing_ok=True)
                 removed += 1
-                self._prune_empty_dirs(target.parent, root["done"])
+                self._prune_empty_dirs(target.parent, root["dir"])
             except Exception as err:
                 errors.append(f"{target.name}: {err}")
         if removed and self._db:
@@ -9048,7 +9399,7 @@ class Zitifenlei(_PluginBase):
         return self._ok(payload, f"已删除 {removed} 个压缩包")
 
     async def api_processed_archive_restore(self, request: Request = None) -> Dict[str, Any]:
-        """把「已处理压缩包/」里的压缩包移回原监控目录。"""
+        """把「已处理压缩包」里的文件移回原监控目录。"""
         if not self._enabled:
             return self._err("插件已停用，请先在设置中启用")
         body: Dict[str, Any] = {}
@@ -9063,25 +9414,37 @@ class Zitifenlei(_PluginBase):
         if not found:
             return self._err("压缩包不存在或不在「已处理压缩包」目录内")
         root, target = found
+        dest_dir = Path(root["base"])
+        if root.get("mode") == "custom":
+            sidecar = self._archive_sidecar_for(target)
+            try:
+                meta = json.loads(sidecar.read_text(encoding="utf-8")) if sidecar.is_file() else {}
+            except Exception:
+                meta = {}
+            original = str(meta.get("original_dir") or "").strip()
+            if not original:
+                return self._err("自定义目录缺少原目录记录，无法恢复；请手动移动文件")
+            dest_dir = Path(original)
+        if not dest_dir.is_dir():
+            return self._err(f"原目录不存在或不可用: {dest_dir}")
         try:
-            dest = root["base"] / target.name
-            if dest.exists():
-                dest = root["base"] / f"{target.stem}-{int(time.time())}{target.suffix}"
+            dest = self._unique_archive_dest(dest_dir, target.name)
             shutil.move(str(target), str(dest))
-            self._prune_empty_dirs(target.parent, root["done"])
+            self._archive_sidecar_for(target).unlink(missing_ok=True)
+            self._prune_empty_dirs(target.parent, root["dir"])
             if self._db:
                 try:
                     self._db.add_log(
-                        f"已处理压缩包恢复：{target.name} → {root['label']}", "info"
+                        f"已处理压缩包恢复：{target.name} → {dest_dir}", "info"
                     )
                 except Exception:
                     pass
-            return self._ok({"path": str(dest)}, f"已恢复到{root['label']}")
+            return self._ok({"path": str(dest)}, f"已恢复到 {dest_dir}")
         except Exception as err:
             return self._err(f"恢复失败: {err}")
 
     async def api_processed_archive_clear(self, request: Request = None) -> Dict[str, Any]:
-        """清空「已处理压缩包/」：可只清某个来源目录（source = input_dir/ass_dir/subset_dir）。"""
+        """清空「已处理压缩包」：可按分类清空（category = 已处理/错误/未分类）。"""
         if not self._enabled:
             return self._err("插件已停用，请先在设置中启用")
         body: Dict[str, Any] = {}
@@ -9092,24 +9455,26 @@ class Zitifenlei(_PluginBase):
                     body = data
         except Exception:
             body = {}
-        source = str(body.get("source") or "")
+        wanted = str(body.get("category") or "")
         removed = 0
         errors: List[str] = []
         for root in self._processed_archive_roots():
-            if source and root["key"] != source:
+            if wanted and (root.get("category") or "未分类") != wanted:
                 continue
             try:
-                for f in list(root["done"].rglob("*")):
+                files = list(root["dir"].rglob("*")) if root.get("category") else list(root["dir"].iterdir())
+                for f in files:
                     if not f.is_file():
                         continue
                     try:
                         f.unlink()
+                        self._archive_sidecar_for(f).unlink(missing_ok=True)
                         removed += 1
                     except Exception as err:
                         errors.append(f"{f.name}: {err}")
-                self._prune_empty_dirs(root["done"], root["base"])
+                self._prune_empty_dirs(root["dir"], root["base"])
             except Exception as err:
-                errors.append(f"{root['label']}: {err}")
+                errors.append(f"{root.get('label')}: {err}")
         if removed and self._db:
             try:
                 self._db.add_log(f"已处理压缩包：清空 {removed} 个", "info")

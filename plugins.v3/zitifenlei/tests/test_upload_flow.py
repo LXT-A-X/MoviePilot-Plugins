@@ -457,7 +457,7 @@ def test_watch_subset_all_still_notifies(tmp_path, monkeypatch):
         sent = _notify_recorder(plugin)
         res = plugin.api_subset_all()
         assert res.get("success"), res
-        assert len(sent) == 1 and "子集化完成" in sent[0]["title"]
+        assert len(sent) == 1 and sent[0]["title"] == "字体分类管家" and "子集化完成" in sent[0]["text"]
     finally:
         db.close()
 
@@ -575,9 +575,10 @@ def test_auto_monitor_real_archive_sends_notify(tmp_path):
         sent = _notify_recorder(plugin)
         getattr(plugin, "_Zitifenlei__auto_monitor_scan")()
         assert len(sent) == 1, sent
-        assert "自动归档" in sent[0]["title"] and "复制模式" in sent[0]["title"]
+        assert sent[0]["title"] == "字体分类管家"
+        assert "自动归档" in sent[0]["text"] and "复制" in sent[0]["text"]
         body = sent[0]["text"]
-        assert "新增归档 1 个" in body and ARIAL.name in body
+        assert "归档 1" in body and ARIAL.name in body
     finally:
         db.close()
 
@@ -604,11 +605,13 @@ def test_agg_notify_splits_fonts_and_subtitles(tmp_path):
         plugin._flush_agg_notify()
         assert len(sent) == 2, sent
         titles = [m["title"] for m in sent]
-        assert any("自动归档" in t for t in titles)
-        sub = next(m for m in sent if "字幕检查" in m["title"])
-        assert "缺 2 个字体" in sub["text"]
-        assert "已子集化（自带内嵌字体）1 个" in sub["text"]
-        assert "字体齐全（已逐字符验证）1 个" in sub["text"]
+        assert all(t == "字体分类管家" for t in titles)
+        bodies = "\n".join(m["text"] for m in sent)
+        assert "自动归档" in bodies and "字幕检查" in bodies
+        sub = next(m for m in sent if "字幕检查" in m["text"])
+        assert "缺 2 种" in sub["text"]
+        assert "🎬 ep02.ziti.ass（已内嵌）" in sub["text"]
+        assert "✅ ep03.ass" in sub["text"]
         # 发送后缓冲必须清空，避免重复通知
         assert plugin._notify_agg["fonts"] == []
         assert plugin._notify_agg["subs_missing"] == []
@@ -633,9 +636,10 @@ def test_run_show_scan_real_missing_notify(tmp_path):
         sent = _notify_recorder(plugin)
         plugin._run_show_scan("测试剧:1", "1", "测试剧", [str(ep)])
         assert len(sent) == 1, sent
-        assert "《测试剧》字幕检查完成" in sent[0]["title"]
+        assert sent[0]["title"] == "字体分类管家"
+        assert "《测试剧》字幕检查完成" in sent[0]["text"]
         body = sent[0]["text"]
-        assert "共 1 个字幕" in body and "缺失" in body
+        assert "1 个字幕" in body and "缺失" in body
     finally:
         db.close()
 
@@ -659,8 +663,9 @@ def test_run_show_subset_real_notify(tmp_path):
         sent = _notify_recorder(plugin)
         plugin._run_show_subset([ep], "测试剧", source="inbound")
         assert len(sent) == 1, sent
-        assert "子集化完成（测试剧）" in sent[0]["title"]
-        assert "已子集化 1 个字幕" in sent[0]["text"]
+        assert sent[0]["title"] == "字体分类管家"
+        assert "子集化完成" in sent[0]["text"] and "测试剧" in sent[0]["text"]
+        assert "成功 1" in sent[0]["text"]
     finally:
         db.close()
 
