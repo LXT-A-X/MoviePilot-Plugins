@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -633,6 +634,151 @@ def extract_external(
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 
+
+def list_archive_entries(
+    archive_path: str | Path,
+    max_entries: int = 500,
+) -> Dict[str, Any]:
+    """列出压缩包内容（不落盘、不解压，仅供管理页在线查看）。
+
+    返回 {"entries": [{"name","size","is_dir"}], "total", "truncated", "tool"}。
+    zip 用标准库；7z/rar 优先 7z l -slt，其次 lsar -j，最后 bsdtar -tf。
+    工具缺失/格式不支持时返回 {"error": "..."}。
+    """
+    archive = Path(archive_path)
+    if not archive.is_file():
+        return {"error": "压缩包文件不存在"}
+
+    def _collect(entries: List[Dict[str, Any]], tool: str) -> Dict[str, Any]:
+        total = len(entries)
+        shown = entries[: max(1, int(max_entries))]
+        return {
+            "entries": shown,
+            "total": total,
+            "truncated": total > len(shown),
+            "tool": tool,
+        }
+
+    if zipfile.is_zipfile(archive):
+        try:
+            entries: List[Dict[str, Any]] = []
+            with zipfile.ZipFile(archive) as zf:
+                for info in zf.infolist():
+                    name = _zip_member_name(info)
+                    if not name:
+                        continue
+                    entries.append(
+                        {
+                            "name": name,
+                            "size": 0 if info.is_dir() else int(info.file_size or 0),
+                            "is_dir": info.is_dir(),
+                        }
+                    )
+            return _collect(entries, "zip")
+        except Exception as err:
+            return {"error": f"读取 zip 目录失败: {err}"}
+
+    suffix = archive.suffix.lower()
+    candidates = rar_candidates() if suffix == ".rar" else seven_zip_candidates()
+    for tool, exe in candidates:
+        entries: List[Dict[str, Any]] = []
+        try:
+            if tool in ("7z", "7zz", "7za", "7zr"):
+                proc = subprocess.run(
+                    [exe, "l", "-slt", archive.as_posix()],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=120,
+                )
+                if proc.returncode != 0:
+                    continue
+                name, size, is_dir, kind = "", 0, False, ""
+                def _flush() -> None:
+                    nonlocal name, size, is_dir, kind
+                    if name and kind.lower() not in ("7z", "rar", "zip", "cab", "tar", "gzip"):
+                        entries.append(
+                            {
+                                "name": name,
+                                "size": 0 if is_dir else int(size or 0),
+                                "is_dir": bool(is_dir),
+                            }
+                        )
+                    name, size, is_dir, kind = "", 0, False, ""
+                for raw_line in proc.stdout.splitlines():
+                    line = raw_line.strip()
+                    if line.startswith("Path = "):
+                        _flush()
+                        name = line[7:].strip()
+                    elif line.startswith("Size = "):
+                        try:
+                            size = int(line[7:].strip())
+                        except Exception:
+                            size = 0
+                    elif line.startswith("Attributes = "):
+                        is_dir = line[13:].strip().startswith("D")
+                    elif line.startswith("Type = "):
+                        kind = line[7:].strip()
+                _flush()
+                if entries:
+                    return _collect(entries, tool)
+            elif tool == "bsdtar":
+                proc = subprocess.run(
+                    [exe, "-tf", archive.as_posix()],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=120,
+                )
+                if proc.returncode != 0:
+                    continue
+                for raw_line in proc.stdout.splitlines():
+                    name = raw_line.strip()
+                    if name:
+                        entries.append({"name": name, "size": 0, "is_dir": name.endswith("/")})
+                if entries:
+                    return _collect(entries, tool)
+        except Exception:
+            continue
+
+    lsar = shutil.which("lsar")
+    if lsar:
+        try:
+            proc = subprocess.run(
+                [lsar, "-j", archive.as_posix()],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=120,
+            )
+            if proc.returncode == 0:
+                data = json.loads(proc.stdout or "{}")
+                entries = []
+                for item in data.get("lsarContents") or []:
+                    name = str(item.get("XADFileName") or "")
+                    if not name:
+                        continue
+                    entries.append(
+                        {
+                            "name": name,
+                            "size": int(item.get("XADFileSize") or 0),
+                            "is_dir": bool(item.get("XADIsDirectory")),
+                        }
+                    )
+                if entries:
+                    return _collect(entries, "lsar")
+        except Exception:
+            pass
+
+    return {
+        "error": (
+            "当前环境没有可列出该格式的解压工具（需 7z/unar/lsar）；"
+            "可到「仪表盘 → 依赖 → 解压工具」安装/修复。"
+        )
+    }
 
 def extract_archive(
     archive_path: str | Path,

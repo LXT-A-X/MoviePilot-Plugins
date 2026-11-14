@@ -6,6 +6,7 @@ import FontLibrary from './views/FontLibrary.vue'
 import Check from './views/Check.vue'
 import Subset from './views/Subset.vue'
 import MissingFonts from './views/MissingFonts.vue'
+import Archives from './views/Archives.vue'
 import Settings from './views/Settings.vue'
 
 // 宿主注入的能力
@@ -28,6 +29,7 @@ const navItems = [
   { key: 'check', title: '检查', icon: 'mdi-file-document-check-outline' },
   { key: 'subset', title: '子集化', icon: 'mdi-subtitles-outline' },
   { key: 'missing', title: '缺失字体', icon: 'mdi-alert-circle-outline' },
+  { key: 'archives', title: '已处理压缩包', icon: 'mdi-archive-eye-outline' },
   { key: 'settings', title: '设置', icon: 'mdi-cog-outline' },
 ]
 
@@ -135,6 +137,7 @@ const views = {
   check: Check,
   subset: Subset,
   missing: MissingFonts,
+  archives: Archives,
   settings: Settings,
 }
 const currentView = computed(() => views[active.value] || Dashboard)

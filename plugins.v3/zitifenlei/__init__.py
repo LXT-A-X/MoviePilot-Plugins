@@ -460,7 +460,7 @@ class Zitifenlei(_PluginBase):
     plugin_name = "字体分类管家"
     plugin_desc = "字体归档整理与 ASS 字幕字体检查插件：扫描/上传字体到字体库，检查字幕缺失字体。"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/zitifenlei.png"
-    plugin_version = "3.5.0"
+    plugin_version = "3.5.1"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "zitifenlei_"
@@ -2072,6 +2072,27 @@ class Zitifenlei(_PluginBase):
                 _ARCHIVE_DONE_SETTING,
                 json.dumps(done[-_ARCHIVE_DONE_LIMIT:], ensure_ascii=False),
             )
+        except Exception:
+            pass
+
+    def _forget_archive_done(self, paths: List[Path]) -> None:
+        """移回原目录后清除压缩包指纹，确保恢复的包会被重新处理。"""
+        if self._db is None:
+            return
+        try:
+            wanted = {str(Path(p).resolve()) for p in paths if p}
+        except Exception:
+            return
+        if not wanted:
+            return
+        try:
+            done = self._archive_done_list()
+            kept = [item for item in done if item.split("|", 1)[0] not in wanted]
+            if len(kept) != len(done):
+                self._db.set_setting(
+                    _ARCHIVE_DONE_SETTING,
+                    json.dumps(kept[-_ARCHIVE_DONE_LIMIT:], ensure_ascii=False),
+                )
         except Exception:
             pass
 
@@ -9271,6 +9292,50 @@ class Zitifenlei(_PluginBase):
                 add("自定义目录 · 未分类", "自定义目录", "custom", "", base, base, "custom")
         return roots
 
+    def _processed_archive_locations(self) -> List[Dict[str, Any]]:
+        """当前「已处理压缩包」的实际存放位置（管理页顶部展示）。"""
+        mode = str(self.get_resource_or_config("archive_done_mode") or "system").strip().lower()
+        custom_raw = str(self.get_resource_or_config("archive_done_dir") or "").strip()
+        if mode == "custom" and custom_raw:
+            path = Path(custom_raw)
+            return [
+                {
+                    "label": "自定义目录",
+                    "path": str(path),
+                    "mode": "custom",
+                    "exists": path.is_dir(),
+                    "hint": "",
+                }
+            ]
+        # 系统模式不逐个列出监控目录：统一显示“系统目录”，实际位置在各自目录下的 已处理压缩包/
+        return [
+            {
+                "label": "系统目录",
+                "path": "",
+                "mode": "system",
+                "exists": True,
+                "hint": "跟随各监控目录，存放在该目录下的「已处理压缩包/」",
+            }
+        ]
+
+    def api_processed_archive_entries(self, path: str = "") -> Dict[str, Any]:
+        """在线查看「已处理压缩包」里的文件清单（只读，不解压）。"""
+        if not self._enabled:
+            return self._err("插件已停用，请先在设置中启用")
+        found = self._safe_processed_archive(path)
+        if not found:
+            return self._err("压缩包不存在或不在「已处理压缩包」目录内")
+        _root, target = found
+        try:
+            data = arch.list_archive_entries(target, max_entries=500)
+        except Exception as err:
+            return self._err(f"读取压缩包失败: {err}")
+        if data.get("error"):
+            return self._err(data["error"])
+        data["name"] = target.name
+        data["path"] = str(target)
+        return self._ok(data)
+
     def _safe_processed_archive(self, raw_path: str) -> Optional[Tuple[Dict[str, Any], Path]]:
         """校验路径必须位于某个「已处理压缩包」分类目录内，返回 (root, path)。"""
         try:
@@ -9353,6 +9418,7 @@ class Zitifenlei(_PluginBase):
                 "count": len(items),
                 "total_size": sum(int(item.get("size") or 0) for item in items),
                 "categories": [_ARCHIVE_DONE_OK_DIR_NAME, _ARCHIVE_DONE_ERR_DIR_NAME, "未分类"],
+                "locations": self._processed_archive_locations(),
             }
         )
 
@@ -9430,6 +9496,8 @@ class Zitifenlei(_PluginBase):
         try:
             dest = self._unique_archive_dest(dest_dir, target.name)
             shutil.move(str(target), str(dest))
+            # 移回后必须清掉原指纹，否则再次监控时会被「已处理」直接跳过
+            self._forget_archive_done([dest, target, dest_dir / target.name])
             self._archive_sidecar_for(target).unlink(missing_ok=True)
             self._prune_empty_dirs(target.parent, root["dir"])
             if self._db:
@@ -9442,6 +9510,54 @@ class Zitifenlei(_PluginBase):
             return self._ok({"path": str(dest)}, f"已恢复到 {dest_dir}")
         except Exception as err:
             return self._err(f"恢复失败: {err}")
+
+    async def api_processed_archive_move(self, request: Request = None) -> Dict[str, Any]:
+        """把「已处理压缩包」里的文件移到指定的监控目录（用于错误包改放正确位置）。"""
+        if not self._enabled:
+            return self._err("插件已停用，请先在设置中启用")
+        body: Dict[str, Any] = {}
+        try:
+            if request is not None:
+                data = await request.json()
+                if isinstance(data, dict):
+                    body = data
+        except Exception:
+            body = {}
+        found = self._safe_processed_archive(str(body.get("path") or ""))
+        if not found:
+            return self._err("压缩包不存在或不在「已处理压缩包」目录内")
+        target = str(body.get("target") or "").strip().lower()
+        target_map = {
+            "input": ("input_dir", "字体监控目录"),
+            "ass": ("ass_dir", "ASS 字幕检查目录"),
+            "subset": ("subset_dir", "ASS 自动子集化目录"),
+        }
+        if target not in target_map:
+            return self._err("请选择目标目录（字体监控 / ASS 检查 / 自动子集化）")
+        key, label = target_map[target]
+        raw_dir = str(self.get_resource_or_config(key) or "").strip()
+        if not raw_dir:
+            return self._err(f"未配置「{label}」，无法移动")
+        dest_dir = Path(raw_dir)
+        if not dest_dir.is_dir():
+            return self._err(f"「{label}」目录不存在: {raw_dir}")
+        root, source = found
+        try:
+            dest = self._unique_archive_dest(dest_dir, source.name)
+            shutil.move(str(source), str(dest))
+            self._forget_archive_done([dest, source, dest_dir / source.name])
+            self._archive_sidecar_for(source).unlink(missing_ok=True)
+            self._prune_empty_dirs(source.parent, root["dir"])
+            if self._db:
+                try:
+                    self._db.add_log(
+                        f"已处理压缩包移动：{source.name} → {label}", "info"
+                    )
+                except Exception:
+                    pass
+            return self._ok({"path": str(dest), "target": label}, f"已移到{label}")
+        except Exception as err:
+            return self._err(f"移动失败: {err}")
 
     async def api_processed_archive_clear(self, request: Request = None) -> Dict[str, Any]:
         """清空「已处理压缩包」：可按分类清空（category = 已处理/错误/未分类）。"""
@@ -9494,6 +9610,8 @@ class Zitifenlei(_PluginBase):
             {"path": "/archives/processed", "endpoint": self.api_processed_archives, "methods": ["GET"], "auth": "bear", "summary": "已处理压缩包列表（三个监控目录下的 已处理压缩包/）"},
             {"path": "/archives/processed/remove", "endpoint": self.api_processed_archive_remove, "methods": ["POST"], "auth": "bear", "summary": "删除已处理压缩包"},
             {"path": "/archives/processed/restore", "endpoint": self.api_processed_archive_restore, "methods": ["POST"], "auth": "bear", "summary": "把已处理压缩包恢复到原监控目录"},
+            {"path": "/archives/processed/move", "endpoint": self.api_processed_archive_move, "methods": ["POST"], "auth": "bear", "summary": "把已处理压缩包移到指定监控目录"},
+            {"path": "/archives/processed/entries", "endpoint": self.api_processed_archive_entries, "methods": ["GET"], "auth": "bear", "summary": "在线查看已处理压缩包内容"},
             {"path": "/archives/processed/clear", "endpoint": self.api_processed_archive_clear, "methods": ["POST"], "auth": "bear", "summary": "清空已处理压缩包"},
             {"path": "/task/status", "endpoint": self.api_task_status, "methods": ["GET"], "auth": "bear", "summary": "后台任务状态（供前端拦截停用插件）"},
             {"path": "/stats", "endpoint": self.api_stats, "methods": ["GET"], "auth": "bear", "summary": "仪表盘统计"},

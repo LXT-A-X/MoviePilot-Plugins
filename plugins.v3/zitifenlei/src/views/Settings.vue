@@ -367,96 +367,6 @@ watch(() => config.value.auto_subset, (v) => {
   if (v) config.value.auto_inbound = false
 })
 
-// ── 已处理压缩包管理（字体/字幕压缩包清理后移到各目录「已处理压缩包/」）──
-const processedArchives = ref([])
-const processedLoading = ref(false)
-const processedBusy = ref('')
-const processedFilter = ref('all')
-const processedFilters = [
-  { title: '全部', value: 'all' },
-  { title: '已处理', value: '已处理' },
-  { title: '错误', value: '错误' },
-  { title: '未分类（旧版）', value: '未分类' },
-]
-const filteredProcessedArchives = computed(() => (
-  processedFilter.value === 'all'
-    ? processedArchives.value
-    : processedArchives.value.filter((item) => (item.category || '未分类') === processedFilter.value)
-))
-const totalProcessedSize = computed(() => (
-  filteredProcessedArchives.value.reduce((sum, item) => sum + (Number(item.size) || 0), 0)
-))
-function formatProcessedSize(value) {
-  const num = Number(value) || 0
-  if (num < 1024) return num + ' B'
-  if (num < 1024 * 1024) return (num / 1024).toFixed(1) + ' KB'
-  if (num < 1024 * 1024 * 1024) return (num / 1024 / 1024).toFixed(1) + ' MB'
-  return (num / 1024 / 1024 / 1024).toFixed(2) + ' GB'
-}
-function formatProcessedTime(ts) {
-  try {
-    return new Date((Number(ts) || 0) * 1000).toLocaleString()
-  } catch (e) {
-    return ''
-  }
-}
-async function loadProcessedArchives() {
-  if (typeof props.api?.get !== 'function') return
-  processedLoading.value = true
-  try {
-    const data = await apiModule.get(props.api, '/archives/processed')
-    processedArchives.value = Array.isArray(data?.items) ? data.items : []
-  } catch (e) {
-    emit('notify', e.message || '读取已处理压缩包失败', 'error')
-  } finally {
-    processedLoading.value = false
-  }
-}
-async function removeProcessedArchive(item) {
-  if (!item || !item.path) return
-  if (!window.confirm('删除压缩包？\n' + item.name + '\n\n（只删「已处理压缩包/」里的副本，不影响原目录）')) return
-  processedBusy.value = item.path
-  try {
-    const res = await apiModule.post(props.api, '/archives/processed/remove', { paths: [item.path] })
-    emit('notify', res.message || '已删除压缩包', 'success')
-    await loadProcessedArchives()
-  } catch (e) {
-    emit('notify', e.message || '删除失败', 'error')
-  } finally {
-    processedBusy.value = ''
-  }
-}
-async function restoreProcessedArchive(item) {
-  if (!item || !item.path) return
-  if (!window.confirm('恢复压缩包到「' + item.source + '」？\n' + item.name + '\n\n恢复后会重新被监控处理，请确认。')) return
-  processedBusy.value = item.path
-  try {
-    const res = await apiModule.post(props.api, '/archives/processed/restore', { path: item.path })
-    emit('notify', res.message || '已恢复压缩包', 'success')
-    await loadProcessedArchives()
-  } catch (e) {
-    emit('notify', e.message || '恢复失败', 'error')
-  } finally {
-    processedBusy.value = ''
-  }
-}
-async function clearProcessedArchives() {
-  const scope = processedFilter.value === 'all' ? '' : processedFilter.value
-  const target = scope || '全部'
-  if (!filteredProcessedArchives.value.length) return
-  if (!window.confirm('清空「' + target + '」已处理压缩包？共 ' + filteredProcessedArchives.value.length + ' 个，不可恢复。\n\n（只删「已处理压缩包/」里的副本，不影响原目录）')) return
-  processedBusy.value = 'clear'
-  try {
-    const res = await apiModule.post(props.api, '/archives/processed/clear', { category: scope })
-    emit('notify', res.message || '已清空已处理压缩包', 'success')
-    await loadProcessedArchives()
-  } catch (e) {
-    emit('notify', e.message || '清空失败', 'error')
-  } finally {
-    processedBusy.value = ''
-  }
-}
-
 </script>
 
 <template>
@@ -716,54 +626,6 @@ async function clearProcessedArchives() {
             <div class="zt-switch-desc">开：归档时用字体内部的 PostScript 名命名（如 SourceHanSansCN-Bold）；关：保持原名（文件名）不变</div>
           </div>
           <v-switch v-model="config.font_name_internal" color="primary" density="compact" hide-details></v-switch>
-        </div>
-      </v-card-text>
-    </v-card>
-
-    <!-- 4. 已处理压缩包管理 -->
-    <v-card class="zt-card-bg mt-4">
-      <v-card-title class="zt-card-title">
-        <v-icon start size="18">mdi-archive-eye-outline</v-icon>
-        已处理压缩包
-      </v-card-title>
-      <v-card-text>
-        <div class="zt-hint mb-2">
-          这里管理「已处理压缩包」根目录下的副本：已处理/（成功）、错误/（放错目录/不支持格式）、未分类（旧版）。
-          可按分类筛选、恢复回原目录（会重新被监控处理）或删除；原监控目录里的压缩包不在这里，插件不会误删。
-        </div>
-        <div class="d-flex flex-wrap align-center ga-2">
-          <v-select
-            v-model="processedFilter"
-            :items="processedFilters"
-            item-title="title"
-            item-value="value"
-            density="compact"
-            variant="outlined"
-            hide-details
-            style="max-width: 170px"
-          ></v-select>
-          <v-btn size="small" variant="tonal" :loading="processedLoading" @click="loadProcessedArchives">
-            <v-icon start size="16">mdi-refresh</v-icon>刷新
-          </v-btn>
-          <v-btn size="small" color="error" variant="text" :disabled="!filteredProcessedArchives.length" :loading="processedBusy === 'clear'" @click="clearProcessedArchives">
-            <v-icon start size="16">mdi-delete-sweep</v-icon>清空当前分类
-          </v-btn>
-          <span class="zt-hint ml-auto">共 {{ filteredProcessedArchives.length }} 个 · {{ formatProcessedSize(totalProcessedSize) }}</span>
-        </div>
-        <div v-if="processedLoading && !processedArchives.length" class="zt-hint mt-3">读取中…</div>
-        <div v-else-if="!filteredProcessedArchives.length" class="zt-hint mt-3">当前分类暂无已处理压缩包</div>
-        <div v-else class="mt-2 zt-archive-list">
-          <div v-for="item in filteredProcessedArchives" :key="item.path" class="zt-archive-row">
-            <div class="flex-grow-1">
-              <div class="zt-archive-name">{{ item.name }}</div>
-              <div class="zt-hint">
-                <span class="zt-archive-cat">{{ item.category || '未分类' }}</span>
-                · {{ item.source }} · {{ formatProcessedSize(item.size) }} · {{ formatProcessedTime(item.mtime) }}
-              </div>
-            </div>
-            <v-btn size="x-small" variant="tonal" :disabled="!item.can_restore" :title="item.can_restore ? '恢复到原目录' : '自定义目录缺少原目录记录，无法恢复'" :loading="processedBusy === item.path" @click="restoreProcessedArchive(item)">恢复</v-btn>
-            <v-btn size="x-small" variant="text" color="error" :loading="processedBusy === item.path" @click="removeProcessedArchive(item)">删除</v-btn>
-          </div>
         </div>
       </v-card-text>
     </v-card>
@@ -1140,35 +1002,6 @@ async function clearProcessedArchives() {
   line-height: 1.5;
 }
 /* 手机端：开关行间距收紧，保证长描述换行时仍与标题首行对齐 */
-.zt-archive-list {
-  max-height: 280px;
-  overflow-y: auto;
-}
-.zt-archive-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 0;
-  border-bottom: 1px solid rgba(128, 128, 128, 0.12);
-}
-.zt-archive-row:last-child {
-  border-bottom: none;
-}
-.zt-archive-row > .flex-grow-1 {
-  min-width: 0;
-}
-.zt-archive-name {
-  font-size: 13px;
-  font-weight: 500;
-  word-break: break-all;
-}
-.zt-archive-cat {
-  display: inline-block;
-  padding: 0 5px;
-  border-radius: 4px;
-  background: rgba(128, 128, 128, 0.18);
-  font-size: 11px;
-}
 @media (max-width: 600px) {
   .zt-switch-row {
     gap: 8px;
