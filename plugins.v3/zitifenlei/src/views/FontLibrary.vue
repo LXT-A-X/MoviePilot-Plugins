@@ -1,5 +1,5 @@
 <script setup>
-import { computed, watch, onActivated, onDeactivated, onMounted, onUnmounted, ref } from 'vue'
+import { computed, watch, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref } from 'vue'
 import apiModule from '../api/fontManager.js'
 import { DESKTOP_ACCEPT_FONT, formatNotes, uploadAcceptFor } from '../utils/uploadAccept.js'
 
@@ -100,6 +100,13 @@ const previewFont = ref(null)
 // 预览字号/颜色可调 + 字符数展示（fontTools 统计）
 const previewSize = ref(64)
 const previewColor = ref('#ffffff')
+const previewText = ref('字体分类管家')
+const previewFaceIndex = ref(0)
+const previewFaces = ref([])
+const previewFontId = ref(null)
+const previewSampleRef = ref(null)
+const previewDialogSampleRef = ref(null)
+const previewFitSize = ref(64)
 const previewCharCount = ref(0)
 const previewFaceCount = ref(0)
 const faceLoading = ref(false)
@@ -149,6 +156,42 @@ const previewStyle = computed(() => {
     color: previewColor.value,
   }
 })
+
+// 固定展示框内按文字长度自动缩放：设定字号是上限，塞不下就继续缩小
+async function fitPreviewText() {
+  await nextTick()
+  for (const root of [previewSampleRef.value, previewDialogSampleRef.value]) {
+    if (!root) continue
+    const primary = root.querySelector('.zt-preview-primary')
+    if (!primary) continue
+    const width = primary.clientWidth
+    const height = primary.clientHeight
+    if (!width || !height) continue
+    const max = Math.max(12, Number(previewSize.value) || 64)
+    let low = 10
+    let high = max
+    let best = 10
+    for (let i = 0; i < 12; i += 1) {
+      const mid = (low + high) / 2
+      primary.style.fontSize = mid + 'px'
+      const fits = primary.scrollHeight <= height + 1 && primary.scrollWidth <= width + 1
+      if (fits) {
+        best = mid
+        low = mid + 0.5
+      } else {
+        high = mid - 0.5
+      }
+    }
+    previewFitSize.value = Math.floor(best)
+    primary.style.fontSize = previewFitSize.value + 'px'
+  }
+}
+
+watch(
+  [previewText, previewSize, previewFont, previewFaceIndex],
+  () => { fitPreviewText() },
+  { flush: 'post' }
+)
 
 // 厂商列表（来自 vendors 接口 + 当前列表聚合）
 const vendorOptions = ref([])
@@ -361,25 +404,52 @@ function onListClick(e) {
 // 快速连点不同字体时只应用最后选中字体的响应，避免迟到的旧响应
 // 覆盖新选中导致预览张冠李戴（Q9 修复）
 let previewReqSeq = 0
-async function selectFont(font) {
-  if (!font) return
+async function applyPreviewResponse(res, fallbackName = '', fallbackFamily = '') {
+  previewFaces.value = Array.isArray(res?.faces) ? res.faces : []
+  previewFaceIndex.value = Number(res?.face_index ?? 0)
+  previewCharCount.value = Number(res?.face_char_count ?? res?.char_count ?? 0)
+  previewFaceCount.value = Number(res?.face_count || previewFaces.value.length || 0)
+  previewName.value = res?.face_name || res?.name || fallbackName || ''
+  previewFamily.value = res?.face_family || res?.family || fallbackFamily || ''
+  const data = res?.data || ''
+  if (!data) throw new Error('该字体文件不存在或无法读取')
+  return loadPreviewFace(data)
+}
+
+async function reloadPreviewFace(faceIndex) {
+  const id = previewFontId.value || selectedFont.value?.id
+  if (!id) return
   const seq = ++previewReqSeq
-  selectedId.value = font.id
   disposePreviewFont()
   previewFont.value = null
   faceLoading.value = true
   faceError.value = ''
   try {
-    const res = await apiModule.get(props.api, '/fonts/preview', { id: font.id })
+    const res = await apiModule.get(props.api, '/fonts/preview', { id, face: Number(faceIndex) || 0 })
     if (seq !== previewReqSeq) return
-    previewCharCount.value = Number(res?.char_count || 0)
-    previewFaceCount.value = Number(res?.face_count || 0)
-    const data = res?.data || ''
-    if (!data) {
-      faceError.value = '该字体文件不存在或无法读取'
-      return
-    }
-    const face = await loadPreviewFace(data)
+    previewFont.value = await applyPreviewResponse(res)
+  } catch (e) {
+    if (seq === previewReqSeq) faceError.value = friendlyPreviewError(e)
+  } finally {
+    if (seq === previewReqSeq) faceLoading.value = false
+  }
+}
+
+async function selectFont(font) {
+  if (!font) return
+  const seq = ++previewReqSeq
+  selectedId.value = font.id
+  previewFontId.value = font.id
+  previewFaceIndex.value = 0
+  previewFaces.value = []
+  disposePreviewFont()
+  previewFont.value = null
+  faceLoading.value = true
+  faceError.value = ''
+  try {
+    const res = await apiModule.get(props.api, '/fonts/preview', { id: font.id, face: 0 })
+    if (seq !== previewReqSeq) return
+    const face = await applyPreviewResponse(res, font.name, font.family)
     if (seq !== previewReqSeq) return
     previewFont.value = face
   } catch (e) {
@@ -604,21 +674,14 @@ async function openPreview(font) {
   previewOpen.value = true
   previewLoading.value = true
   previewError.value = ''
+  previewFontId.value = font.id
+  previewFaceIndex.value = 0
+  previewFaces.value = []
   previewName.value = font.name || ''
   previewFamily.value = font.family || ''
   try {
-    const res = await apiModule.get(props.api, '/fonts/preview', { id: font.id })
-    previewName.value = res?.name || font.name || ''
-    previewFamily.value = res?.family || font.family || ''
-    previewCharCount.value = Number(res?.char_count || 0)
-    previewFaceCount.value = Number(res?.face_count || 0)
-    const data = res?.data || ''
-    if (!data) {
-      previewError.value = '该字体文件不存在或无法读取'
-      return
-    }
-    const face = await loadPreviewFace(data)
-    previewFont.value = face
+    const res = await apiModule.get(props.api, '/fonts/preview', { id: font.id, face: 0 })
+    previewFont.value = await applyPreviewResponse(res, font.name, font.family)
   } catch (e) {
     previewError.value = friendlyPreviewError(e)
   } finally {
@@ -978,23 +1041,32 @@ onUnmounted(() => {
                   {{ previewCharCount }} 字符<template v-if="previewFaceCount > 1"> · {{ previewFaceCount }} faces</template>
                 </v-chip>
               </div>
-              <div class="zt-preview-sample">
-                <v-progress-circular
-                  v-if="faceLoading"
-                  indeterminate
-                  size="28"
-                  class="ma-4"
-                ></v-progress-circular>
-                <div v-else-if="faceError" class="zt-empty pa-4">{{ faceError }}</div>
-                <div v-else :style="previewStyle">
-                  <div :style="{ fontSize: previewSize + 'px', fontWeight: 700, lineHeight: 1.2 }">观沧海</div>
-                  <div style="font-size: 16px; margin-top: 8px">
-                    ABCDEFGHIJKLM · abcdefghijklm · 0123456789
-                  </div>
-                </div>
+              <div v-if="previewFaces.length > 1" class="zt-preview-face-row">
+                <v-select
+                  v-model="previewFaceIndex"
+                  :items="previewFaces"
+                  item-title="label"
+                  item-value="index"
+                  label="Face（TTC/OTC 多字体面）"
+                  density="compact"
+                  variant="outlined"
+                  hide-details
+                  @update:model-value="reloadPreviewFace"
+                ></v-select>
               </div>
-              <div class="zt-preview-controls mt-2">
-                <span class="zt-preview-control-label">字号</span>
+              <div class="zt-preview-text-row">
+                <v-text-field
+                  v-model="previewText"
+                  label="预览文字（可自己替换）"
+                  density="compact"
+                  variant="outlined"
+                  hide-details
+                  maxlength="20"
+                  class="zt-preview-text-input"
+                ></v-text-field>
+              </div>
+              <div class="zt-preview-controls mb-2">
+                <span class="zt-preview-control-label">字号上限</span>
                 <v-slider
                   v-model="previewSize"
                   :min="24"
@@ -1006,6 +1078,25 @@ onUnmounted(() => {
                 ></v-slider>
                 <span class="zt-preview-control-label">颜色</span>
                 <input v-model="previewColor" type="color" class="zt-color-input" />
+                <span class="zt-preview-fit-label">实际 {{ previewFitSize }}px</span>
+              </div>
+              <div ref="previewSampleRef" class="zt-preview-sample">
+                <v-progress-circular
+                  v-if="faceLoading"
+                  indeterminate
+                  size="28"
+                  class="ma-4"
+                ></v-progress-circular>
+                <div v-else-if="faceError" class="zt-empty pa-4">{{ faceError }}</div>
+                <div v-else class="zt-preview-inner" :style="previewStyle">
+                  <div class="zt-preview-font-name">{{ previewName }}</div>
+                  <div class="zt-preview-primary" :style="{ fontSize: previewFitSize + 'px' }">{{ previewText || '字体分类管家' }}</div>
+                  <div class="zt-preview-secondary">永 字 体 预 览</div>
+                  <div class="zt-preview-latin">ABCDEFGHIJKLM · abcdefghijklm · 0123456789</div>
+                  <div class="zt-preview-fallback-hint">
+                    缺字时浏览器会自动回退；示例文字已按当前字体覆盖自动选择，可手动替换
+                  </div>
+                </div>
               </div>
             </div>
           </v-card-text>
@@ -1137,8 +1228,21 @@ onUnmounted(() => {
               </v-chip>
             </div>
             <div class="zt-preview-family mb-3">{{ previewFamily }}</div>
+            <div v-if="previewFaces.length > 1" class="zt-preview-face-row mb-3">
+              <v-select
+                v-model="previewFaceIndex"
+                :items="previewFaces"
+                item-title="label"
+                item-value="index"
+                label="Face（TTC/OTC 多字体面）"
+                density="compact"
+                variant="outlined"
+                hide-details
+                @update:model-value="reloadPreviewFace"
+              ></v-select>
+            </div>
             <div class="zt-preview-controls mb-3">
-              <span class="zt-preview-control-label">字号</span>
+              <span class="zt-preview-control-label">字号上限</span>
               <v-slider
                 v-model="previewSize"
                 :min="24"
@@ -1150,12 +1254,29 @@ onUnmounted(() => {
               ></v-slider>
               <span class="zt-preview-control-label">颜色</span>
               <input v-model="previewColor" type="color" class="zt-color-input" />
+              <span class="zt-preview-fit-label">实际 {{ previewFitSize }}px</span>
             </div>
-            <div class="zt-preview-sample" :style="previewStyle">
-              <span :style="{ fontSize: previewSize + 'px', fontWeight: 700, display: 'block', lineHeight: 1.2 }">观沧海</span>
-              <span style="font-size: 16px; display: block; margin-top: 8px">
-                ABCDEFGHIJKLM abcdefghijklm 0123456789
-              </span>
+            <div class="zt-preview-text-row mb-3">
+              <v-text-field
+                v-model="previewText"
+                label="预览文字（可自己替换）"
+                density="compact"
+                variant="outlined"
+                hide-details
+                maxlength="20"
+                class="zt-preview-text-input"
+              ></v-text-field>
+            </div>
+            <div ref="previewDialogSampleRef" class="zt-preview-sample">
+              <div class="zt-preview-inner" :style="previewStyle">
+                <div class="zt-preview-font-name">{{ previewName }}</div>
+                <div class="zt-preview-primary" :style="{ fontSize: previewFitSize + 'px' }">{{ previewText || '字体分类管家' }}</div>
+                <div class="zt-preview-secondary">永 字 体 预 览</div>
+                <div class="zt-preview-latin">ABCDEFGHIJKLM abcdefghijklm 0123456789</div>
+                <div class="zt-preview-fallback-hint">
+                  缺字时浏览器会自动回退；示例文字已按当前字体覆盖自动选择，可手动替换
+                </div>
+              </div>
             </div>
           </div>
         </v-card-text>
@@ -1245,12 +1366,70 @@ onUnmounted(() => {
   font-size: 14px;
   font-weight: 600;
 }
+.zt-preview-face-row {
+  margin-bottom: 10px;
+  max-width: 420px;
+}
+.zt-preview-text-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.zt-preview-text-input {
+  flex: 1 1 220px;
+  min-width: 180px;
+}
+.zt-preview-fallback-hint {
+  margin-top: 8px;
+  font-size: 11px;
+  opacity: 0.55;
+}
 .zt-preview-sample {
-  padding: 16px;
+  padding: 12px 16px;
   border-radius: 6px;
   background: rgba(255, 255, 255, 0.05);
   text-align: center;
-  min-height: 120px;
+  height: 280px;
+  min-height: 280px;
+  overflow: hidden;
+}
+.zt-preview-inner {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.zt-preview-font-name {
+  flex: 0 0 auto;
+  font-size: 18px;
+  opacity: 0.65;
+  margin-bottom: 4px;
+}
+.zt-preview-primary {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  font-weight: 700;
+  line-height: 1.2;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.zt-preview-secondary {
+  flex: 0 0 auto;
+  font-size: 28px;
+  line-height: 1.3;
+  margin-top: 4px;
+}
+.zt-preview-latin {
+  flex: 0 0 auto;
+  font-size: 15px;
+  margin-top: 4px;
+}
+.zt-preview-fit-label {
+  margin-left: auto;
+  font-size: 11px;
+  opacity: 0.6;
 }
 .zt-preview-loading {
   position: absolute;

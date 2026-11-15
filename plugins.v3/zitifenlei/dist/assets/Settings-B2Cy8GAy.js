@@ -867,26 +867,39 @@ const _hoisted_19$2 = { class: "zt-meta-value" };
 const _hoisted_20$2 = { class: "zt-meta-item" };
 const _hoisted_21$2 = { class: "zt-meta-value" };
 const _hoisted_22$2 = { class: "zt-section-label mb-2" };
-const _hoisted_23$2 = { class: "zt-preview-sample" };
-const _hoisted_24$2 = {
+const _hoisted_23$2 = {
+  key: 0,
+  class: "zt-preview-face-row"
+};
+const _hoisted_24$2 = { class: "zt-preview-text-row" };
+const _hoisted_25$2 = { class: "zt-preview-controls mb-2" };
+const _hoisted_26$2 = { class: "zt-preview-fit-label" };
+const _hoisted_27$2 = {
   key: 1,
   class: "zt-empty pa-4"
 };
-const _hoisted_25$2 = { class: "zt-preview-controls mt-2" };
-const _hoisted_26$2 = { class: "d-flex pa-3 flex-wrap" };
-const _hoisted_27$2 = {
+const _hoisted_28$2 = { class: "zt-preview-font-name" };
+const _hoisted_29$2 = { class: "d-flex pa-3 flex-wrap" };
+const _hoisted_30$2 = {
   key: 1,
   class: "zt-empty"
 };
-const _hoisted_28$2 = {
+const _hoisted_31$1 = {
   key: 2,
   class: "zt-preview-body"
 };
-const _hoisted_29$2 = { class: "zt-preview-name mb-2" };
-const _hoisted_30$2 = { class: "zt-preview-family mb-3" };
-const _hoisted_31$1 = { class: "zt-preview-controls mb-3" };
+const _hoisted_32$1 = { class: "zt-preview-name mb-2" };
+const _hoisted_33$1 = { class: "zt-preview-family mb-3" };
+const _hoisted_34 = {
+  key: 0,
+  class: "zt-preview-face-row mb-3"
+};
+const _hoisted_35 = { class: "zt-preview-controls mb-3" };
+const _hoisted_36 = { class: "zt-preview-fit-label" };
+const _hoisted_37 = { class: "zt-preview-text-row mb-3" };
+const _hoisted_38 = { class: "zt-preview-font-name" };
 
-const {computed: computed$2,watch: watch$2,onActivated: onActivated$1,onDeactivated: onDeactivated$1,onMounted: onMounted$2,onUnmounted: onUnmounted$1,ref: ref$2} = await importShared('vue');
+const {computed: computed$2,watch: watch$2,nextTick,onActivated: onActivated$1,onDeactivated: onDeactivated$1,onMounted: onMounted$2,onUnmounted: onUnmounted$1,ref: ref$2} = await importShared('vue');
 
 const FONT_BATCH_SIZE = 200;
 const PREVIEW_FONT_FAMILY = 'zt-preview-font';
@@ -995,6 +1008,13 @@ const previewFont = ref$2(null);
 // 预览字号/颜色可调 + 字符数展示（fontTools 统计）
 const previewSize = ref$2(64);
 const previewColor = ref$2('#ffffff');
+const previewText = ref$2('字体分类管家');
+const previewFaceIndex = ref$2(0);
+const previewFaces = ref$2([]);
+const previewFontId = ref$2(null);
+const previewSampleRef = ref$2(null);
+const previewDialogSampleRef = ref$2(null);
+const previewFitSize = ref$2(64);
 const previewCharCount = ref$2(0);
 const previewFaceCount = ref$2(0);
 const faceLoading = ref$2(false);
@@ -1042,6 +1062,42 @@ const previewStyle = computed$2(() => {
     color: previewColor.value,
   }
 });
+
+// 固定展示框内按文字长度自动缩放：设定字号是上限，塞不下就继续缩小
+async function fitPreviewText() {
+  await nextTick();
+  for (const root of [previewSampleRef.value, previewDialogSampleRef.value]) {
+    if (!root) continue
+    const primary = root.querySelector('.zt-preview-primary');
+    if (!primary) continue
+    const width = primary.clientWidth;
+    const height = primary.clientHeight;
+    if (!width || !height) continue
+    const max = Math.max(12, Number(previewSize.value) || 64);
+    let low = 10;
+    let high = max;
+    let best = 10;
+    for (let i = 0; i < 12; i += 1) {
+      const mid = (low + high) / 2;
+      primary.style.fontSize = mid + 'px';
+      const fits = primary.scrollHeight <= height + 1 && primary.scrollWidth <= width + 1;
+      if (fits) {
+        best = mid;
+        low = mid + 0.5;
+      } else {
+        high = mid - 0.5;
+      }
+    }
+    previewFitSize.value = Math.floor(best);
+    primary.style.fontSize = previewFitSize.value + 'px';
+  }
+}
+
+watch$2(
+  [previewText, previewSize, previewFont, previewFaceIndex],
+  () => { fitPreviewText(); },
+  { flush: 'post' }
+);
 
 // 厂商列表（来自 vendors 接口 + 当前列表聚合）
 const vendorOptions = ref$2([]);
@@ -1253,25 +1309,52 @@ function onListClick(e) {
 // 快速连点不同字体时只应用最后选中字体的响应，避免迟到的旧响应
 // 覆盖新选中导致预览张冠李戴（Q9 修复）
 let previewReqSeq = 0;
-async function selectFont(font) {
-  if (!font) return
+async function applyPreviewResponse(res, fallbackName = '', fallbackFamily = '') {
+  previewFaces.value = Array.isArray(res?.faces) ? res.faces : [];
+  previewFaceIndex.value = Number(res?.face_index ?? 0);
+  previewCharCount.value = Number(res?.face_char_count ?? res?.char_count ?? 0);
+  previewFaceCount.value = Number(res?.face_count || previewFaces.value.length || 0);
+  previewName.value = res?.face_name || res?.name || fallbackName || '';
+  previewFamily.value = res?.face_family || res?.family || fallbackFamily || '';
+  const data = res?.data || '';
+  if (!data) throw new Error('该字体文件不存在或无法读取')
+  return loadPreviewFace(data)
+}
+
+async function reloadPreviewFace(faceIndex) {
+  const id = previewFontId.value || selectedFont.value?.id;
+  if (!id) return
   const seq = ++previewReqSeq;
-  selectedId.value = font.id;
   disposePreviewFont();
   previewFont.value = null;
   faceLoading.value = true;
   faceError.value = '';
   try {
-    const res = await apiModule.get(props.api, '/fonts/preview', { id: font.id });
+    const res = await apiModule.get(props.api, '/fonts/preview', { id, face: Number(faceIndex) || 0 });
     if (seq !== previewReqSeq) return
-    previewCharCount.value = Number(res?.char_count || 0);
-    previewFaceCount.value = Number(res?.face_count || 0);
-    const data = res?.data || '';
-    if (!data) {
-      faceError.value = '该字体文件不存在或无法读取';
-      return
-    }
-    const face = await loadPreviewFace(data);
+    previewFont.value = await applyPreviewResponse(res);
+  } catch (e) {
+    if (seq === previewReqSeq) faceError.value = friendlyPreviewError(e);
+  } finally {
+    if (seq === previewReqSeq) faceLoading.value = false;
+  }
+}
+
+async function selectFont(font) {
+  if (!font) return
+  const seq = ++previewReqSeq;
+  selectedId.value = font.id;
+  previewFontId.value = font.id;
+  previewFaceIndex.value = 0;
+  previewFaces.value = [];
+  disposePreviewFont();
+  previewFont.value = null;
+  faceLoading.value = true;
+  faceError.value = '';
+  try {
+    const res = await apiModule.get(props.api, '/fonts/preview', { id: font.id, face: 0 });
+    if (seq !== previewReqSeq) return
+    const face = await applyPreviewResponse(res, font.name, font.family);
     if (seq !== previewReqSeq) return
     previewFont.value = face;
   } catch (e) {
@@ -1496,21 +1579,14 @@ async function openPreview(font) {
   previewOpen.value = true;
   previewLoading.value = true;
   previewError.value = '';
+  previewFontId.value = font.id;
+  previewFaceIndex.value = 0;
+  previewFaces.value = [];
   previewName.value = font.name || '';
   previewFamily.value = font.family || '';
   try {
-    const res = await apiModule.get(props.api, '/fonts/preview', { id: font.id });
-    previewName.value = res?.name || font.name || '';
-    previewFamily.value = res?.family || font.family || '';
-    previewCharCount.value = Number(res?.char_count || 0);
-    previewFaceCount.value = Number(res?.face_count || 0);
-    const data = res?.data || '';
-    if (!data) {
-      previewError.value = '该字体文件不存在或无法读取';
-      return
-    }
-    const face = await loadPreviewFace(data);
-    previewFont.value = face;
+    const res = await apiModule.get(props.api, '/fonts/preview', { id: font.id, face: 0 });
+    previewFont.value = await applyPreviewResponse(res, font.name, font.family);
   } catch (e) {
     previewError.value = friendlyPreviewError(e);
   } finally {
@@ -1633,8 +1709,8 @@ return (_ctx, _cache) => {
   const _component_v_card_text = _resolveComponent$2("v-card-text");
   const _component_v_card = _resolveComponent$2("v-card");
   const _component_v_col = _resolveComponent$2("v-col");
-  const _component_v_progress_circular = _resolveComponent$2("v-progress-circular");
   const _component_v_slider = _resolveComponent$2("v-slider");
+  const _component_v_progress_circular = _resolveComponent$2("v-progress-circular");
   const _component_v_row = _resolveComponent$2("v-row");
   const _component_v_card_title = _resolveComponent$2("v-card-title");
   const _component_v_card_actions = _resolveComponent$2("v-card-actions");
@@ -1655,12 +1731,12 @@ return (_ctx, _cache) => {
             start: "",
             size: "18"
           }, {
-            default: _withCtx$2(() => [...(_cache[17] || (_cache[17] = [
+            default: _withCtx$2(() => [...(_cache[21] || (_cache[21] = [
               _createTextVNode$2("mdi-upload", -1)
             ]))]),
             _: 1
           }),
-          _cache[18] || (_cache[18] = _createTextVNode$2(" 上传字体 ", -1))
+          _cache[22] || (_cache[22] = _createTextVNode$2(" 上传字体 ", -1))
         ]),
         _: 1
       }, 8, ["disabled", "loading"]),
@@ -1685,12 +1761,12 @@ return (_ctx, _cache) => {
             start: "",
             size: "18"
           }, {
-            default: _withCtx$2(() => [...(_cache[19] || (_cache[19] = [
+            default: _withCtx$2(() => [...(_cache[23] || (_cache[23] = [
               _createTextVNode$2("mdi-magnify-scan", -1)
             ]))]),
             _: 1
           }),
-          _cache[20] || (_cache[20] = _createTextVNode$2(" 全量检查 ", -1))
+          _cache[24] || (_cache[24] = _createTextVNode$2(" 全量检查 ", -1))
         ]),
         _: 1
       }, 8, ["disabled", "loading"]),
@@ -1712,12 +1788,12 @@ return (_ctx, _cache) => {
             start: "",
             size: "16"
           }, {
-            default: _withCtx$2(() => [...(_cache[21] || (_cache[21] = [
+            default: _withCtx$2(() => [...(_cache[25] || (_cache[25] = [
               _createTextVNode$2("mdi-database-export-outline", -1)
             ]))]),
             _: 1
           }),
-          _cache[22] || (_cache[22] = _createTextVNode$2(" 导出数据库 ", -1))
+          _cache[26] || (_cache[26] = _createTextVNode$2(" 导出数据库 ", -1))
         ]),
         _: 1
       }, 8, ["disabled", "loading"]),
@@ -1734,12 +1810,12 @@ return (_ctx, _cache) => {
             start: "",
             size: "16"
           }, {
-            default: _withCtx$2(() => [...(_cache[23] || (_cache[23] = [
+            default: _withCtx$2(() => [...(_cache[27] || (_cache[27] = [
               _createTextVNode$2("mdi-database-import-outline", -1)
             ]))]),
             _: 1
           }),
-          _cache[24] || (_cache[24] = _createTextVNode$2(" 导入数据库 ", -1))
+          _cache[28] || (_cache[28] = _createTextVNode$2(" 导入数据库 ", -1))
         ]),
         _: 1
       }, 8, ["disabled", "loading"]),
@@ -1764,12 +1840,12 @@ return (_ctx, _cache) => {
             start: "",
             size: "16"
           }, {
-            default: _withCtx$2(() => [...(_cache[25] || (_cache[25] = [
+            default: _withCtx$2(() => [...(_cache[29] || (_cache[29] = [
               _createTextVNode$2("mdi-database-remove-outline", -1)
             ]))]),
             _: 1
           }),
-          _cache[26] || (_cache[26] = _createTextVNode$2(" 清空数据库 ", -1))
+          _cache[30] || (_cache[30] = _createTextVNode$2(" 清空数据库 ", -1))
         ]),
         _: 1
       }, 8, ["disabled"]),
@@ -1912,7 +1988,7 @@ return (_ctx, _cache) => {
                                                 size: "16",
                                                 color: "error"
                                               }, {
-                                                default: _withCtx$2(() => [...(_cache[27] || (_cache[27] = [
+                                                default: _withCtx$2(() => [...(_cache[31] || (_cache[31] = [
                                                   _createTextVNode$2("mdi-close", -1)
                                                 ]))]),
                                                 _: 1
@@ -2003,12 +2079,12 @@ return (_ctx, _cache) => {
                                           size: "14",
                                           class: "mr-1"
                                         }, {
-                                          default: _withCtx$2(() => [...(_cache[28] || (_cache[28] = [
+                                          default: _withCtx$2(() => [...(_cache[32] || (_cache[32] = [
                                             _createTextVNode$2("mdi-clock-outline", -1)
                                           ]))]),
                                           _: 1
                                         }),
-                                        _cache[29] || (_cache[29] = _createTextVNode$2("待整理 ", -1))
+                                        _cache[33] || (_cache[33] = _createTextVNode$2("待整理 ", -1))
                                       ]),
                                       _: 1
                                     }))
@@ -2030,7 +2106,7 @@ return (_ctx, _cache) => {
                                   ]),
                                   _: 1
                                 }),
-                                _cache[30] || (_cache[30] = _createTextVNode$2(" 收藏 ", -1))
+                                _cache[34] || (_cache[34] = _createTextVNode$2(" 收藏 ", -1))
                               ]),
                               _: 1
                             }, 8, ["color", "disabled"]),
@@ -2041,12 +2117,12 @@ return (_ctx, _cache) => {
                             }, {
                               default: _withCtx$2(() => [
                                 _createVNode$2(_component_v_icon, { size: "16" }, {
-                                  default: _withCtx$2(() => [...(_cache[31] || (_cache[31] = [
+                                  default: _withCtx$2(() => [...(_cache[35] || (_cache[35] = [
                                     _createTextVNode$2("mdi-arrow-expand", -1)
                                   ]))]),
                                   _: 1
                                 }),
-                                _cache[32] || (_cache[32] = _createTextVNode$2(" 放大 ", -1))
+                                _cache[36] || (_cache[36] = _createTextVNode$2(" 放大 ", -1))
                               ]),
                               _: 1
                             })
@@ -2054,19 +2130,19 @@ return (_ctx, _cache) => {
                           _createVNode$2(_component_v_divider, { class: "mb-3" }),
                           _createElementVNode$2("div", _hoisted_13$2, [
                             _createElementVNode$2("div", _hoisted_14$2, [
-                              _cache[33] || (_cache[33] = _createElementVNode$2("div", { class: "zt-meta-label" }, "厂商", -1)),
+                              _cache[37] || (_cache[37] = _createElementVNode$2("div", { class: "zt-meta-label" }, "厂商", -1)),
                               _createElementVNode$2("div", _hoisted_15$2, _toDisplayString$2(selectedFont.value.vendor || '未知厂商'), 1)
                             ]),
                             _createElementVNode$2("div", _hoisted_16$2, [
-                              _cache[34] || (_cache[34] = _createElementVNode$2("div", { class: "zt-meta-label" }, "设计师", -1)),
+                              _cache[38] || (_cache[38] = _createElementVNode$2("div", { class: "zt-meta-label" }, "设计师", -1)),
                               _createElementVNode$2("div", _hoisted_17$2, _toDisplayString$2(selectedFont.value.designer || '未知设计师'), 1)
                             ]),
                             _createElementVNode$2("div", _hoisted_18$2, [
-                              _cache[35] || (_cache[35] = _createElementVNode$2("div", { class: "zt-meta-label" }, "文件名", -1)),
+                              _cache[39] || (_cache[39] = _createElementVNode$2("div", { class: "zt-meta-label" }, "文件名", -1)),
                               _createElementVNode$2("div", _hoisted_19$2, _toDisplayString$2(selectedFont.value.file_name), 1)
                             ]),
                             _createElementVNode$2("div", _hoisted_20$2, [
-                              _cache[36] || (_cache[36] = _createElementVNode$2("div", { class: "zt-meta-label" }, "大小", -1)),
+                              _cache[40] || (_cache[40] = _createElementVNode$2("div", { class: "zt-meta-label" }, "大小", -1)),
                               _createElementVNode$2("div", _hoisted_21$2, _toDisplayString$2(selectedFont.value.file_size ? (selectedFont.value.file_size / 1024).toFixed(0) + ' KB' : '-'), 1)
                             ])
                           ]),
@@ -2075,12 +2151,12 @@ return (_ctx, _cache) => {
                               start: "",
                               size: "16"
                             }, {
-                              default: _withCtx$2(() => [...(_cache[37] || (_cache[37] = [
+                              default: _withCtx$2(() => [...(_cache[41] || (_cache[41] = [
                                 _createTextVNode$2("mdi-format-font", -1)
                               ]))]),
                               _: 1
                             }),
-                            _cache[38] || (_cache[38] = _createTextVNode$2(" 字体预览 ", -1)),
+                            _cache[42] || (_cache[42] = _createTextVNode$2(" 字体预览 ", -1)),
                             (previewCharCount.value)
                               ? (_openBlock$2(), _createBlock$2(_component_v_chip, {
                                   key: 0,
@@ -2100,7 +2176,63 @@ return (_ctx, _cache) => {
                                 }))
                               : _createCommentVNode$2("", true)
                           ]),
-                          _createElementVNode$2("div", _hoisted_23$2, [
+                          (previewFaces.value.length > 1)
+                            ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_23$2, [
+                                _createVNode$2(_component_v_select, {
+                                  modelValue: previewFaceIndex.value,
+                                  "onUpdate:modelValue": [
+                                    _cache[8] || (_cache[8] = $event => ((previewFaceIndex).value = $event)),
+                                    reloadPreviewFace
+                                  ],
+                                  items: previewFaces.value,
+                                  "item-title": "label",
+                                  "item-value": "index",
+                                  label: "Face（TTC/OTC 多字体面）",
+                                  density: "compact",
+                                  variant: "outlined",
+                                  "hide-details": ""
+                                }, null, 8, ["modelValue", "items"])
+                              ]))
+                            : _createCommentVNode$2("", true),
+                          _createElementVNode$2("div", _hoisted_24$2, [
+                            _createVNode$2(_component_v_text_field, {
+                              modelValue: previewText.value,
+                              "onUpdate:modelValue": _cache[9] || (_cache[9] = $event => ((previewText).value = $event)),
+                              label: "预览文字（可自己替换）",
+                              density: "compact",
+                              variant: "outlined",
+                              "hide-details": "",
+                              maxlength: "20",
+                              class: "zt-preview-text-input"
+                            }, null, 8, ["modelValue"])
+                          ]),
+                          _createElementVNode$2("div", _hoisted_25$2, [
+                            _cache[43] || (_cache[43] = _createElementVNode$2("span", { class: "zt-preview-control-label" }, "字号上限", -1)),
+                            _createVNode$2(_component_v_slider, {
+                              modelValue: previewSize.value,
+                              "onUpdate:modelValue": _cache[10] || (_cache[10] = $event => ((previewSize).value = $event)),
+                              min: 24,
+                              max: 120,
+                              step: 2,
+                              density: "compact",
+                              "hide-details": "",
+                              class: "zt-preview-slider"
+                            }, null, 8, ["modelValue"]),
+                            _cache[44] || (_cache[44] = _createElementVNode$2("span", { class: "zt-preview-control-label" }, "颜色", -1)),
+                            _withDirectives(_createElementVNode$2("input", {
+                              "onUpdate:modelValue": _cache[11] || (_cache[11] = $event => ((previewColor).value = $event)),
+                              type: "color",
+                              class: "zt-color-input"
+                            }, null, 512), [
+                              [_vModelText, previewColor.value]
+                            ]),
+                            _createElementVNode$2("span", _hoisted_26$2, "实际 " + _toDisplayString$2(previewFitSize.value) + "px", 1)
+                          ]),
+                          _createElementVNode$2("div", {
+                            ref_key: "previewSampleRef",
+                            ref: previewSampleRef,
+                            class: "zt-preview-sample"
+                          }, [
                             (faceLoading.value)
                               ? (_openBlock$2(), _createBlock$2(_component_v_progress_circular, {
                                   key: 0,
@@ -2109,38 +2241,22 @@ return (_ctx, _cache) => {
                                   class: "ma-4"
                                 }))
                               : (faceError.value)
-                                ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_24$2, _toDisplayString$2(faceError.value), 1))
+                                ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_27$2, _toDisplayString$2(faceError.value), 1))
                                 : (_openBlock$2(), _createElementBlock$2("div", {
                                     key: 2,
+                                    class: "zt-preview-inner",
                                     style: _normalizeStyle(previewStyle.value)
                                   }, [
+                                    _createElementVNode$2("div", _hoisted_28$2, _toDisplayString$2(previewName.value), 1),
                                     _createElementVNode$2("div", {
-                                      style: _normalizeStyle({ fontSize: previewSize.value + 'px', fontWeight: 700, lineHeight: 1.2 })
-                                    }, "观沧海", 4),
-                                    _cache[39] || (_cache[39] = _createElementVNode$2("div", { style: {"font-size":"16px","margin-top":"8px"} }, " ABCDEFGHIJKLM · abcdefghijklm · 0123456789 ", -1))
+                                      class: "zt-preview-primary",
+                                      style: _normalizeStyle({ fontSize: previewFitSize.value + 'px' })
+                                    }, _toDisplayString$2(previewText.value || '字体分类管家'), 5),
+                                    _cache[45] || (_cache[45] = _createElementVNode$2("div", { class: "zt-preview-secondary" }, "永 字 体 预 览", -1)),
+                                    _cache[46] || (_cache[46] = _createElementVNode$2("div", { class: "zt-preview-latin" }, "ABCDEFGHIJKLM · abcdefghijklm · 0123456789", -1)),
+                                    _cache[47] || (_cache[47] = _createElementVNode$2("div", { class: "zt-preview-fallback-hint" }, " 缺字时浏览器会自动回退；示例文字已按当前字体覆盖自动选择，可手动替换 ", -1))
                                   ], 4))
-                          ]),
-                          _createElementVNode$2("div", _hoisted_25$2, [
-                            _cache[40] || (_cache[40] = _createElementVNode$2("span", { class: "zt-preview-control-label" }, "字号", -1)),
-                            _createVNode$2(_component_v_slider, {
-                              modelValue: previewSize.value,
-                              "onUpdate:modelValue": _cache[8] || (_cache[8] = $event => ((previewSize).value = $event)),
-                              min: 24,
-                              max: 120,
-                              step: 2,
-                              density: "compact",
-                              "hide-details": "",
-                              class: "zt-preview-slider"
-                            }, null, 8, ["modelValue"]),
-                            _cache[41] || (_cache[41] = _createElementVNode$2("span", { class: "zt-preview-control-label" }, "颜色", -1)),
-                            _withDirectives(_createElementVNode$2("input", {
-                              "onUpdate:modelValue": _cache[9] || (_cache[9] = $event => ((previewColor).value = $event)),
-                              type: "color",
-                              class: "zt-color-input"
-                            }, null, 512), [
-                              [_vModelText, previewColor.value]
-                            ])
-                          ])
+                          ], 512)
                         ]))
                   ]),
                   _: 1
@@ -2167,7 +2283,7 @@ return (_ctx, _cache) => {
                   size: "18",
                   color: "warning"
                 }, {
-                  default: _withCtx$2(() => [...(_cache[42] || (_cache[42] = [
+                  default: _withCtx$2(() => [...(_cache[48] || (_cache[48] = [
                     _createTextVNode$2("mdi-alert-circle-outline", -1)
                   ]))]),
                   _: 1
@@ -2193,7 +2309,7 @@ return (_ctx, _cache) => {
                             color: "warning",
                             size: "18"
                           }, {
-                            default: _withCtx$2(() => [...(_cache[43] || (_cache[43] = [
+                            default: _withCtx$2(() => [...(_cache[49] || (_cache[49] = [
                               _createTextVNode$2("mdi-alert", -1)
                             ]))]),
                             _: 1
@@ -2210,7 +2326,7 @@ return (_ctx, _cache) => {
                           }, {
                             default: _withCtx$2(() => [
                               _createVNode$2(_component_v_icon, { size: "16" }, {
-                                default: _withCtx$2(() => [...(_cache[44] || (_cache[44] = [
+                                default: _withCtx$2(() => [...(_cache[50] || (_cache[50] = [
                                   _createTextVNode$2("mdi-close", -1)
                                 ]))]),
                                 _: 1
@@ -2239,7 +2355,7 @@ return (_ctx, _cache) => {
                   ]),
                   _: 1
                 }),
-                _createElementVNode$2("div", _hoisted_26$2, [
+                _createElementVNode$2("div", _hoisted_29$2, [
                   _createVNode$2(_component_v_btn, {
                     color: "success",
                     variant: "tonal",
@@ -2253,12 +2369,12 @@ return (_ctx, _cache) => {
                         start: "",
                         size: "18"
                       }, {
-                        default: _withCtx$2(() => [...(_cache[45] || (_cache[45] = [
+                        default: _withCtx$2(() => [...(_cache[51] || (_cache[51] = [
                           _createTextVNode$2("mdi-check-all", -1)
                         ]))]),
                         _: 1
                       }),
-                      _cache[46] || (_cache[46] = _createTextVNode$2(" 一键整理 ", -1))
+                      _cache[52] || (_cache[52] = _createTextVNode$2(" 一键整理 ", -1))
                     ]),
                     _: 1
                   }, 8, ["disabled", "loading"]),
@@ -2274,12 +2390,12 @@ return (_ctx, _cache) => {
                         start: "",
                         size: "18"
                       }, {
-                        default: _withCtx$2(() => [...(_cache[47] || (_cache[47] = [
+                        default: _withCtx$2(() => [...(_cache[53] || (_cache[53] = [
                           _createTextVNode$2("mdi-trash-can-outline", -1)
                         ]))]),
                         _: 1
                       }),
-                      _cache[48] || (_cache[48] = _createTextVNode$2(" 全部丢弃 ", -1))
+                      _cache[54] || (_cache[54] = _createTextVNode$2(" 全部丢弃 ", -1))
                     ]),
                     _: 1
                   }, 8, ["disabled", "loading"])
@@ -2293,7 +2409,7 @@ return (_ctx, _cache) => {
       : _createCommentVNode$2("", true),
     _createVNode$2(_component_v_dialog, {
       modelValue: deleteDialog.value,
-      "onUpdate:modelValue": _cache[11] || (_cache[11] = $event => ((deleteDialog).value = $event)),
+      "onUpdate:modelValue": _cache[13] || (_cache[13] = $event => ((deleteDialog).value = $event)),
       "max-width": "420"
     }, {
       default: _withCtx$2(() => [
@@ -2306,20 +2422,20 @@ return (_ctx, _cache) => {
                   size: "18",
                   color: "error"
                 }, {
-                  default: _withCtx$2(() => [...(_cache[49] || (_cache[49] = [
+                  default: _withCtx$2(() => [...(_cache[55] || (_cache[55] = [
                     _createTextVNode$2("mdi-alert-outline", -1)
                   ]))]),
                   _: 1
                 }),
-                _cache[50] || (_cache[50] = _createTextVNode$2(" 删除字体 ", -1))
+                _cache[56] || (_cache[56] = _createTextVNode$2(" 删除字体 ", -1))
               ]),
               _: 1
             }),
             _createVNode$2(_component_v_card_text, null, {
               default: _withCtx$2(() => [
                 _createTextVNode$2(" 将删除字体「" + _toDisplayString$2(deleteTarget.value?.name || deleteTarget.value?.file_name) + "」的数据库记录， 并", 1),
-                _cache[51] || (_cache[51] = _createElementVNode$2("strong", null, "同时删除本地字体文件", -1)),
-                _cache[52] || (_cache[52] = _createTextVNode$2("。此操作不可恢复，是否继续？ ", -1))
+                _cache[57] || (_cache[57] = _createElementVNode$2("strong", null, "同时删除本地字体文件", -1)),
+                _cache[58] || (_cache[58] = _createTextVNode$2("。此操作不可恢复，是否继续？ ", -1))
               ]),
               _: 1
             }),
@@ -2328,9 +2444,9 @@ return (_ctx, _cache) => {
                 _createVNode$2(_component_v_spacer),
                 _createVNode$2(_component_v_btn, {
                   variant: "text",
-                  onClick: _cache[10] || (_cache[10] = $event => (deleteDialog.value = false))
+                  onClick: _cache[12] || (_cache[12] = $event => (deleteDialog.value = false))
                 }, {
-                  default: _withCtx$2(() => [...(_cache[53] || (_cache[53] = [
+                  default: _withCtx$2(() => [...(_cache[59] || (_cache[59] = [
                     _createTextVNode$2("取消", -1)
                   ]))]),
                   _: 1
@@ -2346,12 +2462,12 @@ return (_ctx, _cache) => {
                       start: "",
                       size: "18"
                     }, {
-                      default: _withCtx$2(() => [...(_cache[54] || (_cache[54] = [
+                      default: _withCtx$2(() => [...(_cache[60] || (_cache[60] = [
                         _createTextVNode$2("mdi-delete-outline", -1)
                       ]))]),
                       _: 1
                     }),
-                    _cache[55] || (_cache[55] = _createTextVNode$2(" 确认删除 ", -1))
+                    _cache[61] || (_cache[61] = _createTextVNode$2(" 确认删除 ", -1))
                   ]),
                   _: 1
                 }, 8, ["loading"])
@@ -2366,7 +2482,7 @@ return (_ctx, _cache) => {
     }, 8, ["modelValue"]),
     _createVNode$2(_component_v_dialog, {
       modelValue: clearDialog.value,
-      "onUpdate:modelValue": _cache[13] || (_cache[13] = $event => ((clearDialog).value = $event)),
+      "onUpdate:modelValue": _cache[15] || (_cache[15] = $event => ((clearDialog).value = $event)),
       "max-width": "420"
     }, {
       default: _withCtx$2(() => [
@@ -2379,17 +2495,17 @@ return (_ctx, _cache) => {
                   size: "18",
                   color: "error"
                 }, {
-                  default: _withCtx$2(() => [...(_cache[56] || (_cache[56] = [
+                  default: _withCtx$2(() => [...(_cache[62] || (_cache[62] = [
                     _createTextVNode$2("mdi-alert-outline", -1)
                   ]))]),
                   _: 1
                 }),
-                _cache[57] || (_cache[57] = _createTextVNode$2(" 清空数据库 ", -1))
+                _cache[63] || (_cache[63] = _createTextVNode$2(" 清空数据库 ", -1))
               ]),
               _: 1
             }),
             _createVNode$2(_component_v_card_text, null, {
-              default: _withCtx$2(() => [...(_cache[58] || (_cache[58] = [
+              default: _withCtx$2(() => [...(_cache[64] || (_cache[64] = [
                 _createTextVNode$2(" 将删除所有字体、待确认与 ASS 检查记录。此操作不可恢复，建议先「导出数据库」备份。 是否继续？ ", -1)
               ]))]),
               _: 1
@@ -2399,9 +2515,9 @@ return (_ctx, _cache) => {
                 _createVNode$2(_component_v_spacer),
                 _createVNode$2(_component_v_btn, {
                   variant: "text",
-                  onClick: _cache[12] || (_cache[12] = $event => (clearDialog.value = false))
+                  onClick: _cache[14] || (_cache[14] = $event => (clearDialog.value = false))
                 }, {
-                  default: _withCtx$2(() => [...(_cache[59] || (_cache[59] = [
+                  default: _withCtx$2(() => [...(_cache[65] || (_cache[65] = [
                     _createTextVNode$2("取消", -1)
                   ]))]),
                   _: 1
@@ -2417,12 +2533,12 @@ return (_ctx, _cache) => {
                       start: "",
                       size: "18"
                     }, {
-                      default: _withCtx$2(() => [...(_cache[60] || (_cache[60] = [
+                      default: _withCtx$2(() => [...(_cache[66] || (_cache[66] = [
                         _createTextVNode$2("mdi-database-remove-outline", -1)
                       ]))]),
                       _: 1
                     }),
-                    _cache[61] || (_cache[61] = _createTextVNode$2(" 确定清空 ", -1))
+                    _cache[67] || (_cache[67] = _createTextVNode$2(" 确定清空 ", -1))
                   ]),
                   _: 1
                 }, 8, ["loading"])
@@ -2437,7 +2553,7 @@ return (_ctx, _cache) => {
     }, 8, ["modelValue"]),
     _createVNode$2(_component_v_dialog, {
       modelValue: previewOpen.value,
-      "onUpdate:modelValue": _cache[16] || (_cache[16] = $event => ((previewOpen).value = $event)),
+      "onUpdate:modelValue": _cache[20] || (_cache[20] = $event => ((previewOpen).value = $event)),
       "max-width": "420"
     }, {
       default: _withCtx$2(() => [
@@ -2449,12 +2565,12 @@ return (_ctx, _cache) => {
                   start: "",
                   size: "18"
                 }, {
-                  default: _withCtx$2(() => [...(_cache[62] || (_cache[62] = [
+                  default: _withCtx$2(() => [...(_cache[68] || (_cache[68] = [
                     _createTextVNode$2("mdi-format-font", -1)
                   ]))]),
                   _: 1
                 }),
-                _cache[63] || (_cache[63] = _createTextVNode$2(" 字体预览 ", -1))
+                _cache[69] || (_cache[69] = _createTextVNode$2(" 字体预览 ", -1))
               ]),
               _: 1
             }),
@@ -2467,9 +2583,9 @@ return (_ctx, _cache) => {
                       class: "zt-preview-loading"
                     }))
                   : (previewError.value)
-                    ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_27$2, _toDisplayString$2(previewError.value), 1))
-                    : (_openBlock$2(), _createElementBlock$2("div", _hoisted_28$2, [
-                        _createElementVNode$2("div", _hoisted_29$2, [
+                    ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_30$2, _toDisplayString$2(previewError.value), 1))
+                    : (_openBlock$2(), _createElementBlock$2("div", _hoisted_31$1, [
+                        _createElementVNode$2("div", _hoisted_32$1, [
                           _createTextVNode$2(_toDisplayString$2(previewName.value) + " ", 1),
                           (previewCharCount.value)
                             ? (_openBlock$2(), _createBlock$2(_component_v_chip, {
@@ -2490,12 +2606,30 @@ return (_ctx, _cache) => {
                               }))
                             : _createCommentVNode$2("", true)
                         ]),
-                        _createElementVNode$2("div", _hoisted_30$2, _toDisplayString$2(previewFamily.value), 1),
-                        _createElementVNode$2("div", _hoisted_31$1, [
-                          _cache[64] || (_cache[64] = _createElementVNode$2("span", { class: "zt-preview-control-label" }, "字号", -1)),
+                        _createElementVNode$2("div", _hoisted_33$1, _toDisplayString$2(previewFamily.value), 1),
+                        (previewFaces.value.length > 1)
+                          ? (_openBlock$2(), _createElementBlock$2("div", _hoisted_34, [
+                              _createVNode$2(_component_v_select, {
+                                modelValue: previewFaceIndex.value,
+                                "onUpdate:modelValue": [
+                                  _cache[16] || (_cache[16] = $event => ((previewFaceIndex).value = $event)),
+                                  reloadPreviewFace
+                                ],
+                                items: previewFaces.value,
+                                "item-title": "label",
+                                "item-value": "index",
+                                label: "Face（TTC/OTC 多字体面）",
+                                density: "compact",
+                                variant: "outlined",
+                                "hide-details": ""
+                              }, null, 8, ["modelValue", "items"])
+                            ]))
+                          : _createCommentVNode$2("", true),
+                        _createElementVNode$2("div", _hoisted_35, [
+                          _cache[70] || (_cache[70] = _createElementVNode$2("span", { class: "zt-preview-control-label" }, "字号上限", -1)),
                           _createVNode$2(_component_v_slider, {
                             modelValue: previewSize.value,
-                            "onUpdate:modelValue": _cache[14] || (_cache[14] = $event => ((previewSize).value = $event)),
+                            "onUpdate:modelValue": _cache[17] || (_cache[17] = $event => ((previewSize).value = $event)),
                             min: 24,
                             max: 120,
                             step: 2,
@@ -2503,24 +2637,47 @@ return (_ctx, _cache) => {
                             "hide-details": "",
                             class: "zt-preview-slider"
                           }, null, 8, ["modelValue"]),
-                          _cache[65] || (_cache[65] = _createElementVNode$2("span", { class: "zt-preview-control-label" }, "颜色", -1)),
+                          _cache[71] || (_cache[71] = _createElementVNode$2("span", { class: "zt-preview-control-label" }, "颜色", -1)),
                           _withDirectives(_createElementVNode$2("input", {
-                            "onUpdate:modelValue": _cache[15] || (_cache[15] = $event => ((previewColor).value = $event)),
+                            "onUpdate:modelValue": _cache[18] || (_cache[18] = $event => ((previewColor).value = $event)),
                             type: "color",
                             class: "zt-color-input"
                           }, null, 512), [
                             [_vModelText, previewColor.value]
-                          ])
+                          ]),
+                          _createElementVNode$2("span", _hoisted_36, "实际 " + _toDisplayString$2(previewFitSize.value) + "px", 1)
+                        ]),
+                        _createElementVNode$2("div", _hoisted_37, [
+                          _createVNode$2(_component_v_text_field, {
+                            modelValue: previewText.value,
+                            "onUpdate:modelValue": _cache[19] || (_cache[19] = $event => ((previewText).value = $event)),
+                            label: "预览文字（可自己替换）",
+                            density: "compact",
+                            variant: "outlined",
+                            "hide-details": "",
+                            maxlength: "20",
+                            class: "zt-preview-text-input"
+                          }, null, 8, ["modelValue"])
                         ]),
                         _createElementVNode$2("div", {
-                          class: "zt-preview-sample",
-                          style: _normalizeStyle(previewStyle.value)
+                          ref_key: "previewDialogSampleRef",
+                          ref: previewDialogSampleRef,
+                          class: "zt-preview-sample"
                         }, [
-                          _createElementVNode$2("span", {
-                            style: _normalizeStyle({ fontSize: previewSize.value + 'px', fontWeight: 700, display: 'block', lineHeight: 1.2 })
-                          }, "观沧海", 4),
-                          _cache[66] || (_cache[66] = _createElementVNode$2("span", { style: {"font-size":"16px","display":"block","margin-top":"8px"} }, " ABCDEFGHIJKLM abcdefghijklm 0123456789 ", -1))
-                        ], 4)
+                          _createElementVNode$2("div", {
+                            class: "zt-preview-inner",
+                            style: _normalizeStyle(previewStyle.value)
+                          }, [
+                            _createElementVNode$2("div", _hoisted_38, _toDisplayString$2(previewName.value), 1),
+                            _createElementVNode$2("div", {
+                              class: "zt-preview-primary",
+                              style: _normalizeStyle({ fontSize: previewFitSize.value + 'px' })
+                            }, _toDisplayString$2(previewText.value || '字体分类管家'), 5),
+                            _cache[72] || (_cache[72] = _createElementVNode$2("div", { class: "zt-preview-secondary" }, "永 字 体 预 览", -1)),
+                            _cache[73] || (_cache[73] = _createElementVNode$2("div", { class: "zt-preview-latin" }, "ABCDEFGHIJKLM abcdefghijklm 0123456789", -1)),
+                            _cache[74] || (_cache[74] = _createElementVNode$2("div", { class: "zt-preview-fallback-hint" }, " 缺字时浏览器会自动回退；示例文字已按当前字体覆盖自动选择，可手动替换 ", -1))
+                          ], 4)
+                        ], 512)
                       ]))
               ]),
               _: 1
@@ -2536,7 +2693,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const FontLibrary = /*#__PURE__*/_export_sfc(_sfc_main$2, [['__scopeId',"data-v-41da98ea"]]);
+const FontLibrary = /*#__PURE__*/_export_sfc(_sfc_main$2, [['__scopeId',"data-v-7d13f136"]]);
 
 const {toDisplayString:_toDisplayString$1,createElementVNode:_createElementVNode$1,createTextVNode:_createTextVNode$1,resolveComponent:_resolveComponent$1,withCtx:_withCtx$1,createVNode:_createVNode$1,openBlock:_openBlock$1,createBlock:_createBlock$1,createCommentVNode:_createCommentVNode$1,unref:_unref,createElementBlock:_createElementBlock$1,renderList:_renderList$1,Fragment:_Fragment$1,withModifiers:_withModifiers$1,normalizeClass:_normalizeClass$1} = await importShared('vue');
 

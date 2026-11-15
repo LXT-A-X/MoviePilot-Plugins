@@ -465,7 +465,7 @@ class Zitifenlei(_PluginBase):
     plugin_name = "字体分类管家"
     plugin_desc = "字体归档整理与 ASS 字幕字体检查插件：扫描/上传字体到字体库，检查字幕缺失字体。"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/zitifenlei.png"
-    plugin_version = "3.7.0"
+    plugin_version = "3.8.0"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "zitifenlei_"
@@ -5946,7 +5946,7 @@ class Zitifenlei(_PluginBase):
         except Exception as err:
             return self._err(f"收藏操作失败: {err}")
 
-    def api_font_preview(self, id: int = 0) -> Dict[str, Any]:
+    def api_font_preview(self, id: int = 0, face: int = 0) -> Dict[str, Any]:
         """字体预览：返回字体文件 base64 + 元数据"""
         if not self._db_ok():
             return self._err("数据库未初始化")
@@ -5960,12 +5960,13 @@ class Zitifenlei(_PluginBase):
                 font.get("file_path", ""),
                 name=font.get("name", ""),
                 family=font.get("family", ""),
+                face_index=int(face or 0),
             )
         except Exception as err:
             return self._err(f"预览失败: {err}")
 
     @staticmethod
-    def _split_ttc_face(raw: bytes, file_path: str) -> bytes:
+    def _split_ttc_face(raw: bytes, file_path: str, face_index: int = 0) -> bytes:
         """把 TTC（ttcf 容器）拆出「第一个可被浏览器解析」的单 face 数据。
 
         逐 face 尝试：① fontTools 按 fontNumber 加载并重存（可正确处理表数据交错
@@ -6165,6 +6166,40 @@ class Zitifenlei(_PluginBase):
                         pass
                 return data
 
+            # 指定 face：只拆这一个，避免 UI 选 Face 2 却拿到 Face 1
+            if face_index > 0:
+                try:
+                    face = TTFont(file_path, fontNumber=int(face_index), lazy=False)
+                    try:
+                        return _save_face(face)
+                    finally:
+                        try:
+                            face.close()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                try:
+                    if raw[:4] == b"ttcf" and len(raw) >= 16:
+                        num = min(struct.unpack(">I", raw[8:12])[0], 64)
+                        if 12 + 4 * num <= len(raw):
+                            offs = struct.unpack(f">{num}I", raw[12:12 + 4 * num])
+                            if 0 <= int(face_index) < num:
+                                start = offs[int(face_index)]
+                                end = offs[int(face_index) + 1] if int(face_index) + 1 < num else len(raw)
+                                if end > start and end - start >= 64:
+                                    face = TTFont(_io.BytesIO(raw[start:end]), fontNumber=0, lazy=False)
+                                    try:
+                                        return _save_face(face)
+                                    finally:
+                                        try:
+                                            face.close()
+                                        except Exception:
+                                            pass
+                except Exception:
+                    pass
+                return raw
+
             # ① fontTools 逐 face 加载重存（face 0 损坏时跳到下一个）
             try:
                 num = 0
@@ -6213,7 +6248,39 @@ class Zitifenlei(_PluginBase):
             pass
         return raw
 
-    def _font_preview_from_path(self, file_path: str, name: str = "", family: str = "") -> Dict[str, Any]:
+    @staticmethod
+    def _preview_sample_for_face(face: Any) -> Tuple[str, str]:
+        """按 face 的 cmap 自动挑一段该字体确实覆盖的示例文字。"""
+        cps = set(getattr(face, "codepoints", set()) or ()) if face is not None else set()
+        if not cps:
+            return "", "无字符表"
+
+        def keep(text: str) -> str:
+            return "".join(ch for ch in text if ord(ch) in cps)
+
+        cjk = keep("天地玄黄宇宙洪荒")
+        if cjk:
+            return cjk[:10], "中文"
+        latin = keep("AaBbCcDdEeFfGgHh 0123456789")
+        if any(ch.isalpha() for ch in latin):
+            return latin.strip(), "拉丁"
+        chars: List[str] = []
+        for cp in sorted(cps):
+            if 0x20 <= cp <= 0x10FFFF:
+                ch = chr(cp)
+                if ch.isprintable() and not ch.isspace():
+                    chars.append(ch)
+            if len(chars) >= 12:
+                break
+        return "".join(chars), "字符"
+
+    def _font_preview_from_path(
+        self,
+        file_path: str,
+        name: str = "",
+        family: str = "",
+        face_index: int = 0,
+    ) -> Dict[str, Any]:
         try:
             if not file_path or not Path(file_path).is_file():
                 return self._err("字体文件不存在或无法读取")
@@ -6227,25 +6294,42 @@ class Zitifenlei(_PluginBase):
                     f"{max_font_file_bytes() // (1024 * 1024)}MB"
                 )
             raw = Path(file_path).read_bytes()
-            # TTC（TrueType Collection）拆单 face 再预览：浏览器 FontFace 不认 ttcf 容器
-            # （会抛 Invalid font data in ArrayBuffer）。_split_ttc_face 逐 face 用 fontTools
-            # 解析重存（可正确处理表数据交错排布的非标准 TTC），并对结果再解析校验；
-            # 全部失败才回退整文件交给浏览器报错。
+            # TTC/OTC 按 face_index 只拆选中的 face；浏览器 FontFace 不认 ttcf 容器。
             if raw[:4] == b"ttcf":
-                raw = self._split_ttc_face(raw, file_path)
+                raw = self._split_ttc_face(raw, file_path, int(face_index or 0))
             data = base64.b64encode(raw).decode("ascii")
-            # 字体信息（字符数 / face 数 / 名称兜底）：fontTools 权威口径
             char_count = 0
             face_count = 0
+            selected_face = None
+            sample_text = ""
+            sample_kind = ""
+            faces_meta: List[Dict[str, Any]] = []
             try:
                 inspection = inspect_font(file_path, with_hash=False)
                 face_count = inspection.face_count or len(inspection.faces)
                 valid = [f for f in inspection.faces if f.status in ("ok", "no_cmap")]
-                char_count = max((f.char_count for f in valid), default=0)
-                first = valid[0] if valid else None
-                if first is not None:
-                    name = name or first.display_name()
-                    family = family or first.family
+                for f in inspection.faces:
+                    faces_meta.append(
+                        {
+                            "index": int(f.face_index),
+                            "name": f.display_name(),
+                            "family": f.family,
+                            "char_count": int(f.char_count or 0),
+                            "status": f.status,
+                            "label": f"{int(f.face_index) + 1}. {f.display_name()}",
+                        }
+                    )
+                requested = int(face_index or 0)
+                selected_face = next((f for f in valid if int(f.face_index) == requested), None)
+                if selected_face is None and valid:
+                    selected_face = valid[0]
+                if selected_face is not None:
+                    char_count = int(selected_face.char_count or 0)
+                    name = selected_face.display_name() or name
+                    family = selected_face.family or family
+                    sample_text, sample_kind = self._preview_sample_for_face(selected_face)
+                elif valid:
+                    char_count = max((int(f.char_count or 0) for f in valid), default=0)
             except Exception:
                 pass
             return self._ok(
@@ -6256,6 +6340,13 @@ class Zitifenlei(_PluginBase):
                     "data": data,
                     "char_count": char_count,
                     "face_count": face_count,
+                    "face_index": int(selected_face.face_index) if selected_face is not None else int(face_index or 0),
+                    "face_name": selected_face.display_name() if selected_face is not None else name,
+                    "face_family": selected_face.family if selected_face is not None else family,
+                    "face_char_count": char_count,
+                    "sample_text": sample_text,
+                    "sample_kind": sample_kind,
+                    "faces": faces_meta,
                 }
             )
         except Exception as err:
