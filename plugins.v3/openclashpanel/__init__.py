@@ -178,7 +178,7 @@ class OpenClashPanel(_PluginBase):
         "支持 Smart 智能组、TG 按钮命令、仪表盘全宽组件。"
     )
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/openclashpanel.png"
-    plugin_version = "1.12.2"
+    plugin_version = "1.12.3"
     plugin_author = "LXT-A-X"
     plugin_config_prefix = "openclashpanel_"
     plugin_order = 110
@@ -1055,6 +1055,7 @@ class OpenClashPanel(_PluginBase):
             proxies = {}
         target_type = (proxies.get(target) or {}).get("type")
         is_group = target_type in GROUP_TYPES
+        locked_node = self._smart_locks.get(target) if target_type == "Smart" else None
         result = await self._client().delay(
             target,
             url=url,
@@ -1069,6 +1070,13 @@ class OpenClashPanel(_PluginBase):
                 timeout=int(max(timeout, 3) * 1000),
                 is_group=is_group,
             )
+        if locked_node:
+            # 组测速会清除 Smart 手动锁定，测完立即恢复
+            try:
+                await self._client().switch(target, locked_node)
+                logger.info(f"访问检查后恢复智能组锁定：{target} -> {locked_node}")
+            except ClashApiError:
+                pass
         return result
 
     async def _run_kernel_netcheck(self, sites: List[Dict[str, str]], timeout: float) -> List[Dict[str, Any]]:
