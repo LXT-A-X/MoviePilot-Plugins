@@ -163,7 +163,8 @@ async function fitPreviewText() {
   for (const root of [previewSampleRef.value, previewDialogSampleRef.value]) {
     if (!root) continue
     const primary = root.querySelector('.zt-preview-primary')
-    if (!primary) continue
+    const text = root.querySelector('.zt-preview-primary-text') || primary
+    if (!primary || !text) continue
     const width = primary.clientWidth
     const height = primary.clientHeight
     if (!width || !height) continue
@@ -174,7 +175,7 @@ async function fitPreviewText() {
     for (let i = 0; i < 12; i += 1) {
       const mid = (low + high) / 2
       primary.style.fontSize = mid + 'px'
-      const fits = primary.scrollHeight <= height + 1 && primary.scrollWidth <= width + 1
+      const fits = text.scrollHeight <= height + 1 && text.scrollWidth <= width + 1
       if (fits) {
         best = mid
         low = mid + 0.5
@@ -1089,8 +1090,7 @@ onUnmounted(() => {
                 ></v-progress-circular>
                 <div v-else-if="faceError" class="zt-empty pa-4">{{ faceError }}</div>
                 <div v-else class="zt-preview-inner" :style="previewStyle">
-                  <div class="zt-preview-font-name">{{ previewName }}</div>
-                  <div class="zt-preview-primary" :style="{ fontSize: previewFitSize + 'px' }">{{ previewText || '字体分类管家' }}</div>
+                  <div class="zt-preview-primary" :style="{ fontSize: previewFitSize + 'px' }"><span class="zt-preview-primary-text">{{ previewText || '字体分类管家' }}</span></div>
                   <div class="zt-preview-secondary">永 字 体 预 览</div>
                   <div class="zt-preview-latin">ABCDEFGHIJKLM · abcdefghijklm · 0123456789</div>
                   <div class="zt-preview-fallback-hint">
@@ -1269,8 +1269,7 @@ onUnmounted(() => {
             </div>
             <div ref="previewDialogSampleRef" class="zt-preview-sample">
               <div class="zt-preview-inner" :style="previewStyle">
-                <div class="zt-preview-font-name">{{ previewName }}</div>
-                <div class="zt-preview-primary" :style="{ fontSize: previewFitSize + 'px' }">{{ previewText || '字体分类管家' }}</div>
+                <div class="zt-preview-primary" :style="{ fontSize: previewFitSize + 'px' }"><span class="zt-preview-primary-text">{{ previewText || '字体分类管家' }}</span></div>
                 <div class="zt-preview-secondary">永 字 体 预 览</div>
                 <div class="zt-preview-latin">ABCDEFGHIJKLM abcdefghijklm 0123456789</div>
                 <div class="zt-preview-fallback-hint">
@@ -1390,8 +1389,8 @@ onUnmounted(() => {
   border-radius: 6px;
   background: rgba(255, 255, 255, 0.05);
   text-align: center;
-  height: 280px;
-  min-height: 280px;
+  height: 260px;
+  min-height: 260px;
   overflow: hidden;
 }
 .zt-preview-inner {
@@ -1400,18 +1399,19 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
 }
-.zt-preview-font-name {
-  flex: 0 0 auto;
-  font-size: 18px;
-  opacity: 0.65;
-  margin-bottom: 4px;
-}
 .zt-preview-primary {
   flex: 1 1 auto;
   min-height: 0;
   overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   font-weight: 700;
   line-height: 1.2;
+  text-align: center;
+}
+.zt-preview-primary-text {
+  max-width: 100%;
   white-space: pre-wrap;
   word-break: break-word;
 }

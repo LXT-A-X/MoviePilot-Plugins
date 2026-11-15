@@ -878,7 +878,7 @@ const _hoisted_27$2 = {
   key: 1,
   class: "zt-empty pa-4"
 };
-const _hoisted_28$2 = { class: "zt-preview-font-name" };
+const _hoisted_28$2 = { class: "zt-preview-primary-text" };
 const _hoisted_29$2 = { class: "d-flex pa-3 flex-wrap" };
 const _hoisted_30$2 = {
   key: 1,
@@ -897,7 +897,7 @@ const _hoisted_34 = {
 const _hoisted_35 = { class: "zt-preview-controls mb-3" };
 const _hoisted_36 = { class: "zt-preview-fit-label" };
 const _hoisted_37 = { class: "zt-preview-text-row mb-3" };
-const _hoisted_38 = { class: "zt-preview-font-name" };
+const _hoisted_38 = { class: "zt-preview-primary-text" };
 
 const {computed: computed$2,watch: watch$2,nextTick,onActivated: onActivated$1,onDeactivated: onDeactivated$1,onMounted: onMounted$2,onUnmounted: onUnmounted$1,ref: ref$2} = await importShared('vue');
 
@@ -1069,7 +1069,8 @@ async function fitPreviewText() {
   for (const root of [previewSampleRef.value, previewDialogSampleRef.value]) {
     if (!root) continue
     const primary = root.querySelector('.zt-preview-primary');
-    if (!primary) continue
+    const text = root.querySelector('.zt-preview-primary-text') || primary;
+    if (!primary || !text) continue
     const width = primary.clientWidth;
     const height = primary.clientHeight;
     if (!width || !height) continue
@@ -1080,7 +1081,7 @@ async function fitPreviewText() {
     for (let i = 0; i < 12; i += 1) {
       const mid = (low + high) / 2;
       primary.style.fontSize = mid + 'px';
-      const fits = primary.scrollHeight <= height + 1 && primary.scrollWidth <= width + 1;
+      const fits = text.scrollHeight <= height + 1 && text.scrollWidth <= width + 1;
       if (fits) {
         best = mid;
         low = mid + 0.5;
@@ -2247,11 +2248,12 @@ return (_ctx, _cache) => {
                                     class: "zt-preview-inner",
                                     style: _normalizeStyle(previewStyle.value)
                                   }, [
-                                    _createElementVNode$2("div", _hoisted_28$2, _toDisplayString$2(previewName.value), 1),
                                     _createElementVNode$2("div", {
                                       class: "zt-preview-primary",
                                       style: _normalizeStyle({ fontSize: previewFitSize.value + 'px' })
-                                    }, _toDisplayString$2(previewText.value || '字体分类管家'), 5),
+                                    }, [
+                                      _createElementVNode$2("span", _hoisted_28$2, _toDisplayString$2(previewText.value || '字体分类管家'), 1)
+                                    ], 4),
                                     _cache[45] || (_cache[45] = _createElementVNode$2("div", { class: "zt-preview-secondary" }, "永 字 体 预 览", -1)),
                                     _cache[46] || (_cache[46] = _createElementVNode$2("div", { class: "zt-preview-latin" }, "ABCDEFGHIJKLM · abcdefghijklm · 0123456789", -1)),
                                     _cache[47] || (_cache[47] = _createElementVNode$2("div", { class: "zt-preview-fallback-hint" }, " 缺字时浏览器会自动回退；示例文字已按当前字体覆盖自动选择，可手动替换 ", -1))
@@ -2668,11 +2670,12 @@ return (_ctx, _cache) => {
                             class: "zt-preview-inner",
                             style: _normalizeStyle(previewStyle.value)
                           }, [
-                            _createElementVNode$2("div", _hoisted_38, _toDisplayString$2(previewName.value), 1),
                             _createElementVNode$2("div", {
                               class: "zt-preview-primary",
                               style: _normalizeStyle({ fontSize: previewFitSize.value + 'px' })
-                            }, _toDisplayString$2(previewText.value || '字体分类管家'), 5),
+                            }, [
+                              _createElementVNode$2("span", _hoisted_38, _toDisplayString$2(previewText.value || '字体分类管家'), 1)
+                            ], 4),
                             _cache[72] || (_cache[72] = _createElementVNode$2("div", { class: "zt-preview-secondary" }, "永 字 体 预 览", -1)),
                             _cache[73] || (_cache[73] = _createElementVNode$2("div", { class: "zt-preview-latin" }, "ABCDEFGHIJKLM abcdefghijklm 0123456789", -1)),
                             _cache[74] || (_cache[74] = _createElementVNode$2("div", { class: "zt-preview-fallback-hint" }, " 缺字时浏览器会自动回退；示例文字已按当前字体覆盖自动选择，可手动替换 ", -1))
@@ -2693,7 +2696,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const FontLibrary = /*#__PURE__*/_export_sfc(_sfc_main$2, [['__scopeId',"data-v-7d13f136"]]);
+const FontLibrary = /*#__PURE__*/_export_sfc(_sfc_main$2, [['__scopeId',"data-v-af1474cb"]]);
 
 const {toDisplayString:_toDisplayString$1,createElementVNode:_createElementVNode$1,createTextVNode:_createTextVNode$1,resolveComponent:_resolveComponent$1,withCtx:_withCtx$1,createVNode:_createVNode$1,openBlock:_openBlock$1,createBlock:_createBlock$1,createCommentVNode:_createCommentVNode$1,unref:_unref,createElementBlock:_createElementBlock$1,renderList:_renderList$1,Fragment:_Fragment$1,withModifiers:_withModifiers$1,normalizeClass:_normalizeClass$1} = await importShared('vue');
 
