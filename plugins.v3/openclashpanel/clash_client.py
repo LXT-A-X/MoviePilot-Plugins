@@ -129,6 +129,14 @@ class ClashClient:
         """断开所有代理连接（DELETE /connections）。"""
         await self.request("DELETE", "/connections")
 
+    async def unlock(self, name: str) -> None:
+        """取消手动固定（对 URLTest/Fallback 等支持 Unfix 的组有效）。"""
+        await self.request("DELETE", f"/proxies/{_quote(name)}")
+
+    async def flush_smart_cache(self) -> None:
+        """清空 Smart 缓存并重新评估节点。"""
+        await self.request("POST", "/cache/smart/flush")
+
     async def delay(
         self,
         name: str,
@@ -254,6 +262,7 @@ async def build_groups(client: ClashClient) -> List[Dict[str, Any]]:
                 "name": group_name,
                 "type": group_type,
                 "now": now,
+                "fixed": group.get("fixed") or "",
                 "count": len(members),
                 "members": members,
             }

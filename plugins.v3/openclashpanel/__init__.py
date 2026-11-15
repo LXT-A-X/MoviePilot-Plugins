@@ -178,7 +178,7 @@ class OpenClashPanel(_PluginBase):
         "支持 Smart 智能组、TG 按钮命令、仪表盘全宽组件。"
     )
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/openclashpanel.png"
-    plugin_version = "1.12.0"
+    plugin_version = "1.12.1"
     plugin_author = "LXT-A-X"
     plugin_config_prefix = "openclashpanel_"
     plugin_order = 110
@@ -468,6 +468,7 @@ class OpenClashPanel(_PluginBase):
             {"cmd": "/oc_check", "event": EventType.PluginAction, "desc": "OpenClash 访问检查", "category": "工具", "data": {"action": "oc_check"}},
             {"cmd": "/oc_node", "event": EventType.PluginAction, "desc": "切换策略组节点（无参数会列出组）", "category": "工具", "data": {"action": "oc_node"}},
             {"cmd": "/oc_mode", "event": EventType.PluginAction, "desc": "切换规则模式（无参数会列出模式）", "category": "工具", "data": {"action": "oc_mode"}},
+            {"cmd": "/oc_auto", "event": EventType.PluginAction, "desc": "恢复智能组自动选路（/oc_auto 组名）", "category": "工具", "data": {"action": "oc_auto"}},
             {"cmd": "/oc_refresh", "event": EventType.PluginAction, "desc": "刷新订阅节点", "category": "工具", "data": {"action": "oc_refresh"}},
             {"cmd": "/oc_help", "event": EventType.PluginAction, "desc": "OpenClash 命令帮助", "category": "工具", "data": {"action": "oc_help"}},
         ]
@@ -560,6 +561,8 @@ class OpenClashPanel(_PluginBase):
                 else:
                     text, buttons = self._mode_menu(channel)
                     self._send_reply(channel, "OpenClash 规则模式", text, buttons)
+            elif action == "oc_auto":
+                self._send_reply(channel, "OpenClash 恢复自动", self._run_async(self._build_auto_text(arg)))
             elif action == "oc_refresh":
                 self._send_reply(channel, "OpenClash 刷新订阅", self._run_async(self._build_refresh_text()))
             elif action == "oc_help":
@@ -626,6 +629,7 @@ class OpenClashPanel(_PluginBase):
                 "/oc_check - 访问检查（按插件设置里的通道）",
                 "/oc_node - 列出策略组；/oc_node 组名 节点名 切换",
                 "/oc_mode - 列出规则模式；/oc_mode rule|global|direct 切换",
+                "/oc_auto 组名 - 恢复智能组自动选路",
                 "/oc_refresh - 刷新订阅节点",
                 "/oc_help - 显示本帮助",
                 "",
@@ -812,9 +816,8 @@ class OpenClashPanel(_PluginBase):
             if time.time() - self._cmd_ts > 300 or not (0 <= index < len(self._cmd_groups)):
                 return "组序号无效或列表已过期，请先发送 /oc_node 查看列表"
             group = str(self._cmd_groups[index].get("name"))
-        group_type = (proxies.get(group) or {}).get("type")
-        if group_type == "Smart":
-            return f"「{group}」是智能组（Smart），由内核自动选路，不能手动指定节点。"
+        if node_token.lower() == "auto":
+            return await self._build_auto_text(group)
         if node_token.isdigit() and group_token.isdigit():
             members = [str(m.get("name")) for m in (self._cmd_groups[int(group_token) - 1].get("members") or [])]
             index = int(node_token) - 1
@@ -823,6 +826,9 @@ class OpenClashPanel(_PluginBase):
             node_token = members[index]
         await client.switch(group, node_token)
         logger.info(f"命令切换节点：{group} -> {node_token}")
+        group_type = (proxies.get(group) or {}).get("type")
+        if group_type == "Smart":
+            return f"已锁定节点：{group} → {node_token}（可用 /oc_auto {group} 恢复自动）"
         return f"已切换：{group} → {node_token}"
 
     async def _switch_by_index(self, node_index: int) -> str:
@@ -833,11 +839,45 @@ class OpenClashPanel(_PluginBase):
         name = str(members[node_index].get("name"))
         client = self._client()
         proxies = await client.proxies()
-        if (proxies.get(group) or {}).get("type") == "Smart":
-            return "智能组由内核自动选路，不能手动指定节点。"
         await client.switch(group, name)
         logger.info(f"按钮切换节点：{group} -> {name}")
+        group_type = (proxies.get(group) or {}).get("type")
+        if group_type == "Smart":
+            return f"已锁定节点：{group} → {name}（可用 /oc_auto {group} 恢复自动）"
         return f"已切换：{group} → {name}"
+
+    async def _build_auto_text(self, group: str) -> str:
+        """恢复智能组自动选路：重新测一次组速度，失败再清缓存。"""
+        client = self._client()
+        cfg = self._current_config()
+        try:
+            try:
+                await client.delay(
+                    group,
+                    url=str(cfg.get("delay_test_url") or DEFAULT_DELAY_URL),
+                    timeout=int(cfg.get("delay_test_timeout") or DEFAULT_DELAY_TIMEOUT),
+                    is_group=True,
+                )
+            except ClashApiError:
+                pass
+            await asyncio.sleep(0.6)
+            data = await client.proxies()
+            item = data.get(group) or {}
+            if not str(item.get("fixed") or ""):
+                logger.info(f"命令恢复自动选路（重新测速）：{group}")
+                return f"已恢复自动选路：{group}（已重新测速）"
+            try:
+                await client.flush_smart_cache()
+            except ClashApiError:
+                pass
+            await asyncio.sleep(0.6)
+            data = await client.proxies()
+            item = data.get(group) or {}
+            if not str(item.get("fixed") or ""):
+                return f"已恢复自动选路：{group}"
+            return f"「{group}」仍处于锁定：已清 Smart 缓存，请重启 OpenClash 后重试"
+        except Exception as exc:  # noqa: BLE001
+            return f"恢复自动选路失败：{exc}"
 
     async def _build_mode_text(self, arg: str) -> str:
         mode = arg.strip().lower()
@@ -1068,6 +1108,7 @@ class OpenClashPanel(_PluginBase):
             {"path": "/groups", "endpoint": self.api_groups, "methods": ["GET"], "auth": "bear", "summary": "策略组与节点"},
             {"path": "/providers", "endpoint": self.api_providers, "methods": ["GET"], "auth": "bear", "summary": "订阅源列表"},
             {"path": "/switch", "endpoint": self.api_switch, "methods": ["POST"], "auth": "bear", "summary": "切换策略组节点"},
+            {"path": "/unlock", "endpoint": self.api_unlock, "methods": ["POST"], "auth": "bear", "summary": "恢复智能组自动选路"},
             {"path": "/mode", "endpoint": self.api_mode, "methods": ["POST"], "auth": "bear", "summary": "切换规则模式"},
             {"path": "/delay", "endpoint": self.api_delay, "methods": ["POST"], "auth": "bear", "summary": "批量/单项测速"},
             {"path": "/providers/refresh", "endpoint": self.api_refresh_provider, "methods": ["POST"], "auth": "bear", "summary": "刷新订阅节点"},
@@ -1372,14 +1413,10 @@ class OpenClashPanel(_PluginBase):
             client = self._client()
             proxies = await client.proxies()
             group_type = (proxies.get(group) or {}).get("type")
-            if group_type == "Smart":
-                return self._err(
-                    f"「{group}」是智能组（Smart），由内核自动选路，不能手动指定节点；"
-                    "请选择上层策略组或普通节点组",
-                    400,
-                )
             await client.switch(group, name)
             logger.info(f"切换节点：{group} -> {name}")
+            if group_type == "Smart":
+                return self._ok({"group": group, "name": name}, f"已锁定节点：{name}（智能组支持手动锁定）")
             return self._ok({"group": group, "name": name}, f"已切换到 {name}")
         except ClashApiError as exc:
             logger.warning(f"切换节点失败：{group} -> {name}：{exc.message}")
@@ -1387,6 +1424,49 @@ class OpenClashPanel(_PluginBase):
         except Exception as exc:  # noqa: BLE001
             logger.exception(f"切换节点失败：{exc}")
             return self._err(f"切换节点失败：{exc}")
+
+    async def api_unlock(self, request: Request) -> Dict[str, Any]:
+        """恢复智能组自动选路：重新测一次组速度（实测会清锁定），失败再清 Smart 缓存。"""
+        body = await self._json_body(request)
+        group = str(body.get("group") or "").strip()
+        if not group:
+            return self._err("缺少 group 参数", 400)
+        client = self._client()
+        cfg = self._current_config()
+        try:
+            # 实测：对 Smart 组做一次组测速会清除手动锁定、恢复自动选路
+            try:
+                await client.delay(
+                    group,
+                    url=str(cfg.get("delay_test_url") or DEFAULT_DELAY_URL),
+                    timeout=int(cfg.get("delay_test_timeout") or DEFAULT_DELAY_TIMEOUT),
+                    is_group=True,
+                )
+            except ClashApiError:
+                pass
+            await asyncio.sleep(0.6)
+            data = await client.proxies()
+            item = data.get(group) or {}
+            if not str(item.get("fixed") or ""):
+                logger.info(f"恢复自动选路（重新测速）：{group}")
+                return self._ok({"group": group}, "已恢复自动选路（已重新测速）")
+            try:
+                await client.flush_smart_cache()
+            except ClashApiError:
+                pass
+            await asyncio.sleep(0.6)
+            data = await client.proxies()
+            item = data.get(group) or {}
+            if not str(item.get("fixed") or ""):
+                logger.info(f"恢复自动选路（清缓存）：{group}")
+                return self._ok({"group": group}, "已恢复自动选路")
+            return self._ok(
+                {"group": group, "fixed": item.get("fixed")},
+                "仍处于锁定：已清 Smart 缓存，请重启 OpenClash 或等订阅刷新后重试",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(f"恢复自动选路失败：{exc}")
+            return self._err(f"恢复自动选路失败：{exc}")
 
     async def api_mode(self, request: Request) -> Dict[str, Any]:
         body = await self._json_body(request)

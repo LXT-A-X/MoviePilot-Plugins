@@ -236,7 +236,9 @@ const filteredLogs = computed(() =>
 const currentNowText = computed(() => {
   const group = currentGroup.value
   if (!group) return ''
-  if (group.type === 'Smart' || String(group.now || '').startsWith('Smart')) return '智能自动选路'
+  if (group.type === 'Smart' || String(group.now || '').startsWith('Smart')) {
+    return group.fixed ? `已锁定：${group.fixed}` : '智能自动选路'
+  }
   return group.now || '未选择'
 })
 const currentIsSmart = computed(() => currentGroup.value?.type === 'Smart')
@@ -361,17 +363,28 @@ function netText(item) {
 
 async function switchNode(node) {
   if (!currentGroup.value || node.selected || busy.value) return
-  if (currentIsSmart.value) {
-    toastMsg('info', '智能组（Smart）由内核自动选路，不能在组内手动指定节点；可在上层组里选择这个智能组')
-    return
-  }
+  const isSmart = currentIsSmart.value
   busy.value = true
   try {
     await api.post('/switch', { group: currentGroup.value.name, name: node.name })
-    toastMsg('success', `已切换：${node.name}`)
+    toastMsg('success', isSmart ? `已锁定节点：${node.name}` : `已切换：${node.name}`)
     await loadAll(true)
   } catch (e) {
     error.value = e.message
+    toastMsg('error', e.message)
+  } finally {
+    busy.value = false
+  }
+}
+
+async function unlockSmart() {
+  if (!currentGroup.value || busy.value) return
+  busy.value = true
+  try {
+    const res = await api.post('/unlock', { group: currentGroup.value.name })
+    toastMsg('success', (res && res.message) || '已恢复自动选路')
+    await loadAll(true)
+  } catch (e) {
     toastMsg('error', e.message)
   } finally {
     busy.value = false
@@ -885,7 +898,11 @@ onBeforeUnmount(() => {
 
           <div v-if="currentGroup" class="ocp-group-info d-flex align-center flex-wrap ga-2 mt-2">
             <v-chip size="x-small" variant="text">{{ currentGroup.type }}</v-chip>
-            <v-chip v-if="currentIsSmart" size="x-small" color="info" variant="tonal">智能组 · 自动选路</v-chip>
+            <v-chip v-if="currentIsSmart" size="x-small" color="info" variant="tonal">
+              {{ currentGroup.fixed ? '智能组 · 已锁定' : '智能组 · 自动选路' }}
+            </v-chip>
+            <v-btn v-if="currentIsSmart && currentGroup.fixed" size="x-small" variant="tonal"
+              color="warning" :loading="busy" @click.stop="unlockSmart">恢复自动</v-btn>
             <span class="text-caption text-medium-emphasis">当前：{{ currentNowText }}</span>
             <span v-if="busy" class="text-caption text-medium-emphasis">切换中…</span>
             <span class="text-caption text-medium-emphasis">点延迟徽章或「测」可单独测速</span>
@@ -903,7 +920,7 @@ onBeforeUnmount(() => {
               <v-card
                 :variant="node.selected ? 'flat' : 'outlined'"
                 :color="node.selected ? 'primary' : undefined"
-                :class="['ocp-node', currentIsSmart ? 'ocp-node--readonly' : '']"
+                :class="['ocp-node']"
                 @click="switchNode(node)"
               >
                 <div class="d-flex align-center ga-2 pa-2">
@@ -942,7 +959,7 @@ onBeforeUnmount(() => {
             暂无策略组数据（请检查 API 地址 / Dashboard 密码）
           </div>
           <div v-else-if="currentIsSmart" class="text-caption text-medium-emphasis pa-2">
-            智能组由内核自动选路：可查看成员、单测延迟，但不能在组内手动指定节点；需要固定出口请在上层策略组里选择它。
+            智能组（Smart）支持手动选择锁定：点击节点即锁定该节点；锁定后点「恢复自动」可回到内核智能选路。
           </div>
         </v-card>
 
