@@ -143,14 +143,14 @@ V2 版手册：[plugins.v2/zitifenlei/使用手册.md](https://github.com/LXT-A-
 
 ### OpenClash 控制面板 OpenClashPanel
 
-**V3 1.12.0 · 适用 MoviePilot V3**
+**V3 1.12.1 · 适用 MoviePilot V3**
 
 在 MoviePilot 里直接查看和管理 **OpenClash / Mihomo**：状态总览、策略组与节点切换、延迟测速、访问检查（内核 / MP / OpenClash 三视角）、插件与内核日志，可选 OpenWrt 服务管理；支持 Telegram 分页按钮命令与仪表盘全宽组件。
 
 **核心特性**
 
 - **状态总览**：内核版本、规则模式、运行模式、连接数、内存/CPU/负载、上下行速率与累计流量。
-- **策略组**：按 OpenClash 配置文件顺序排列（与 zashboard 一致），支持节点切换、单项/整组测速（进度与成功/超时统计），Smart 智能组只读。
+- **策略组**：按 OpenClash 配置文件顺序排列（与 zashboard 一致），支持节点切换、单项/整组测速（进度与成功/超时统计）；Smart 智能组支持手动选择锁定，点「恢复自动」重新测速解锁。
 - **访问检查**：内核视角（与官方一致）/ MP 网络视角 / OpenClash 代理视角，逐站加载、30 秒自动采集。
 - **OpenWrt 管理（可选）**：填 LuCI 地址/用户名/密码后，可启动/停止/重启、切换运行模式（基础/增强 TUN/混合 MIX）、切换配置、更新订阅、清缓存、区域绕过/域名嗅探/DNS 代理/流媒体解锁等。
 - **TG 命令**：`/oc_status`、`/oc_check`、`/oc_node`（分页按钮选组/节点）、`/oc_mode`、`/oc_refresh`、`/oc_help`。
