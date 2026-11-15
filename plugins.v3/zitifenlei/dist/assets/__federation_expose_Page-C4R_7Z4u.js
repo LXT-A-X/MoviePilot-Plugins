@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import { _ as _export_sfc, u as uploadAcceptFor, a as DESKTOP_ACCEPT_ASS, b as apiModule, f as formatNotes, c as DESKTOP_ACCEPT_FONT, S as Settings, C as Check, F as FontLibrary, D as Dashboard } from './Settings-B6oh47j-.js';
+import { _ as _export_sfc, u as uploadAcceptFor, a as DESKTOP_ACCEPT_ASS, b as apiModule, f as formatNotes, c as DESKTOP_ACCEPT_FONT, S as Settings, C as Check, F as FontLibrary, D as Dashboard } from './Settings-69Z41bM4.js';
 
 const {toDisplayString:_toDisplayString$3,createElementVNode:_createElementVNode$3,createTextVNode:_createTextVNode$3,resolveComponent:_resolveComponent$3,withCtx:_withCtx$3,createVNode:_createVNode$3,openBlock:_openBlock$3,createBlock:_createBlock$3,createCommentVNode:_createCommentVNode$3,unref:_unref$1,Fragment:_Fragment$3,createElementBlock:_createElementBlock$3,renderList:_renderList$3,withModifiers:_withModifiers,normalizeClass:_normalizeClass$1} = await importShared('vue');
 

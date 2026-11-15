@@ -48,9 +48,8 @@ const DEFAULT_CONFIG = {
   // HDR 字幕亮度：hdr_brightness=开关（选档位即自动开启），hdr_brightness_level=档位（空=关闭）
   hdr_brightness: false,
   hdr_brightness_level: '',
-  // 种子字体收集：总开关 + 兜底扫描间隔 + 关键词/上限 + 收集去向
+  // 种子字体收集：总开关 + 关键词/上限 + 手动补查
   torrent_enabled: false,
-  torrent_scan_interval_min: 30,
   torrent_keywords: 'font,fonts,字体',
   torrent_keyword_mode: 'default',
   torrent_max_file_mb: 2048,
@@ -188,8 +187,7 @@ async function save() {
       const n = Number(v)
       return Number.isFinite(n) ? Math.min(max, Math.max(min, Math.round(n))) : d
     }
-    config.value.torrent_scan_interval_min = normInt(config.value.torrent_scan_interval_min, 30, 1, 1440)
-    config.value.torrent_max_file_mb = normInt(config.value.torrent_max_file_mb, 2048, 1, 40960)
+      config.value.torrent_max_file_mb = normInt(config.value.torrent_max_file_mb, 2048, 1, 40960)
     config.value.torrent_max_files = normInt(config.value.torrent_max_files, 500, 1, 5000)
     if (typeof props.api?.post === 'function') {
       await apiModule.post(props.api, '/config', { ...config.value })
@@ -308,7 +306,7 @@ async function scanTorrents() {
 async function resetTorrentBaseline() {
   try {
     await apiModule.post(props.api, '/torrent/baseline', {})
-    emit('notify', '兜底基线已重置；只影响定时/手动扫描，MP 整理事件仍按 hash 实时查', 'success')
+    emit('notify', '手动补查基线已重置；只影响手动补查，MP 整理事件仍按 hash 实时查', 'success')
     await loadTorrentStatus()
   } catch (e) {
     emit('notify', e.message || '重置基线失败')
@@ -739,28 +737,18 @@ watch(() => config.value.auto_subset, (v) => {
         <div class="zt-switch-row">
           <div class="flex-grow-1">
             <div class="zt-switch-title">启用种子字体收集</div>
-            <div class="zt-switch-desc">只读下载器：从下载完成的种子里按文件清单截取字体（不扫描下载目录、不改下载优先级、不删任何源文件）。开启后 MP 整理完成事件会按 download_hash 实时查下载器；同时按设定间隔扫描兜底。要停就关这个总开关</div>
+            <div class="zt-switch-desc">只读下载器：MP 整理完成事件按 download_hash 实时查下载器并复制字体，不扫描下载目录、不改下载优先级、不删任何源文件。不再按时间自动扫描；需要补查时手动点一次。要停就关这个总开关</div>
           </div>
           <v-switch v-model="config.torrent_enabled" color="primary" density="compact" hide-details></v-switch>
         </div>
 
         <!-- 折叠时的状态摘要 -->
         <div v-if="!torrentExpanded" class="zt-hint">
-          下载器：{{ torrentDownloaderStatusText }} · 解压能力：{{ torrentToolStatusText }} · 兜底基线：{{ torrentBaselineStatusText }} · 最近记录 {{ torrentRecords.length }} 条<span v-if="torrentStatus.running"> · 正在收集 {{ torrentStatus.running }} 个</span>
+          下载器：{{ torrentDownloaderStatusText }} · 解压能力：{{ torrentToolStatusText }} · 手动补查基线：{{ torrentBaselineStatusText }} · 最近记录 {{ torrentRecords.length }} 条<span v-if="torrentStatus.running"> · 正在收集 {{ torrentStatus.running }} 个</span>
         </div>
 
         <template v-else>
           <v-row dense class="mt-2">
-            <v-col cols="12" sm="6">
-              <v-text-field
-                v-model.number="config.torrent_scan_interval_min"
-                type="number" min="1" max="1440"
-                label="兜底扫描间隔（分钟）"
-                density="compact" variant="outlined"
-                hint="兜底用：MP 整理事件优先按 hash 实时查；定时任务按这个间隔补扫下载器。改完保存即时生效，太小会增加查询频率"
-                persistent-hint
-              ></v-text-field>
-            </v-col>
             <v-col cols="12" sm="6">
               <v-select
                 v-model="config.torrent_keyword_mode"
@@ -805,7 +793,7 @@ watch(() => config.value.auto_subset, (v) => {
           <div class="zt-hint">
             下载器：{{ torrentDownloaderStatusText }}<br>
             解压能力：{{ torrentToolStatusText }}<span v-if="torrentStatus.tools?.hint"> · {{ torrentStatus.tools.hint }}</span><br>
-            兜底基线：{{ torrentBaselineStatusText }}（只约束定时/手动扫描；MP 整理事件按 download_hash 实时查，不受基线限制）<span v-if="torrentStatus.running"> · 正在收集 {{ torrentStatus.running }} 个</span>
+            手动补查基线：{{ torrentBaselineStatusText }}（只约束手动补查；MP 整理事件按 download_hash 实时查，不受基线限制）<span v-if="torrentStatus.running"> · 正在收集 {{ torrentStatus.running }} 个</span>
           </div>
           <div class="d-flex flex-wrap ga-2 mt-2">
             <v-btn
@@ -814,7 +802,7 @@ watch(() => config.value.auto_subset, (v) => {
               @click="scanTorrents"
             >
               <v-icon start size="16">mdi-magnify-scan</v-icon>
-              立即检查下载器
+              手动补查一次
             </v-btn>
             <v-btn size="small" variant="tonal" @click="resetTorrentBaseline">
               <v-icon start size="16">mdi-clock-outline</v-icon>
