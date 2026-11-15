@@ -465,7 +465,7 @@ class Zitifenlei(_PluginBase):
     plugin_name = "字体分类管家"
     plugin_desc = "字体归档整理与 ASS 字幕字体检查插件：扫描/上传字体到字体库，检查字幕缺失字体。"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/zitifenlei.png"
-    plugin_version = "3.8.2"
+    plugin_version = "3.8.3"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "zitifenlei_"
@@ -5946,7 +5946,7 @@ class Zitifenlei(_PluginBase):
         except Exception as err:
             return self._err(f"收藏操作失败: {err}")
 
-    def api_font_preview(self, id: int = 0, face: int = 0) -> Dict[str, Any]:
+    def api_font_preview(self, id: int = 0, face: int = 0, safe: int = 0) -> Dict[str, Any]:
         """字体预览：返回字体文件 base64 + 元数据"""
         if not self._db_ok():
             return self._err("数据库未初始化")
@@ -5961,6 +5961,7 @@ class Zitifenlei(_PluginBase):
                 name=font.get("name", ""),
                 family=font.get("family", ""),
                 face_index=int(face or 0),
+                safe_preview=bool(safe),
             )
         except Exception as err:
             return self._err(f"预览失败: {err}")
@@ -6024,6 +6025,62 @@ class Zitifenlei(_PluginBase):
                 try:
                     for t in probe["cmap"].tables:
                         _ = t.cmap
+                finally:
+                    try:
+                        probe.close()
+                    except Exception:
+                        pass
+                return data
+            finally:
+                try:
+                    font.close()
+                except Exception:
+                    pass
+        except Exception:
+            return raw
+
+    @staticmethod
+    def _browser_safe_preview_font(raw: bytes) -> bytes:
+        """为浏览器 FontFace 重建一份精简字体：保留全部字形，去掉易被 OTS 拒收的
+        layout/hinting/vertical 表，重写 name 与 post。仅在普通预览被浏览器拒绝后兜底。
+        """
+        try:
+            import io as _io
+            from fontTools import subset
+            from fontTools.ttLib import TTFont, newTable
+
+            font = TTFont(_io.BytesIO(raw), lazy=False)
+            try:
+                options = subset.Options()
+                options.drop_tables += ["GSUB", "GPOS", "GDEF"]
+                subsetter = subset.Subsetter(options=options)
+                subsetter.populate(glyphs=font.getGlyphOrder())
+                subsetter.subset(font)
+                for name in (
+                    "GSUB", "GPOS", "GDEF", "kern", "vhea", "vmtx",
+                    "cvt ", "fpgm", "prep", "gasp",
+                ):
+                    if name in font:
+                        del font[name]
+                name_table = newTable("name")
+                name_table.names = []
+                for name_id, value in (
+                    (1, "Preview"), (2, "Regular"),
+                    (4, "Preview Regular"), (6, "Preview-Regular"),
+                ):
+                    name_table.setName(value, name_id, 3, 1, 0x409)
+                    name_table.setName(value, name_id, 1, 0, 0)
+                font["name"] = name_table
+                if "post" in font:
+                    font["post"].formatType = 3.0
+                out = _io.BytesIO()
+                font.save(out)
+                data = out.getvalue()
+                probe = TTFont(_io.BytesIO(data), lazy=False)
+                try:
+                    if "cmap" in probe:
+                        for table in probe["cmap"].tables:
+                            _ = table.cmap
                 finally:
                     try:
                         probe.close()
@@ -6353,6 +6410,7 @@ class Zitifenlei(_PluginBase):
         name: str = "",
         family: str = "",
         face_index: int = 0,
+        safe_preview: bool = False,
     ) -> Dict[str, Any]:
         try:
             if not file_path or not Path(file_path).is_file():
@@ -6372,6 +6430,8 @@ class Zitifenlei(_PluginBase):
                 raw = self._split_ttc_face(raw, file_path, int(face_index or 0))
             # 老中文字体常见只有 cmap format 0/2：fontTools 能读，浏览器 FontFace 拒载
             raw = self._normalize_preview_font(raw)
+            if safe_preview:
+                raw = self._browser_safe_preview_font(raw)
             data = base64.b64encode(raw).decode("ascii")
             char_count = 0
             face_count = 0

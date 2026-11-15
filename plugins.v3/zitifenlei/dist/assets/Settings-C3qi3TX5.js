@@ -1322,6 +1322,21 @@ async function applyPreviewResponse(res, fallbackName = '', fallbackFamily = '')
   return loadPreviewFace(data)
 }
 
+async function loadPreviewWithFallback(id, faceIndex, fallbackName = '', fallbackFamily = '') {
+  try {
+    const res = await apiModule.get(props.api, '/fonts/preview', { id, face: Number(faceIndex) || 0 });
+    return await applyPreviewResponse(res, fallbackName, fallbackFamily)
+  } catch (firstError) {
+    // 浏览器 OTS 拒收时，后端重建一份安全字体再试一次
+    const res = await apiModule.get(props.api, '/fonts/preview', {
+      id,
+      face: Number(faceIndex) || 0,
+      safe: 1,
+    });
+    return await applyPreviewResponse(res, fallbackName, fallbackFamily)
+  }
+}
+
 async function reloadPreviewFace(faceIndex) {
   const id = previewFontId.value || selectedFont.value?.id;
   if (!id) return
@@ -1331,9 +1346,9 @@ async function reloadPreviewFace(faceIndex) {
   faceLoading.value = true;
   faceError.value = '';
   try {
-    const res = await apiModule.get(props.api, '/fonts/preview', { id, face: Number(faceIndex) || 0 });
+    const face = await loadPreviewWithFallback(id, faceIndex);
     if (seq !== previewReqSeq) return
-    previewFont.value = await applyPreviewResponse(res);
+    previewFont.value = face;
   } catch (e) {
     if (seq === previewReqSeq) faceError.value = friendlyPreviewError(e);
   } finally {
@@ -1353,9 +1368,7 @@ async function selectFont(font) {
   faceLoading.value = true;
   faceError.value = '';
   try {
-    const res = await apiModule.get(props.api, '/fonts/preview', { id: font.id, face: 0 });
-    if (seq !== previewReqSeq) return
-    const face = await applyPreviewResponse(res, font.name, font.family);
+    const face = await loadPreviewWithFallback(font.id, 0, font.name, font.family);
     if (seq !== previewReqSeq) return
     previewFont.value = face;
   } catch (e) {
@@ -1586,8 +1599,7 @@ async function openPreview(font) {
   previewName.value = font.name || '';
   previewFamily.value = font.family || '';
   try {
-    const res = await apiModule.get(props.api, '/fonts/preview', { id: font.id, face: 0 });
-    previewFont.value = await applyPreviewResponse(res, font.name, font.family);
+    previewFont.value = await loadPreviewWithFallback(font.id, 0, font.name, font.family);
   } catch (e) {
     previewError.value = friendlyPreviewError(e);
   } finally {
@@ -2696,7 +2708,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const FontLibrary = /*#__PURE__*/_export_sfc(_sfc_main$2, [['__scopeId',"data-v-af1474cb"]]);
+const FontLibrary = /*#__PURE__*/_export_sfc(_sfc_main$2, [['__scopeId',"data-v-9724b01f"]]);
 
 const {toDisplayString:_toDisplayString$1,createElementVNode:_createElementVNode$1,createTextVNode:_createTextVNode$1,resolveComponent:_resolveComponent$1,withCtx:_withCtx$1,createVNode:_createVNode$1,openBlock:_openBlock$1,createBlock:_createBlock$1,createCommentVNode:_createCommentVNode$1,unref:_unref,createElementBlock:_createElementBlock$1,renderList:_renderList$1,Fragment:_Fragment$1,withModifiers:_withModifiers$1,normalizeClass:_normalizeClass$1} = await importShared('vue');
 
