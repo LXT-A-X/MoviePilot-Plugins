@@ -308,7 +308,7 @@ async function scanTorrents() {
 async function resetTorrentBaseline() {
   try {
     await apiModule.post(props.api, '/torrent/baseline', {})
-    emit('notify', '基线已重置为当前时间，之后完成的种子才会被收集', 'success')
+    emit('notify', '兜底基线已重置；只影响定时/手动扫描，MP 整理事件仍按 hash 实时查', 'success')
     await loadTorrentStatus()
   } catch (e) {
     emit('notify', e.message || '重置基线失败')
@@ -739,14 +739,14 @@ watch(() => config.value.auto_subset, (v) => {
         <div class="zt-switch-row">
           <div class="flex-grow-1">
             <div class="zt-switch-title">启用种子字体收集</div>
-            <div class="zt-switch-desc">只读下载器：从下载完成的种子里按文件清单截取字体（不扫描下载目录、不改下载优先级、不删任何源文件）。开启后按设定间隔轮询下载器，不接 MP 整理事件，要停就关这个总开关</div>
+            <div class="zt-switch-desc">只读下载器：从下载完成的种子里按文件清单截取字体（不扫描下载目录、不改下载优先级、不删任何源文件）。开启后 MP 整理完成事件会按 download_hash 实时查下载器；同时按设定间隔扫描兜底。要停就关这个总开关</div>
           </div>
           <v-switch v-model="config.torrent_enabled" color="primary" density="compact" hide-details></v-switch>
         </div>
 
         <!-- 折叠时的状态摘要 -->
         <div v-if="!torrentExpanded" class="zt-hint">
-          下载器：{{ torrentDownloaderStatusText }} · 解压能力：{{ torrentToolStatusText }} · 基线：{{ torrentBaselineStatusText }} · 最近记录 {{ torrentRecords.length }} 条<span v-if="torrentStatus.running"> · 正在收集 {{ torrentStatus.running }} 个</span>
+          下载器：{{ torrentDownloaderStatusText }} · 解压能力：{{ torrentToolStatusText }} · 兜底基线：{{ torrentBaselineStatusText }} · 最近记录 {{ torrentRecords.length }} 条<span v-if="torrentStatus.running"> · 正在收集 {{ torrentStatus.running }} 个</span>
         </div>
 
         <template v-else>
@@ -757,7 +757,7 @@ watch(() => config.value.auto_subset, (v) => {
                 type="number" min="1" max="1440"
                 label="兜底扫描间隔（分钟）"
                 density="compact" variant="outlined"
-                hint="定时任务每分钟唤醒、到点才扫下载器；改完保存即时生效，太小会增加下载器查询频率"
+                hint="兜底用：MP 整理事件优先按 hash 实时查；定时任务按这个间隔补扫下载器。改完保存即时生效，太小会增加查询频率"
                 persistent-hint
               ></v-text-field>
             </v-col>
@@ -805,7 +805,7 @@ watch(() => config.value.auto_subset, (v) => {
           <div class="zt-hint">
             下载器：{{ torrentDownloaderStatusText }}<br>
             解压能力：{{ torrentToolStatusText }}<span v-if="torrentStatus.tools?.hint"> · {{ torrentStatus.tools.hint }}</span><br>
-            基线：{{ torrentBaselineStatusText }}（只处理基线之后完成的种子，历史不碰）<span v-if="torrentStatus.running"> · 正在收集 {{ torrentStatus.running }} 个</span>
+            兜底基线：{{ torrentBaselineStatusText }}（只约束定时/手动扫描；MP 整理事件按 download_hash 实时查，不受基线限制）<span v-if="torrentStatus.running"> · 正在收集 {{ torrentStatus.running }} 个</span>
           </div>
           <div class="d-flex flex-wrap ga-2 mt-2">
             <v-btn

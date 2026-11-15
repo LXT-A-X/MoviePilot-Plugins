@@ -4357,7 +4357,7 @@ async function scanTorrents() {
 async function resetTorrentBaseline() {
   try {
     await apiModule.post(props.api, '/torrent/baseline', {});
-    emit('notify', '基线已重置为当前时间，之后完成的种子才会被收集', 'success');
+    emit('notify', '兜底基线已重置；只影响定时/手动扫描，MP 整理事件仍按 hash 实时查', 'success');
     await loadTorrentStatus();
   } catch (e) {
     emit('notify', e.message || '重置基线失败');
@@ -5025,7 +5025,7 @@ return (_ctx, _cache) => {
               _createElementVNode("div", _hoisted_18, [
                 _cache[71] || (_cache[71] = _createElementVNode("div", { class: "flex-grow-1" }, [
                   _createElementVNode("div", { class: "zt-switch-title" }, "启用种子字体收集"),
-                  _createElementVNode("div", { class: "zt-switch-desc" }, "只读下载器：从下载完成的种子里按文件清单截取字体（不扫描下载目录、不改下载优先级、不删任何源文件）。开启后按设定间隔轮询下载器，不接 MP 整理事件，要停就关这个总开关")
+                  _createElementVNode("div", { class: "zt-switch-desc" }, "只读下载器：从下载完成的种子里按文件清单截取字体（不扫描下载目录、不改下载优先级、不删任何源文件）。开启后 MP 整理完成事件会按 download_hash 实时查下载器；同时按设定间隔扫描兜底。要停就关这个总开关")
                 ], -1)),
                 _createVNode(_component_v_switch, {
                   modelValue: config.value.torrent_enabled,
@@ -5037,7 +5037,7 @@ return (_ctx, _cache) => {
               ]),
               (!torrentExpanded.value)
                 ? (_openBlock(), _createElementBlock("div", _hoisted_19, [
-                    _createTextVNode(" 下载器：" + _toDisplayString(torrentDownloaderStatusText.value) + " · 解压能力：" + _toDisplayString(torrentToolStatusText.value) + " · 基线：" + _toDisplayString(torrentBaselineStatusText.value) + " · 最近记录 " + _toDisplayString(torrentRecords.value.length) + " 条", 1),
+                    _createTextVNode(" 下载器：" + _toDisplayString(torrentDownloaderStatusText.value) + " · 解压能力：" + _toDisplayString(torrentToolStatusText.value) + " · 兜底基线：" + _toDisplayString(torrentBaselineStatusText.value) + " · 最近记录 " + _toDisplayString(torrentRecords.value.length) + " 条", 1),
                     (torrentStatus.value.running)
                       ? (_openBlock(), _createElementBlock("span", _hoisted_20, " · 正在收集 " + _toDisplayString(torrentStatus.value.running) + " 个", 1))
                       : _createCommentVNode("", true)
@@ -5063,7 +5063,7 @@ return (_ctx, _cache) => {
                               label: "兜底扫描间隔（分钟）",
                               density: "compact",
                               variant: "outlined",
-                              hint: "定时任务每分钟唤醒、到点才扫下载器；改完保存即时生效，太小会增加下载器查询频率",
+                              hint: "兜底用：MP 整理事件优先按 hash 实时查；定时任务按这个间隔补扫下载器。改完保存即时生效，太小会增加查询频率",
                               "persistent-hint": ""
                             }, null, 8, ["modelValue"])
                           ]),
@@ -5166,7 +5166,7 @@ return (_ctx, _cache) => {
                         ? (_openBlock(), _createElementBlock("span", _hoisted_22, " · " + _toDisplayString(torrentStatus.value.tools.hint), 1))
                         : _createCommentVNode("", true),
                       _cache[73] || (_cache[73] = _createElementVNode("br", null, null, -1)),
-                      _createTextVNode(" 基线：" + _toDisplayString(torrentBaselineStatusText.value) + "（只处理基线之后完成的种子，历史不碰）", 1),
+                      _createTextVNode(" 兜底基线：" + _toDisplayString(torrentBaselineStatusText.value) + "（只约束定时/手动扫描；MP 整理事件按 download_hash 实时查，不受基线限制）", 1),
                       (torrentStatus.value.running)
                         ? (_openBlock(), _createElementBlock("span", _hoisted_23, " · 正在收集 " + _toDisplayString(torrentStatus.value.running) + " 个", 1))
                         : _createCommentVNode("", true)
@@ -5344,6 +5344,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Settings = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-071c96d9"]]);
+const Settings = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-031a3b35"]]);
 
 export { Check as C, Dashboard as D, FontLibrary as F, Settings as S, _export_sfc as _, DESKTOP_ACCEPT_ASS as a, apiModule as b, DESKTOP_ACCEPT_FONT as c, formatNotes as f, uploadAcceptFor as u };
