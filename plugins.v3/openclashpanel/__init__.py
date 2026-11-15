@@ -178,7 +178,7 @@ class OpenClashPanel(_PluginBase):
         "支持 Smart 智能组、TG 按钮命令、仪表盘全宽组件。"
     )
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/openclashpanel.png"
-    plugin_version = "1.12.1"
+    plugin_version = "1.12.2"
     plugin_author = "LXT-A-X"
     plugin_config_prefix = "openclashpanel_"
     plugin_order = 110
@@ -198,6 +198,10 @@ class OpenClashPanel(_PluginBase):
         self._net_thread: Optional[threading.Thread] = None
         self._net_event = threading.Event()
         self._net_target: Optional[str] = None
+        # 智能组锁定守护：group -> node
+        self._smart_locks: Dict[str, str] = {}
+        self._smart_lock_stop = threading.Event()
+        self._smart_lock_thread: Optional[threading.Thread] = None
         self._net_progress: Dict[str, Dict[str, Any]] = {}
         # 命令交互缓存（TG 按钮用索引，避免 callback_data 超长）
         self._cmd_groups: List[Dict[str, Any]] = []
@@ -226,6 +230,7 @@ class OpenClashPanel(_PluginBase):
             pass
         self._restart_log_worker()
         self._restart_net_worker()
+        self._restart_smart_lock_worker()
 
     def get_state(self) -> bool:
         return self._enabled
@@ -233,11 +238,59 @@ class OpenClashPanel(_PluginBase):
     def stop_service(self) -> None:
         self._stop_log_worker()
         self._stop_net_worker()
+        self._stop_smart_lock_worker()
         self._enabled = False
         try:
             logger.info("插件已停用")
         except Exception:  # noqa: BLE001
             pass
+
+    # ------------------------------------------------------------------ 智能组锁定守护
+    def _restart_smart_lock_worker(self) -> None:
+        self._stop_smart_lock_worker()
+        if not self._enabled:
+            return
+        self._smart_lock_stop = threading.Event()
+        self._smart_lock_thread = threading.Thread(
+            target=self._smart_lock_worker, name="OpenClashPanel-SmartLock", daemon=True
+        )
+        self._smart_lock_thread.start()
+        logger.info("智能组锁定守护线程已启动")
+
+    def _stop_smart_lock_worker(self) -> None:
+        try:
+            self._smart_lock_stop.set()
+        except Exception:  # noqa: BLE001
+            pass
+        thread = self._smart_lock_thread
+        self._smart_lock_thread = None
+        if thread and thread.is_alive():
+            thread.join(timeout=3)
+
+    def _smart_lock_worker(self) -> None:
+        while not self._smart_lock_stop.is_set():
+            try:
+                asyncio.run(self._smart_lock_check())
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"智能组锁定守护失败：{exc}")
+            self._smart_lock_stop.wait(15)
+
+    async def _smart_lock_check(self) -> None:
+        if not self._smart_locks:
+            return
+        client = self._client()
+        for group, node in list(self._smart_locks.items()):
+            try:
+                item = await client.proxy(group)
+            except ClashApiError:
+                continue
+            fixed = str(item.get("fixed") or "")
+            if fixed != node:
+                try:
+                    await client.switch(group, node)
+                    logger.info(f"智能组锁定守护：重新锁定 {group} -> {node}")
+                except ClashApiError as exc:
+                    logger.warning(f"智能组锁定守护恢复失败：{group} -> {node}：{exc.message}")
 
     # ------------------------------------------------------------------ 访问检查后台采集
     def _restart_net_worker(self) -> None:
@@ -828,7 +881,8 @@ class OpenClashPanel(_PluginBase):
         logger.info(f"命令切换节点：{group} -> {node_token}")
         group_type = (proxies.get(group) or {}).get("type")
         if group_type == "Smart":
-            return f"已锁定节点：{group} → {node_token}（可用 /oc_auto {group} 恢复自动）"
+            self._smart_locks[group] = node_token
+            return f"已锁定节点：{group} → {node_token}（插件会守护锁定，可用 /oc_auto {group} 恢复自动）"
         return f"已切换：{group} → {node_token}"
 
     async def _switch_by_index(self, node_index: int) -> str:
@@ -843,13 +897,15 @@ class OpenClashPanel(_PluginBase):
         logger.info(f"按钮切换节点：{group} -> {name}")
         group_type = (proxies.get(group) or {}).get("type")
         if group_type == "Smart":
-            return f"已锁定节点：{group} → {name}（可用 /oc_auto {group} 恢复自动）"
+            self._smart_locks[group] = name
+            return f"已锁定节点：{group} → {name}（插件会守护锁定，可用 /oc_auto {group} 恢复自动）"
         return f"已切换：{group} → {name}"
 
     async def _build_auto_text(self, group: str) -> str:
         """恢复智能组自动选路：重新测一次组速度，失败再清缓存。"""
         client = self._client()
         cfg = self._current_config()
+        self._smart_locks.pop(group, None)
         try:
             try:
                 await client.delay(
@@ -1416,7 +1472,9 @@ class OpenClashPanel(_PluginBase):
             await client.switch(group, name)
             logger.info(f"切换节点：{group} -> {name}")
             if group_type == "Smart":
-                return self._ok({"group": group, "name": name}, f"已锁定节点：{name}（智能组支持手动锁定）")
+                self._smart_locks[group] = name
+                return self._ok({"group": group, "name": name}, f"已锁定节点：{name}（插件会守护锁定）")
+            self._smart_locks.pop(group, None)
             return self._ok({"group": group, "name": name}, f"已切换到 {name}")
         except ClashApiError as exc:
             logger.warning(f"切换节点失败：{group} -> {name}：{exc.message}")
@@ -1433,6 +1491,7 @@ class OpenClashPanel(_PluginBase):
             return self._err("缺少 group 参数", 400)
         client = self._client()
         cfg = self._current_config()
+        self._smart_locks.pop(group, None)
         try:
             # 实测：对 Smart 组做一次组测速会清除手动锁定、恢复自动选路
             try:

@@ -113,6 +113,10 @@ class ClashClient:
     async def connections(self) -> Dict[str, Any]:
         return await self.request("GET", "/connections") or {}
 
+    async def proxy(self, name: str) -> Dict[str, Any]:
+        """读取单个代理/策略组信息。"""
+        return await self.request("GET", f"/proxies/{_quote(name)}") or {}
+
     async def switch(self, group: str, name: str) -> None:
         """切换策略组节点：PUT /proxies/{group} {"name": ...}。"""
         await self.request("PUT", f"/proxies/{_quote(group)}", json={"name": name})
