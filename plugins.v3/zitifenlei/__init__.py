@@ -177,7 +177,7 @@ _DEFAULT_CONFIG = {
     # 解压出的字体/字幕直接处理 / 进待确认 / 待检查 / 待处理，取决于「是否自动执行监控结果」；
     # 清理压缩包（移到「已处理压缩包」子目录 或 直接删除）只在「自动执行开 + 全部处理无失败」时执行，
     # 放错目录、待定、有失败时一律保留并提醒。
-    "archive_cleanup_enabled": False,
+    "archive_cleanup_enabled": True,
     # delete=正常清理（直接删除，默认）；move=保留（移到 已处理/，可找回）
     "archive_cleanup_action": "delete",
     # 已处理压缩包根目录：system=跟随各监控目录（<目录>/已处理压缩包/）；
@@ -218,11 +218,12 @@ _DEFAULT_CONFIG = {
     "torrent_scan_interval_min": 30,
     # 压缩包/路径关键词（逗号分隔）：只对压缩包生效，裸字体文件不看关键词
     "torrent_keywords": "font,fonts,字体",
+    "torrent_keyword_mode": "default",
     # 单文件上限（MB）与单种子最多截取文件数
     "torrent_max_file_mb": 2048,
     "torrent_max_files": 500,
     # 收集去向：False=直接入库；True=进「待整理」等确认
-    "torrent_to_pending": False,
+
     # 基线时间戳（Unix 秒）：只处理基线之后完成的种子，历史不碰；由后端维护，前端可重置
     "torrent_baseline_ts": 0,
 }
@@ -244,6 +245,8 @@ _ARCHIVE_DONE_DIR_NAME = "已处理压缩包"
 # 「已处理压缩包」下的分类子目录：成功清理 / 放错或不支持格式
 _ARCHIVE_DONE_OK_DIR_NAME = "已处理"
 _ARCHIVE_DONE_ERR_DIR_NAME = "错误"
+_ARCHIVE_DONE_PENDING_DIR_NAME = "待解压"
+_UNLOCK_TASKS_SETTING = "unlock_tasks"
 # 字幕压缩包筛选预设关键词：按文件名子串/单词边界匹配（SC=简体，TC=繁体）
 _SUBTITLE_SC_KEYWORDS = (
     "sc", "chs", "simp", "simplified", "zh-hans", "gb", "gb2312", "简体", "简中",
@@ -460,7 +463,7 @@ class Zitifenlei(_PluginBase):
     plugin_name = "字体分类管家"
     plugin_desc = "字体归档整理与 ASS 字幕字体检查插件：扫描/上传字体到字体库，检查字幕缺失字体。"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/zitifenlei.png"
-    plugin_version = "3.5.1"
+    plugin_version = "3.6.0"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "zitifenlei_"
@@ -2139,16 +2142,37 @@ class Zitifenlei(_PluginBase):
                     pass
             return None
 
+    def _plugin_data_dir(self) -> Path:
+        """插件数据目录（系统模式下已处理压缩包的存放位置）。"""
+        try:
+            db_path = getattr(self, "_db_path", None)
+            if db_path:
+                return Path(db_path).resolve().parent
+            tmp_dir = getattr(self, "_tmp_dir", None)
+            if tmp_dir:
+                return Path(tmp_dir).resolve().parent
+        except Exception:
+            pass
+        return Path(tempfile.gettempdir()) / "Zitifenlei"
+
+    def _system_archive_root(self) -> Path:
+        """系统默认根目录：插件数据目录下的 archives/（不是监控目录）。"""
+        root = self._plugin_data_dir() / "archives"
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        return root
+
     def _archive_done_root(self, source_dir: Optional[Path] = None) -> Tuple[Path, str]:
-        """返回 (已处理压缩包根目录, 模式)；模式 system/custom。"""
+        """返回 (已处理压缩包根目录, 模式)；模式 system/custom。
+
+        系统模式统一放插件数据目录，不放到各监控目录里；source_dir 仅用于记录原目录 meta。
+        """
         custom = self._archive_done_custom_root()
         if custom is not None:
             return custom, "custom"
-        if source_dir is not None:
-            return Path(source_dir) / _ARCHIVE_DONE_DIR_NAME, "system"
-        input_dir = self.get_resource_or_config("input_dir") or ""
-        base = Path(input_dir) if input_dir else Path(".")
-        return base / _ARCHIVE_DONE_DIR_NAME, "system"
+        return self._system_archive_root(), "system"
 
     def _archive_source_dir_for_path(self, archive_path: Path) -> Path:
         """压缩包所在监控目录（用于系统模式下的 已处理压缩包/ 位置）。"""
@@ -2202,8 +2226,8 @@ class Zitifenlei(_PluginBase):
             done_dir.mkdir(parents=True, exist_ok=True)
             dest = self._unique_archive_dest(done_dir, archive_path.name)
             shutil.move(str(archive_path), str(dest))
-            if mode == "custom":
-                self._write_archive_origin(dest, source_dir, category, mode)
+            # 系统/自定义都记录原目录，管理页恢复时才能知道该移回哪里
+            self._write_archive_origin(dest, source_dir, category, mode)
             return "moved", str(dest)
         except Exception as err:
             if self._db is not None:
@@ -2226,8 +2250,7 @@ class Zitifenlei(_PluginBase):
         base_dir: 系统模式下压缩包来源监控目录（决定 已处理压缩包/ 位置）；
         自定义模式下统一使用 archive_done_dir。
         """
-        if not bool(self.get_resource_or_config("archive_cleanup_enabled")):
-            return "", "未开启「解压整理后自动清理压缩包」", ""
+        # 成功处理后的压缩包只有两种去向：直接删除，或保留到「已处理/」。
         action = str(self.get_resource_or_config("archive_cleanup_action") or "delete")
         if action == "delete":
             try:
@@ -2250,8 +2273,7 @@ class Zitifenlei(_PluginBase):
             done_dir.mkdir(parents=True, exist_ok=True)
             dest = self._unique_archive_dest(done_dir, archive_path.name)
             shutil.move(str(archive_path), str(dest))
-            if mode == "custom":
-                self._write_archive_origin(dest, src_dir, _ARCHIVE_DONE_OK_DIR_NAME, mode)
+            self._write_archive_origin(dest, src_dir, _ARCHIVE_DONE_OK_DIR_NAME, mode)
             return "moved", "", str(dest)
         except Exception as err:
             if self._db is not None:
@@ -2358,6 +2380,94 @@ class Zitifenlei(_PluginBase):
                 except Exception:
                     pass
 
+    def _unlock_tasks(self) -> List[Dict[str, Any]]:
+        if self._db is None:
+            return []
+        try:
+            raw = self._db.get_setting(_UNLOCK_TASKS_SETTING, "[]")
+            data = json.loads(raw or "[]")
+            return [item for item in data if isinstance(item, dict)] if isinstance(data, list) else []
+        except Exception:
+            return []
+
+    def _save_unlock_tasks(self, tasks: List[Dict[str, Any]]) -> None:
+        if self._db is None:
+            return
+        try:
+            self._db.set_setting(
+                _UNLOCK_TASKS_SETTING,
+                json.dumps(tasks[-200:], ensure_ascii=False),
+            )
+        except Exception:
+            pass
+
+    def _add_unlock_task(self, path: Path, operation: str, source: str = "") -> None:
+        tasks = self._unlock_tasks()
+        key = str(path)
+        for item in tasks:
+            if item.get("path") == key:
+                item["operation"] = operation
+                self._save_unlock_tasks(tasks)
+                return
+        tasks.append(
+            {
+                "id": uuid.uuid4().hex[:12],
+                "path": key,
+                "name": path.name,
+                "operation": operation,
+                "source": source,
+                "created": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        )
+        self._save_unlock_tasks(tasks)
+
+    def _remove_unlock_task(self, path: str) -> None:
+        tasks = [item for item in self._unlock_tasks() if str(item.get("path")) != str(path)]
+        self._save_unlock_tasks(tasks)
+
+    def _set_unlock_task_operation(self, path: str, operation: str) -> None:
+        tasks = self._unlock_tasks()
+        for item in tasks:
+            if str(item.get("path")) == str(path):
+                item["operation"] = operation
+        self._save_unlock_tasks(tasks)
+
+    def _handle_encrypted_archive(self, archive_path: Path, operation: str) -> Optional[str]:
+        """加密包只复制到待解压，原件不移动；记录待处理任务并发通知。"""
+        try:
+            root, mode = self._archive_done_root(self._archive_source_dir_for_path(archive_path))
+            pending_dir = root / _ARCHIVE_DONE_PENDING_DIR_NAME
+            pending_dir.mkdir(parents=True, exist_ok=True)
+            dest = self._unique_archive_dest(pending_dir, archive_path.name)
+            shutil.copy2(archive_path, dest)
+            self._add_unlock_task(dest, operation, self._watch_dir_kind(archive_path))
+            op_label = {"font": "字体归档", "check": "字幕检查", "subset": "字幕子集化"}.get(operation, operation)
+            if self._db is not None:
+                self._db.add_log(
+                    f"压缩包需要解压码，已复制到待解压：{archive_path.name}（{op_label}）",
+                    "warning",
+                )
+            try:
+                if self.get_resource_or_config("notify_enabled") is not False:
+                    self._notify(
+                        "字体分类管家",
+                        "────────────\n"
+                        "🔒【压缩包需要解压码】\n"
+                        f"文件：{archive_path.name}\n"
+                        f"操作：{op_label}\n"
+                        "已复制到「已处理压缩包/待解压/」，请到该页面输入解压码。",
+                    )
+            except Exception:
+                pass
+            return str(dest)
+        except Exception as err:
+            if self._db is not None:
+                try:
+                    self._db.add_log(f"加密压缩包留档失败 {archive_path.name}: {err}", "warning")
+                except Exception:
+                    pass
+            return None
+
     def _handle_subtitle_archive(self, archive_path: Path, dir_kind: str) -> bool:
         """处理 ASS 检查目录 / 自动子集化目录里的压缩包：只解 .ass，并按筛选处理。
 
@@ -2417,6 +2527,12 @@ class Zitifenlei(_PluginBase):
                 max_total_bytes=MAX_UPLOAD_TOTAL_BYTES,
                 max_member_bytes=MAX_ASS_FILE_BYTES,
             )
+            if result.password_required:
+                self._handle_encrypted_archive(
+                    archive_path, "check" if dir_kind == "ass" else "subset"
+                )
+                self._mark_archive_done(sig)
+                return True
             all_ass = [Path(item.path) for item in result.files]
             matched = [
                 item
@@ -2639,6 +2755,10 @@ class Zitifenlei(_PluginBase):
                 max_total_bytes=MAX_UPLOAD_TOTAL_BYTES,
                 max_member_bytes=max_font_file_bytes(),
             )
+            if result.password_required:
+                self._handle_encrypted_archive(archive_path, "font")
+                self._mark_archive_done(sig)
+                return True
             fonts = [Path(item.path) for item in result.files]
             added = 0
             dup = 0
@@ -2733,6 +2853,7 @@ class Zitifenlei(_PluginBase):
                 self._notify_agg.setdefault("archives", []).append(
                     {
                         "name": name,
+                        "dir_label": "字体监控目录",
                         "total": len(fonts),
                         "added": added,
                         "skipped": dup,
@@ -2905,6 +3026,8 @@ class Zitifenlei(_PluginBase):
         name = str(item.get("name") or "压缩包")
         action = str(item.get("action") or "")
         lines = [f"{icon}【{name}】"]
+        if item.get("dir_label"):
+            lines.append(f"📁 目录：{item.get('dir_label')}")
         if item.get("kind") == "subtitle":
             parts = [
                 f"{int(item.get('total') or 0)} 解出",
@@ -4424,7 +4547,11 @@ class Zitifenlei(_PluginBase):
         files = tq.list_files(instance, torrent_hash)
         if not files:
             return False, "读取种子文件清单失败或种子已被删除", {}
-        keywords = str(self.get_resource_or_config("torrent_keywords") or "font,fonts,字体")
+        mode = str(self.get_resource_or_config("torrent_keyword_mode") or "default").strip().lower()
+        custom = str(self.get_resource_or_config("torrent_keywords") or "").strip()
+        keywords = "font,fonts,字体"
+        if mode == "custom" and custom:
+            keywords = keywords + "," + custom
         max_mb = self._torrent_cfg_int("torrent_max_file_mb", 2048)
         max_files = self._torrent_cfg_int("torrent_max_files", 500)
         candidates, stats = tq.pick_candidates(files, root, keywords, max_mb, max_files)
@@ -4460,6 +4587,7 @@ class Zitifenlei(_PluginBase):
         empty = {
             "state": "skipped", "added": 0, "pending": 0, "skipped": 0,
             "failed": 0, "picked": 0, "name": "", "reason": "",
+            "unlock_tasks": [],
         }
         if not self._torrent_enabled() or not torrent_hash:
             return empty
@@ -4511,6 +4639,7 @@ class Zitifenlei(_PluginBase):
                 "picked": int(stats.get("picked") or 0),
                 "name": str(stats.get("name") or ""),
                 "reason": f"等待 {timeout} 秒超时",
+                "unlock_tasks": list(stats.get("unlock_tasks") or []),
             }
         return {
             "state": str(job.get("state") or "done"),
@@ -4521,13 +4650,15 @@ class Zitifenlei(_PluginBase):
             "picked": int(stats.get("picked") or 0),
             "name": str(stats.get("name") or ""),
             "reason": str(stats.get("reason") or ""),
+            "unlock_tasks": list(stats.get("unlock_tasks") or []),
         }
 
     def _torrent_job_run(self, torrent_hash: str, downloader: str, source: str) -> None:
         """执行一次种子字体截取：暂存复制 → 解压 → 归档入库 → 重建索引 → 写记录。"""
         job = self._torrent_jobs.get(torrent_hash) or {}
         stats: Dict[str, Any] = {
-            "picked": 0, "added": 0, "pending": 0, "skipped": 0, "failed": 0, "name": ""
+            "picked": 0, "added": 0, "pending": 0, "skipped": 0, "failed": 0,
+            "name": "", "unlock_tasks": [],
         }
         staging: Optional[Path] = None
         record_id = 0
@@ -4602,6 +4733,12 @@ class Zitifenlei(_PluginBase):
                             max_total_bytes=max(1, max_mb) * 1024 * 1024,
                             max_member_bytes=max_font_file_bytes(),
                         )
+                        if result.password_required:
+                            unlock_path = self._handle_encrypted_archive(dst, "font")
+                            if unlock_path:
+                                stats.setdefault("unlock_tasks", []).append(unlock_path)
+                            skipped_notes.append(f"{base_name}: 需要解压码，已复制到待解压")
+                            continue
                         if result.files:
                             for member, reason in (result.skipped + result.errors)[:10]:
                                 skipped_notes.append(f"{base_name}/{member}: {reason}")
@@ -4622,7 +4759,7 @@ class Zitifenlei(_PluginBase):
                             dst.unlink(missing_ok=True)
                         except Exception:
                             pass
-                force_pending = bool(self.get_resource_or_config("torrent_to_pending"))
+                force_pending = False
                 merged: Dict[str, Any] = {
                     "added": [],
                     "skipped": [],
@@ -4925,6 +5062,7 @@ class Zitifenlei(_PluginBase):
         tmdbid: str,
         title: str,
         file_list: List[str],
+        torrents: Optional[Dict[str, str]] = None,
     ) -> None:
         """聚合到期：处理本次新增的 ASS 字幕列表（由 on_transfer_complete 汇总传入）。
 
@@ -4955,6 +5093,44 @@ class Zitifenlei(_PluginBase):
             do_subset = bool(self.get_resource_or_config("auto_subset"))
             if not (do_check or do_subset):
                 return
+            # 事件驱动：MP 字幕整理完成后，先按 download_hash 查种子字体；
+            # 只有开关开启时才做，关掉则保持原有目录/MP 入库逻辑。
+            font_blocked = False
+            if torrents and self._torrent_enabled():
+                for torrent_hash, downloader in (torrents or {}).items():
+                    if not torrent_hash:
+                        continue
+                    try:
+                        res = self._ensure_torrent_collect(
+                            torrent_hash, downloader, source="transfer", wait=True
+                        )
+                        state = str(res.get("state") or "")
+                        self._db.add_log(
+                            f"MP 整理后种子字体检查（{torrent_hash[:8]}）：{state}，"
+                            f"新增 {res.get('added', 0)}，跳过 {res.get('skipped', 0)}，"
+                            f"失败 {res.get('failed', 0)}",
+                            "info" if state in ("done", "empty", "cached") else "warning",
+                        )
+                        if state in ("failed", "timeout"):
+                            font_blocked = True
+                        unlock_paths = res.get("unlock_tasks") or []
+                        if unlock_paths:
+                            task_op = "both" if (do_check and do_subset) else ("subset" if do_subset else "check")
+                            for unlock_path in unlock_paths:
+                                self._set_unlock_task_operation(str(unlock_path), task_op)
+                            font_blocked = True
+                    except Exception as err:
+                        font_blocked = True
+                        self._db.add_log(
+                            f"种子字体检查失败（{torrent_hash[:8]}）：{err}", "warning"
+                        )
+                if font_blocked and do_subset:
+                    self._db.add_log(
+                        f"入库子集化暂停（{title or key}）：种子字体收集未完成，"
+                        "请先处理字体/解压码后再子集化",
+                        "warning",
+                    )
+                    do_subset = False
             if do_check:
                 total = 0
                 embedded = 0
@@ -5038,6 +5214,9 @@ class Zitifenlei(_PluginBase):
                 or str(self._safe_get(meta, "en_name") or "")
             )
             transferinfo = data.get("transferinfo") or {}
+            # MP 事件带种子身份：用于按 hash 回查下载器里的字体文件
+            download_hash = str(data.get("download_hash") or "").strip()
+            downloader = str(data.get("downloader") or "").strip()
             # ── 收集本次新增的 ASS 字幕路径（只算转移后入库文件） ──
             # transferinfo.target_item 是转移后的字幕（媒体库内入库文件）；
             # fileitem / transferinfo.fileitem 是源字幕路径——link 模式下源文件仍
@@ -5067,8 +5246,10 @@ class Zitifenlei(_PluginBase):
             with self._lock:
                 ctx = self._pending_shows.get(key)
                 if not isinstance(ctx, dict):
-                    ctx = {"files": []}
+                    ctx = {"files": [], "torrents": {}}
                     self._pending_shows[key] = ctx
+                if download_hash:
+                    ctx.setdefault("torrents", {})[download_hash] = downloader
                 cur = ctx["files"]
                 for p in ass_paths:
                     if p not in cur:
@@ -5079,7 +5260,7 @@ class Zitifenlei(_PluginBase):
                 timer = threading.Timer(
                     self._ass_finalize_delay,
                     self._run_show_scan,
-                    args=(key, tmdbid, title, list(cur)),
+                    args=(key, tmdbid, title, list(cur), dict(ctx.get("torrents") or {})),
                 )
                 timer.daemon = True
                 timer.start()
@@ -5097,6 +5278,29 @@ class Zitifenlei(_PluginBase):
                     self._db.add_log(f"入库事件处理异常: {err}", "error")
             except Exception:
                 pass
+
+    @eventmanager.register(EventType.TransferComplete)
+    def on_video_transfer_complete(self, event) -> None:
+        """MP 视频整理完成：纯视频种子也按 hash 收字体（不做字幕检查/子集化）。"""
+        try:
+            if not self._enabled or not self._db_ok() or not self._torrent_enabled():
+                return
+            data = getattr(event, "event_data", None) or {}
+            if not isinstance(data, dict):
+                return
+            torrent_hash = str(data.get("download_hash") or "").strip()
+            downloader = str(data.get("downloader") or "").strip()
+            if not torrent_hash:
+                return
+            threading.Thread(
+                target=self._ensure_torrent_collect,
+                args=(torrent_hash, downloader, "transfer"),
+                kwargs={"wait": False},
+                name="zt-event-torrent",
+                daemon=True,
+            ).start()
+        except Exception as err:
+            _logger.debug("视频整理完成事件字体收集失败: %s", err)
 
     def _db_ok(self) -> bool:
         if self._db is None:
@@ -5486,7 +5690,6 @@ class Zitifenlei(_PluginBase):
             persist_error = str(err)
             _logger.warning("宿主配置写入失败: %s", err)
         # 2) 更新运行时并热生效
-        old_cleanup = bool((self._config or {}).get("archive_cleanup_enabled"))
         self._config = new_cfg
         self._apply_font_limits()
         if self._db:
@@ -5506,12 +5709,7 @@ class Zitifenlei(_PluginBase):
             if self._db is not None:
                 self._db.set_setting("enabled", self._enabled)
             self._db.add_log("插件配置已更新", "info")
-            if bool(new_cfg.get("archive_cleanup_enabled")) and not old_cleanup:
-                self._db.add_log(
-                    "已开启「解压整理后自动清理压缩包」：只对之后处理成功的压缩包生效；"
-                    "此前已处理并保留的压缩包不会自动清理（可手动移入「已处理压缩包/」）",
-                    "info",
-                )
+            # 成功处理后的压缩包固定按「正常清理/保留」两种方式之一处理。
             self._start_watcher()
         except Exception as err:
             _logger.warning("配置生效失败: %s", err)
@@ -6172,6 +6370,7 @@ class Zitifenlei(_PluginBase):
         upload_files: List[Any],
         allowed_exts: Tuple[str, ...],
         prefix: str = "up",
+        operation: str = "",
     ) -> Tuple[List[Dict[str, Any]], List[str]]:
         """把上传文件（含 .zip 压缩包）落到临时目录，返回可处理的文件清单。
 
@@ -6252,11 +6451,7 @@ class Zitifenlei(_PluginBase):
                     # 解压工具本身异常不该让整个上传接口 500，回一条可读提示继续处理其它文件
                     notes.append(f"{safe_name}: 解压异常 {err}")
                     result = arch.ExtractResult()
-                finally:
-                    try:
-                        zip_path.unlink(missing_ok=True)
-                    except Exception:
-                        pass
+                moved_to_error = False
                 for item in result.files:
                     if len(files) >= MAX_UPLOAD_FILES:
                         notes.append(f"{safe_name}: 单次最多处理 {MAX_UPLOAD_FILES} 个文件，其余已忽略")
@@ -6275,8 +6470,39 @@ class Zitifenlei(_PluginBase):
                     )
                 for member, reason in (result.skipped + result.errors)[:20]:
                     notes.append(f"{safe_name}/{member}: {reason}")
-                if not result.files and not result.skipped and not result.errors:
-                    notes.append(f"{safe_name}: 压缩包内没有可处理的文件")
+                # 加密包：复制到待解压，不当作内容不匹配。
+                if result.password_required:
+                    self._handle_encrypted_archive(
+                        zip_path, operation or ("font" if is_font_upload else "check")
+                    )
+                    try:
+                        zip_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    notes.append(f"{safe_name}: 需要解压码，已复制到待解压")
+                    continue
+                # 上传的压缩包内容与当前上传类型不匹配 / 包内没有可用文件：
+                # 不再直接删掉，转入「已处理压缩包/错误/」留档，管理页可查看/删除。
+                if not result.files:
+                    move_action, error_dest = self._move_archive_to_done(
+                        zip_path, _ARCHIVE_DONE_ERR_DIR_NAME
+                    )
+                    if move_action:
+                        moved_to_error = True
+                        try:
+                            self._archive_sidecar_for(Path(error_dest)).unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                        notes.append(
+                            f"{safe_name}: 包内没有当前上传类型可用的文件，已转入「已处理压缩包/错误/」"
+                        )
+                    else:
+                        notes.append(f"{safe_name}: 压缩包内没有可处理的文件")
+                if not moved_to_error:
+                    try:
+                        zip_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
                 continue
             if Path(safe_name).suffix.lower() not in exts:
                 notes.append(
@@ -6349,7 +6575,7 @@ class Zitifenlei(_PluginBase):
         if not upload_files:
             return self._err("请选择要上传的字体文件")
         scan_mode = "internal"  # fontTools 为唯一权威解析口径
-        files, notes = await self._receive_uploads(upload_files, FONT_EXTENSIONS, prefix="up")
+        files, notes = await self._receive_uploads(upload_files, FONT_EXTENSIONS, prefix="up", operation="font")
 
         def _preview_sync() -> List[Dict[str, Any]]:
             """fontTools 解析是同步重活：放到线程池，避免阻塞事件循环拖住全站请求。"""
@@ -6934,7 +7160,7 @@ class Zitifenlei(_PluginBase):
             batch_hint = ""
         if not batch_hint:
             batch_hint = f"手动上传 {datetime.now().strftime('%m-%d %H:%M')}"
-        files, notes = await self._receive_uploads(upload_files, ASS_EXTENSIONS, prefix="ass")
+        files, notes = await self._receive_uploads(upload_files, ASS_EXTENSIONS, prefix="ass", operation="check")
         done: List[Dict[str, Any]] = []
         for entry in files:
             safe_name = entry["file_name"]
@@ -7548,7 +7774,7 @@ class Zitifenlei(_PluginBase):
             pass
         if not upload_files:
             return self._err("请选择要上传的字幕文件")
-        files, notes = await self._receive_uploads(upload_files, ASS_EXTENSIONS, prefix="subset")
+        files, notes = await self._receive_uploads(upload_files, ASS_EXTENSIONS, prefix="subset", operation="subset")
         done = []
         for entry in files:
             safe_name = entry["file_name"]
@@ -9234,7 +9460,7 @@ class Zitifenlei(_PluginBase):
         return self._ok({"baseline_ts": ts}, "基线已重置")
 
     def _processed_archive_roots(self) -> List[Dict[str, Any]]:
-        """已处理压缩包目录：系统模式的各监控目录 + 自定义根目录，按「已处理/错误/未分类」分类。"""
+        """已处理压缩包目录：系统（插件数据目录）+ 旧版监控目录 + 自定义根目录。"""
         roots: List[Dict[str, Any]] = []
         seen: set = set()
 
@@ -9262,6 +9488,17 @@ class Zitifenlei(_PluginBase):
             except Exception:
                 return
 
+        # 新系统目录：插件数据目录/archives/（默认不自定义）
+        system = self._system_archive_root()
+        add(f"系统目录 · {_ARCHIVE_DONE_OK_DIR_NAME}", "系统目录", "system",
+            _ARCHIVE_DONE_OK_DIR_NAME, system, system / _ARCHIVE_DONE_OK_DIR_NAME, "system")
+        add(f"系统目录 · {_ARCHIVE_DONE_ERR_DIR_NAME}", "系统目录", "system",
+            _ARCHIVE_DONE_ERR_DIR_NAME, system, system / _ARCHIVE_DONE_ERR_DIR_NAME, "system")
+        add(f"系统目录 · {_ARCHIVE_DONE_PENDING_DIR_NAME}", "系统目录", "system",
+            _ARCHIVE_DONE_PENDING_DIR_NAME, system, system / _ARCHIVE_DONE_PENDING_DIR_NAME, "system")
+        add("系统目录 · 未分类", "系统目录", "system", "", system, system, "system")
+
+        # 旧版：监控目录下的 已处理压缩包/（保留可管理/可恢复）
         for key, label in (
             ("input_dir", "字体监控目录"),
             ("ass_dir", "ASS 字幕检查目录"),
@@ -9271,14 +9508,14 @@ class Zitifenlei(_PluginBase):
             if not raw:
                 continue
             base = Path(raw)
-            done = base / _ARCHIVE_DONE_DIR_NAME
-            if not done.is_dir():
+            legacy = base / _ARCHIVE_DONE_DIR_NAME
+            if not legacy.is_dir():
                 continue
-            add(f"{label} · {_ARCHIVE_DONE_OK_DIR_NAME}", label, key,
-                _ARCHIVE_DONE_OK_DIR_NAME, base, done / _ARCHIVE_DONE_OK_DIR_NAME, "system")
-            add(f"{label} · {_ARCHIVE_DONE_ERR_DIR_NAME}", label, key,
-                _ARCHIVE_DONE_ERR_DIR_NAME, base, done / _ARCHIVE_DONE_ERR_DIR_NAME, "system")
-            add(f"{label} · 未分类", label, key, "", base, done, "system")
+            add(f"旧版 · {label} · {_ARCHIVE_DONE_OK_DIR_NAME}", label, key,
+                _ARCHIVE_DONE_OK_DIR_NAME, base, legacy / _ARCHIVE_DONE_OK_DIR_NAME, "legacy")
+            add(f"旧版 · {label} · {_ARCHIVE_DONE_ERR_DIR_NAME}", label, key,
+                _ARCHIVE_DONE_ERR_DIR_NAME, base, legacy / _ARCHIVE_DONE_ERR_DIR_NAME, "legacy")
+            add(f"旧版 · {label} · 未分类", label, key, "", base, legacy, "legacy")
 
         mode = str(self.get_resource_or_config("archive_done_mode") or "system").strip().lower()
         raw = str(self.get_resource_or_config("archive_done_dir") or "").strip()
@@ -9289,6 +9526,8 @@ class Zitifenlei(_PluginBase):
                     _ARCHIVE_DONE_OK_DIR_NAME, base, base / _ARCHIVE_DONE_OK_DIR_NAME, "custom")
                 add(f"自定义目录 · {_ARCHIVE_DONE_ERR_DIR_NAME}", "自定义目录", "custom",
                     _ARCHIVE_DONE_ERR_DIR_NAME, base, base / _ARCHIVE_DONE_ERR_DIR_NAME, "custom")
+                add(f"自定义目录 · {_ARCHIVE_DONE_PENDING_DIR_NAME}", "自定义目录", "custom",
+                    _ARCHIVE_DONE_PENDING_DIR_NAME, base, base / _ARCHIVE_DONE_PENDING_DIR_NAME, "custom")
                 add("自定义目录 · 未分类", "自定义目录", "custom", "", base, base, "custom")
         return roots
 
@@ -9307,14 +9546,15 @@ class Zitifenlei(_PluginBase):
                     "hint": "",
                 }
             ]
-        # 系统模式不逐个列出监控目录：统一显示“系统目录”，实际位置在各自目录下的 已处理压缩包/
+        # 系统模式 = 插件数据目录/archives/（不放到监控目录里）
+        system = self._system_archive_root()
         return [
             {
-                "label": "系统目录",
-                "path": "",
+                "label": "系统目录（插件数据）",
+                "path": str(system),
                 "mode": "system",
-                "exists": True,
-                "hint": "跟随各监控目录，存放在该目录下的「已处理压缩包/」",
+                "exists": system.is_dir(),
+                "hint": "已处理/ 与 错误/ 子目录都在这里",
             }
         ]
 
@@ -9395,6 +9635,9 @@ class Zitifenlei(_PluginBase):
                     if root.get("mode") == "custom":
                         sidecar = self._archive_sidecar_for(f)
                         can_restore = sidecar.is_file()
+                    locked = root.get("category") == _ARCHIVE_DONE_PENDING_DIR_NAME
+                    if locked:
+                        can_restore = False
                     items.append(
                         {
                             "path": str(f),
@@ -9407,6 +9650,7 @@ class Zitifenlei(_PluginBase):
                             "size": int(st.st_size),
                             "mtime": int(st.st_mtime),
                             "can_restore": bool(can_restore),
+                            "locked": bool(locked),
                         }
                     )
             except Exception as err:
@@ -9417,10 +9661,111 @@ class Zitifenlei(_PluginBase):
                 "items": items,
                 "count": len(items),
                 "total_size": sum(int(item.get("size") or 0) for item in items),
-                "categories": [_ARCHIVE_DONE_OK_DIR_NAME, _ARCHIVE_DONE_ERR_DIR_NAME, "未分类"],
+                "categories": [
+                    _ARCHIVE_DONE_OK_DIR_NAME,
+                    _ARCHIVE_DONE_ERR_DIR_NAME,
+                    _ARCHIVE_DONE_PENDING_DIR_NAME,
+                    "未分类",
+                ],
                 "locations": self._processed_archive_locations(),
             }
         )
+
+    def api_unlock_tasks(self, operation: str = "") -> Dict[str, Any]:
+        """检查/子集化页用：查询等待解压码的任务。"""
+        op = str(operation or "").strip().lower()
+        tasks = [
+            item for item in self._unlock_tasks()
+            if not op or str(item.get("operation") or "") in (op, "both")
+        ]
+        return self._ok({"items": tasks, "count": len(tasks)})
+
+    async def api_processed_archive_unlock(self, request: Request = None) -> Dict[str, Any]:
+        """用解压码解锁「待解压/」里的副本，并把解出的文件交给对应目录处理。"""
+        if not self._enabled:
+            return self._err("插件已停用，请先在设置中启用")
+        body: Dict[str, Any] = {}
+        try:
+            if request is not None:
+                data = await request.json()
+                if isinstance(data, dict):
+                    body = data
+        except Exception:
+            body = {}
+        found = self._safe_processed_archive(str(body.get("path") or ""))
+        if not found:
+            return self._err("压缩包不存在或不在「已处理压缩包」目录内")
+        root, target = found
+        if root.get("category") != _ARCHIVE_DONE_PENDING_DIR_NAME:
+            return self._err("该压缩包不在「待解压/」，无需输入解压码")
+        password = str(body.get("password") or "")
+        if not password:
+            return self._err("请输入解压码")
+        action = str(body.get("action") or "font").strip().lower()
+        if action not in ("font", "check", "subset"):
+            return self._err("请选择要执行的操作")
+        key = {"font": "input_dir", "check": "ass_dir", "subset": "subset_dir"}[action]
+        label = {"font": "字体监控目录", "check": "ASS 字幕检查目录", "subset": "ASS 自动子集化目录"}[action]
+        raw_dir = str(self.get_resource_or_config(key) or "").strip()
+        if not raw_dir:
+            return self._err(f"未配置「{label}」，无法继续")
+        dest_dir = Path(raw_dir)
+        if not dest_dir.is_dir():
+            return self._err(f"「{label}」目录不存在: {raw_dir}")
+        exts = FONT_EXTENSIONS if action == "font" else ASS_EXTENSIONS
+        tmp_root = Path(self._tmp_dir) if self._tmp_dir else Path(tempfile.gettempdir())
+        extract_dir = tmp_root / f"unlock_{uuid.uuid4().hex}"
+        try:
+            result = arch.extract_archive(
+                target,
+                extract_dir,
+                exts,
+                max_members=_ARCHIVE_MAX_MEMBERS,
+                max_total_bytes=MAX_UPLOAD_TOTAL_BYTES,
+                max_member_bytes=max_font_file_bytes() if action == "font" else MAX_ASS_FILE_BYTES,
+                password=password,
+            )
+            if result.password_required:
+                return self._err("解压码错误，或该 zip 使用了不支持的 AES 加密（请用 7z/unar）")
+            files = [Path(item.path) for item in result.files]
+            if not files:
+                detail = "；".join(reason for _member, reason in (result.skipped + result.errors)[:3])
+                return self._err("没有可处理的文件" + (f"：{detail}" if detail else ""))
+            copied = 0
+            for src in files:
+                try:
+                    dest = self._unique_archive_dest(dest_dir, src.name)
+                    shutil.copy2(src, dest)
+                    copied += 1
+                except Exception:
+                    continue
+            if not copied:
+                return self._err("解压成功，但复制到监控目录失败")
+            self._forget_archive_done([dest_dir / target.name])
+            self._remove_unlock_task(str(target))
+            try:
+                cleanup = str(self.get_resource_or_config("archive_cleanup_action") or "delete")
+                if cleanup == "move":
+                    done_dir = root["base"] / _ARCHIVE_DONE_OK_DIR_NAME
+                    done_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(target), str(self._unique_archive_dest(done_dir, target.name)))
+                else:
+                    target.unlink(missing_ok=True)
+                self._archive_sidecar_for(target).unlink(missing_ok=True)
+                self._prune_empty_dirs(target.parent, root["dir"])
+            except Exception:
+                pass
+            if self._db is not None:
+                try:
+                    self._db.add_log(f"压缩包已解锁：{target.name} → {label}", "info")
+                except Exception:
+                    pass
+            return self._ok(
+                {"copied": copied, "target": label},
+                f"已解锁并交给{label}处理（{copied} 个文件）",
+            )
+        finally:
+            shutil.rmtree(extract_dir, ignore_errors=True)
 
     async def api_processed_archive_remove(self, request: Request = None) -> Dict[str, Any]:
         """删除「已处理压缩包」里的指定文件（不碰原监控目录里的文件）。"""
@@ -9448,6 +9793,7 @@ class Zitifenlei(_PluginBase):
             try:
                 target.unlink()
                 self._archive_sidecar_for(target).unlink(missing_ok=True)
+                self._remove_unlock_task(str(target))
                 removed += 1
                 self._prune_empty_dirs(target.parent, root["dir"])
             except Exception as err:
@@ -9480,17 +9826,21 @@ class Zitifenlei(_PluginBase):
         if not found:
             return self._err("压缩包不存在或不在「已处理压缩包」目录内")
         root, target = found
-        dest_dir = Path(root["base"])
-        if root.get("mode") == "custom":
-            sidecar = self._archive_sidecar_for(target)
-            try:
-                meta = json.loads(sidecar.read_text(encoding="utf-8")) if sidecar.is_file() else {}
-            except Exception:
-                meta = {}
-            original = str(meta.get("original_dir") or "").strip()
-            if not original:
-                return self._err("自定义目录缺少原目录记录，无法恢复；请手动移动文件")
+        sidecar = self._archive_sidecar_for(target)
+        try:
+            meta = json.loads(sidecar.read_text(encoding="utf-8")) if sidecar.is_file() else {}
+        except Exception:
+            meta = {}
+        original = str(meta.get("original_dir") or "").strip()
+        if original:
             dest_dir = Path(original)
+        elif root.get("mode") == "legacy":
+            # 旧版目录没有 sidecar：按当时所在的监控目录恢复
+            dest_dir = Path(root["base"])
+        elif root.get("mode") == "custom":
+            return self._err("自定义目录缺少原目录记录，无法恢复；请手动移动文件")
+        else:
+            return self._err("系统目录缺少原目录记录，无法恢复；请使用「处理…」选择目标目录")
         if not dest_dir.is_dir():
             return self._err(f"原目录不存在或不可用: {dest_dir}")
         try:
@@ -9560,7 +9910,7 @@ class Zitifenlei(_PluginBase):
             return self._err(f"移动失败: {err}")
 
     async def api_processed_archive_clear(self, request: Request = None) -> Dict[str, Any]:
-        """清空「已处理压缩包」：可按分类清空（category = 已处理/错误/未分类）。"""
+        """清空「已处理压缩包」：可按分类清空（category = 待解压/已处理/错误/未分类）。"""
         if not self._enabled:
             return self._err("插件已停用，请先在设置中启用")
         body: Dict[str, Any] = {}
@@ -9585,6 +9935,7 @@ class Zitifenlei(_PluginBase):
                     try:
                         f.unlink()
                         self._archive_sidecar_for(f).unlink(missing_ok=True)
+                        self._remove_unlock_task(str(f))
                         removed += 1
                     except Exception as err:
                         errors.append(f"{f.name}: {err}")
@@ -9612,6 +9963,8 @@ class Zitifenlei(_PluginBase):
             {"path": "/archives/processed/restore", "endpoint": self.api_processed_archive_restore, "methods": ["POST"], "auth": "bear", "summary": "把已处理压缩包恢复到原监控目录"},
             {"path": "/archives/processed/move", "endpoint": self.api_processed_archive_move, "methods": ["POST"], "auth": "bear", "summary": "把已处理压缩包移到指定监控目录"},
             {"path": "/archives/processed/entries", "endpoint": self.api_processed_archive_entries, "methods": ["GET"], "auth": "bear", "summary": "在线查看已处理压缩包内容"},
+            {"path": "/archives/processed/unlock", "endpoint": self.api_processed_archive_unlock, "methods": ["POST"], "auth": "bear", "summary": "用解压码解锁待解压压缩包"},
+            {"path": "/archives/unlock/tasks", "endpoint": self.api_unlock_tasks, "methods": ["GET"], "auth": "bear", "summary": "查询等待解压码的任务"},
             {"path": "/archives/processed/clear", "endpoint": self.api_processed_archive_clear, "methods": ["POST"], "auth": "bear", "summary": "清空已处理压缩包"},
             {"path": "/task/status", "endpoint": self.api_task_status, "methods": ["GET"], "auth": "bear", "summary": "后台任务状态（供前端拦截停用插件）"},
             {"path": "/stats", "endpoint": self.api_stats, "methods": ["GET"], "auth": "bear", "summary": "仪表盘统计"},

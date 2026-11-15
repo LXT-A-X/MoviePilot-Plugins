@@ -52,7 +52,7 @@ const depsOk = computed(() => deps.value.total > 0 && deps.value.ok_count === de
 
 // 重新安装单个缺失依赖（pip，白名单：uharfbuzz / fonttools / watchdog）
 async function installDep(d) {
-  if (!d || d.ok || installingKey.value) return
+  if (!d || installingKey.value) return
   installingKey.value = d.key
   try {
     await apiModule.post(props.api, '/deps/install', { package: d.key })
@@ -226,17 +226,17 @@ watch(() => props.refreshKey, () => {
               </v-list-item-subtitle>
               <template #append>
                 <v-btn
-                  v-if="!d.ok && ['uharfbuzz', 'fonttools', 'watchdog'].includes(d.key)"
+                  v-if="['uharfbuzz', 'fonttools', 'watchdog'].includes(d.key)"
                   size="small"
                   variant="tonal"
                   color="primary"
                   :loading="installingKey === d.key"
                   :disabled="!!installingKey || installingExtract"
-                  title="通过 pip 重新安装该依赖"
+                  :title="d.ok ? '通过 pip 重新安装该依赖（可修复损坏依赖）' : '通过 pip 安装该依赖'"
                   @click="installDep(d)"
                 >
-                  <v-icon start size="14">mdi-download</v-icon>
-                  重新安装
+                  <v-icon start size="14">{{ d.ok ? 'mdi-refresh' : 'mdi-download' }}</v-icon>
+                  {{ d.ok ? '重装' : '安装' }}
                 </v-btn>
                 <v-btn
                   v-if="d.key === 'extract_tools' && d.can_install !== false"
@@ -245,18 +245,18 @@ watch(() => props.refreshKey, () => {
                   color="warning"
                   :loading="installingExtract"
                   :disabled="!!installingKey || installingExtract"
-                  title="在容器内用 apt/apk 安装 unar/7zip（需要容器联网，镜像更新后需重装）"
+                  :title="d.ok ? '在容器内重新安装/修复解压工具' : '在容器内用 apt/apk 安装 unar/7zip（需要容器联网）'"
                   @click="installArchiveTools"
                 >
                   <v-icon start size="14">mdi-archive-arrow-up-outline</v-icon>
-                  安装解压工具
+                  {{ d.ok ? '重装解压工具' : '安装解压工具' }}
                 </v-btn>
               </template>
             </v-list-item>
           </v-list>
           <div class="zt-deps-hint text-body-2">
-            依赖由 MoviePilot 安装插件时按 requirements.txt 自动安装；缺失时可点「重新安装」用 pip 补齐
-            （uharfbuzz 安装后立即生效，fontTools/watchdog 需重启插件）。
+            依赖由 MoviePilot 安装插件时按 requirements.txt 自动安装；异常时点「安装」，
+            正常时也可点「重装」修复（uharfbuzz 安装后立即生效，fontTools/watchdog 需重启插件）。
           </div>
         </v-card-text>
       </v-card>

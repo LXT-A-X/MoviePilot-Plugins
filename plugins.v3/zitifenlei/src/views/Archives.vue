@@ -13,6 +13,11 @@ const loading = ref(false)
 const busy = ref('')
 const filter = ref('all')
 const viewMode = ref('list')
+const selected = ref([])
+const processDialog = ref(false)
+const processItems = ref([])
+const processAction = ref('restore')
+const processBusy = ref(false)
 const configDirs = ref({ input: '', ass: '', subset: '' })
 const locations = ref([])
 const entriesDialog = ref(false)
@@ -75,8 +80,19 @@ const moveDialog = ref(false)
 const moveItem = ref(null)
 const moveTarget = ref('')
 const moveBusy = ref(false)
+const unlockDialog = ref(false)
+const unlockItems = ref([])
+const unlockPassword = ref('')
+const unlockAction = ref('font')
+const unlockBusy = ref(false)
+const unlockActions = [
+  { title: '字体归档', value: 'font' },
+  { title: '字幕检查', value: 'check' },
+  { title: '字幕子集化', value: 'subset' },
+]
 const FILTERS = [
   { title: '全部', value: 'all' },
+  { title: '待解压', value: '待解压' },
   { title: '已处理', value: '已处理' },
   { title: '错误', value: '错误' },
   { title: '未分类（旧版）', value: '未分类' },
@@ -89,6 +105,16 @@ const filtered = computed(() => (
 const totalSize = computed(() => (
   filtered.value.reduce((sum, item) => sum + (Number(item.size) || 0), 0)
 ))
+const selectedItems = computed(() => (
+  items.value.filter((item) => selected.value.includes(item.path))
+))
+const processOptions = computed(() => {
+  const options = [{ title: '移回原目录（会重新处理）', value: 'restore' }]
+  if (configDirs.value.input) options.push({ title: '字体归档（移到字体监控目录）', value: 'font' })
+  if (configDirs.value.ass) options.push({ title: '字幕检查（移到 ASS 字幕检查目录）', value: 'ass' })
+  if (configDirs.value.subset) options.push({ title: '字幕子集化（移到自动子集化目录）', value: 'subset' })
+  return options
+})
 const moveTargets = computed(() => {
   const candidates = [
     { title: '字体监控目录', value: 'input', dir: configDirs.value.input },
@@ -118,12 +144,47 @@ function fmtTime(ts) {
 function categoryColor(category) {
   if (category === '已处理') return 'success'
   if (category === '错误') return 'error'
+  if (category === '待解压') return 'warning'
   return 'grey'
 }
 function categoryIcon(category) {
   if (category === '已处理') return 'mdi-check-circle-outline'
   if (category === '错误') return 'mdi-alert-circle-outline'
+  if (category === '待解压') return 'mdi-lock-outline'
   return 'mdi-archive-outline'
+}
+function openUnlock(itemsToUnlock) {
+  const list = (Array.isArray(itemsToUnlock) ? itemsToUnlock : [itemsToUnlock]).filter((it) => it?.locked)
+  if (!list.length) return
+  unlockItems.value = list
+  unlockPassword.value = ''
+  unlockAction.value = 'font'
+  unlockDialog.value = true
+}
+async function doUnlock() {
+  const list = unlockItems.value.slice()
+  if (!list.length || !unlockPassword.value) return
+  unlockBusy.value = true
+  let ok = 0
+  const errors = []
+  for (const item of list) {
+    try {
+      await apiModule.post(props.api, '/archives/processed/unlock', {
+        path: item.path,
+        password: unlockPassword.value,
+        action: unlockAction.value,
+      })
+      ok += 1
+    } catch (e) {
+      errors.push(item.name + ': ' + (e.message || '解锁失败'))
+    }
+  }
+  unlockBusy.value = false
+  unlockDialog.value = false
+  unlockPassword.value = ''
+  selected.value = []
+  notify('已解锁 ' + ok + '/' + list.length + ' 个' + (errors.length ? '，失败 ' + errors.length + ' 个（可重试）' : ''), errors.length ? 'error' : 'success')
+  await load()
 }
 
 async function loadConfig() {
@@ -239,6 +300,77 @@ async function viewItem(item) {
   }
 }
 
+function toggleSelect(item) {
+  const idx = selected.value.indexOf(item.path)
+  if (idx >= 0) selected.value.splice(idx, 1)
+  else selected.value.push(item.path)
+}
+
+function toggleAll() {
+  if (selected.value.length === filtered.value.length) {
+    selected.value = []
+  } else {
+    selected.value = filtered.value.map((item) => item.path)
+  }
+}
+
+function openProcess(itemsToProcess) {
+  const list = Array.isArray(itemsToProcess) ? itemsToProcess : [itemsToProcess]
+  if (!list.length) return
+  processItems.value = list.slice()
+  processAction.value = processOptions.value[0]?.value || 'restore'
+  processDialog.value = true
+}
+
+async function applyProcess() {
+  const list = processItems.value.slice()
+  if (!list.length) return
+  const label = processOptions.value.find((opt) => opt.value === processAction.value)?.title || '处理'
+  if (!window.confirm('对 ' + list.length + ' 个压缩包执行：' + label + '？')) return
+  processBusy.value = true
+  let ok = 0
+  const errors = []
+  for (const item of list) {
+    try {
+      if (processAction.value === 'restore') {
+        await apiModule.post(props.api, '/archives/processed/restore', { path: item.path })
+      } else {
+        await apiModule.post(props.api, '/archives/processed/move', {
+          path: item.path,
+          target: processAction.value,
+        })
+      }
+      ok += 1
+    } catch (e) {
+      errors.push(item.name + ': ' + (e.message || '失败'))
+    }
+  }
+  processBusy.value = false
+  processDialog.value = false
+  selected.value = []
+  notify(
+    '已处理 ' + ok + '/' + list.length + ' 个' + (errors.length ? '，失败 ' + errors.length + ' 个' : ''),
+    errors.length ? 'error' : 'success',
+  )
+  await load()
+}
+
+async function bulkDelete() {
+  if (!selected.value.length) return
+  if (!window.confirm('删除选中的 ' + selected.value.length + ' 个压缩包？不可恢复。\n\n（只删副本，不影响原目录）')) return
+  busy.value = 'bulk-delete'
+  try {
+    const res = await apiModule.post(props.api, '/archives/processed/remove', { paths: selected.value.slice() })
+    notify(res.message || '已删除选中压缩包', 'success')
+    selected.value = []
+    await load()
+  } catch (e) {
+    notify(e.message || '批量删除失败')
+  } finally {
+    busy.value = ''
+  }
+}
+
 function openMove(item) {
   if (!item?.path) return
   moveItem.value = item
@@ -283,8 +415,10 @@ onActivated(() => {
     <div class="zt-page-desc">
       这里管理插件清理/留档的压缩包副本：<b>已处理/</b> 是成功处理后的副本，
       <b>错误/</b> 是放错目录、不支持格式或包内没有字体/字幕的留档。
-      「移回原目录」只会把压缩包移回它原来所在的目录并重新监控处理，
-      <b>不会撤销</b>已经归档的字体/已检查的字幕；删除只影响副本，不碰原目录文件。
+      「处理…」可选择字体归档 / 字幕检查 / 字幕子集化 / 移回原目录；
+      移回/移动都会清除已处理指纹，原目录仍是监控目录时会重新处理；
+      <b>不会撤销</b>已经归档的字体/已检查的字幕；
+      删除只影响副本，不碰原目录文件。
     </div>
 
     <div v-if="locations.length" class="zt-locations">
@@ -294,7 +428,7 @@ onActivated(() => {
       </div>
       <div v-for="loc in locations" :key="loc.label + loc.path" class="zt-loc">
         <span class="zt-loc-label">{{ loc.label }}</span>
-        <code v-if="loc.path" class="zt-loc-path">{{ loc.path }}</code>
+        <code v-if="loc.path" class="zt-loc-path" :title="loc.path">{{ loc.path }}</code>
         <span v-else class="zt-loc-hint">{{ loc.hint }}</span>
         <v-btn v-if="loc.path" icon size="x-small" variant="text" title="复制路径" @click="copyPath(loc.path)">
           <v-icon size="14">mdi-content-copy</v-icon>
@@ -331,6 +465,9 @@ onActivated(() => {
               <v-icon size="16">mdi-view-grid-outline</v-icon>
             </v-btn>
           </v-btn-toggle>
+          <v-btn size="small" variant="text" @click="toggleAll">
+            {{ selected.length === filtered.length && filtered.length ? '取消全选' : '全选' }}
+          </v-btn>
           <v-spacer></v-spacer>
           <span class="zt-count">{{ filtered.length }} 个 · {{ fmtSize(totalSize) }}</span>
           <v-btn
@@ -346,6 +483,20 @@ onActivated(() => {
         </div>
 
         <v-divider class="my-3"></v-divider>
+
+        <div v-if="selected.length" class="zt-bulkbar">
+          <span>已选 {{ selected.length }} 个</span>
+          <v-btn size="x-small" variant="tonal" @click="openProcess(selectedItems)">批量处理…</v-btn>
+          <v-btn
+            v-if="selectedItems.some((item) => item.locked)"
+            size="x-small"
+            variant="tonal"
+            color="warning"
+            @click="openUnlock(selectedItems.filter((item) => item.locked))"
+          >批量解锁</v-btn>
+          <v-btn size="x-small" variant="text" color="error" :loading="busy === 'bulk-delete'" @click="bulkDelete">批量删除</v-btn>
+          <v-btn size="x-small" variant="text" @click="selected = []">取消选择</v-btn>
+        </div>
 
         <div v-if="loading && !items.length" class="zt-empty">
           <v-progress-circular indeterminate color="primary" size="28"></v-progress-circular>
@@ -363,6 +514,13 @@ onActivated(() => {
             class="zt-row"
           >
             <div class="zt-row-main">
+              <v-checkbox
+                :model-value="selected.includes(item.path)"
+                hide-details
+                density="compact"
+                class="zt-row-check"
+                @update:model-value="toggleSelect(item)"
+              ></v-checkbox>
               <v-icon :color="categoryColor(item.category)" size="22" class="mr-3">
                 {{ categoryIcon(item.category) }}
               </v-icon>
@@ -373,6 +531,7 @@ onActivated(() => {
                     {{ item.category || '未分类' }}
                   </span>
                   <span>{{ item.source }}</span>
+                  <span v-if="item.locked" class="zt-lock-text">🔒 需要解压码</span>
                   <span>{{ fmtSize(item.size) }}</span>
                   <span>{{ fmtTime(item.mtime) }}</span>
                 </div>
@@ -387,23 +546,23 @@ onActivated(() => {
                 <v-icon start size="14">mdi-file-eye-outline</v-icon>查看
               </v-btn>
               <v-btn
+                v-if="item.locked"
                 size="x-small"
                 variant="tonal"
-                :disabled="!item.can_restore"
+                color="warning"
                 :loading="busy === item.path"
-                :title="item.can_restore ? '移回原目录（不会撤销已处理内容）' : '自定义目录缺少原目录记录，无法移回'"
-                @click="restoreItem(item)"
+                @click="openUnlock(item)"
               >
-                <v-icon start size="14">mdi-restore</v-icon>移回原目录
+                <v-icon start size="14">mdi-lock-open-variant-outline</v-icon>解锁
               </v-btn>
               <v-btn
-                v-if="item.category === '错误' && moveTargets.length"
+                v-else
                 size="x-small"
                 variant="tonal"
                 :loading="busy === item.path"
-                @click="openMove(item)"
+                @click="openProcess([item])"
               >
-                <v-icon start size="14">mdi-folder-move-outline</v-icon>移到…
+                <v-icon start size="14">mdi-cog-transfer-outline</v-icon>处理…
               </v-btn>
               <v-btn
                 size="x-small"
@@ -420,6 +579,13 @@ onActivated(() => {
         <div v-else class="zt-cards">
           <div v-for="item in filtered" :key="item.path" class="zt-card-item">
             <div class="zt-card-head">
+              <v-checkbox
+                :model-value="selected.includes(item.path)"
+                hide-details
+                density="compact"
+                class="zt-row-check"
+                @update:model-value="toggleSelect(item)"
+              ></v-checkbox>
               <v-icon :color="categoryColor(item.category)" size="24">
                 {{ categoryIcon(item.category) }}
               </v-icon>
@@ -430,6 +596,7 @@ onActivated(() => {
                     {{ item.category || '未分类' }}
                   </span>
                   <span>{{ item.source }}</span>
+                  <span v-if="item.locked" class="zt-lock-text">🔒 需要解压码</span>
                 </div>
               </div>
             </div>
@@ -443,19 +610,20 @@ onActivated(() => {
               </v-btn>
               <v-spacer></v-spacer>
               <v-btn
+                v-if="item.locked"
                 size="x-small"
                 variant="tonal"
-                :disabled="!item.can_restore"
+                color="warning"
                 :loading="busy === item.path"
-                @click="restoreItem(item)"
-              >移回</v-btn>
+                @click="openUnlock(item)"
+              >解锁</v-btn>
               <v-btn
-                v-if="item.category === '错误' && moveTargets.length"
+                v-else
                 size="x-small"
                 variant="tonal"
                 :loading="busy === item.path"
-                @click="openMove(item)"
-              >移到…</v-btn>
+                @click="openProcess([item])"
+              >处理…</v-btn>
               <v-btn
                 size="x-small"
                 variant="text"
@@ -469,33 +637,83 @@ onActivated(() => {
       </v-card-text>
     </v-card>
 
-    <v-dialog v-model="moveDialog" max-width="460px">
+    <v-dialog v-model="unlockDialog" max-width="520px">
       <v-card class="zt-card-bg">
         <v-card-title>
-          <v-icon start size="20">mdi-folder-move-outline</v-icon>
-          移到指定目录
+          <v-icon start size="20">mdi-lock-open-variant-outline</v-icon>
+          输入解压码
         </v-card-title>
         <v-card-text>
-          <div class="zt-hint move-name">{{ moveItem?.name }}</div>
+          <div class="zt-hint move-name">
+            {{ unlockItems.length > 1 ? '已选 ' + unlockItems.length + ' 个加密包' : (unlockItems[0]?.name || '') }}
+          </div>
+          <v-text-field
+            v-model="unlockPassword"
+            type="password"
+            label="解压码"
+            density="compact"
+            variant="outlined"
+            class="mt-3"
+            autocomplete="off"
+            hint="只用于本次解锁，不保存；多个包会尝试同一个密码"
+            persistent-hint
+          ></v-text-field>
           <v-select
-            v-model="moveTarget"
-            :items="moveTargets"
+            v-model="unlockAction"
+            :items="unlockActions"
             item-title="title"
             item-value="value"
-            label="目标监控目录"
+            label="解锁后执行"
             density="compact"
             variant="outlined"
             class="mt-3"
           ></v-select>
           <div class="zt-hint">
-            移动后会清除已处理指纹并按新目录重新处理；如果目标目录类型与文件不匹配，会被移到「错误/」。
+            解密后的文件会复制到对应监控目录再处理；原种子/原压缩包不会被删除。
+            密码错误时加密包继续留在「待解压/」，可重试。
           </div>
         </v-card-text>
         <v-card-actions>
           <v-spacer></v-spacer>
-          <v-btn variant="text" @click="moveDialog = false">取消</v-btn>
-          <v-btn color="primary" variant="tonal" :loading="moveBusy" :disabled="!moveTarget" @click="doMove">
-            移动
+          <v-btn variant="text" @click="unlockDialog = false">取消</v-btn>
+          <v-btn color="primary" variant="tonal" :loading="unlockBusy" :disabled="!unlockPassword" @click="doUnlock">
+            解锁
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <v-dialog v-model="processDialog" max-width="520px">
+      <v-card class="zt-card-bg">
+        <v-card-title>
+          <v-icon start size="20">mdi-cog-transfer-outline</v-icon>
+          选择处理方式
+        </v-card-title>
+        <v-card-text>
+          <div class="zt-hint move-name">
+            {{ processItems.length > 1 ? '已选 ' + processItems.length + ' 个压缩包' : (processItems[0]?.name || '') }}
+          </div>
+          <v-select
+            v-model="processAction"
+            :items="processOptions"
+            item-title="title"
+            item-value="value"
+            label="这个压缩包要执行哪个操作"
+            density="compact"
+            variant="outlined"
+            class="mt-3"
+          ></v-select>
+          <div class="zt-hint">
+            「移回原目录」会清除该压缩包的已处理指纹，原目录仍是被监控的字体/字幕目录时，插件会重新处理它。
+            如果它原来放错在字体库等非监控目录，请选「字体归档」或「字幕检查」，不要把文件移回错误位置。
+            移动/移回都不会撤销已归档字体或已检查字幕。
+          </div>
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer></v-spacer>
+          <v-btn variant="text" @click="processDialog = false">取消</v-btn>
+          <v-btn color="primary" variant="tonal" :loading="processBusy" :disabled="!processAction" @click="applyProcess">
+            执行
           </v-btn>
         </v-card-actions>
       </v-card>
@@ -603,6 +821,10 @@ onActivated(() => {
   flex: 0 0 auto;
   opacity: 0.65;
 }
+.zt-lock-text {
+  color: rgb(var(--v-theme-warning));
+  opacity: 1;
+}
 .zt-loc-hint {
   flex: 1 1 auto;
   min-width: 0;
@@ -696,6 +918,25 @@ onActivated(() => {
 }
 .zt-filter {
   max-width: 180px;
+}
+.zt-row-check {
+  flex: 0 0 auto;
+  margin-inline-end: 2px;
+}
+.zt-row-check :deep(.v-selection-control) {
+  min-height: 24px;
+}
+.zt-bulkbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  border-radius: 8px;
+  background: rgba(var(--v-theme-primary), 0.12);
+  border: 1px solid rgba(var(--v-theme-primary), 0.25);
+  font-size: 12px;
 }
 .zt-view-toggle :deep(.v-btn--active) {
   background: rgba(var(--v-theme-primary), 0.22);
@@ -795,6 +1036,7 @@ onActivated(() => {
 }
 .zt-cat.is-success { color: rgb(var(--v-theme-success)); }
 .zt-cat.is-error { color: rgb(var(--v-theme-error)); }
+.zt-cat.is-warning { color: rgb(var(--v-theme-warning)); }
 .zt-row-actions {
   display: flex;
   flex: 0 0 auto;
@@ -852,6 +1094,12 @@ onActivated(() => {
   .entry-name {
     overflow-wrap: anywhere;
     word-break: normal;
+  }
+  .zt-loc-path {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
   }
 }
 </style>

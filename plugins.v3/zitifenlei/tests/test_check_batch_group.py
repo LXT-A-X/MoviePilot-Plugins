@@ -82,7 +82,7 @@ def test_ass_upload_assigns_batch(tmp_path):
     a.write_text("[Script Info]", encoding="utf-8")
     b.write_text("[Script Info]", encoding="utf-8")
 
-    async def _fake_receive(_uploads, _exts, prefix="ass"):
+    async def _fake_receive(_uploads, _exts, prefix="ass", operation=""):
         return (
             [
                 {"file_name": "a.ass", "path": str(a), "size": 13, "from_archive": "Pack.zip"},

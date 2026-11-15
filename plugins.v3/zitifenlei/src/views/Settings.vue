@@ -18,7 +18,7 @@ const DEFAULT_CONFIG = {
   ass_dir: '',
   subset_dir: '',
   // 字体监控目录内的压缩包：解压整理成功后是否自动清理（只作用于直接归档成功的包）
-  archive_cleanup_enabled: false,
+  archive_cleanup_enabled: true,
   // 清理方式：delete = 正常清理（直接删除）；move = 保留（移到「已处理/」）
   archive_cleanup_action: 'delete',
   // 已处理压缩包根目录：system=各监控目录下；custom=统一自定义目录
@@ -52,9 +52,10 @@ const DEFAULT_CONFIG = {
   torrent_enabled: false,
   torrent_scan_interval_min: 30,
   torrent_keywords: 'font,fonts,字体',
+  torrent_keyword_mode: 'default',
   torrent_max_file_mb: 2048,
   torrent_max_files: 500,
-  torrent_to_pending: false,
+
 }
 
 // 数据源：宿主 initial-config（默认值+已存配置）；进入页面后立即用后端权威配置回填，
@@ -66,15 +67,28 @@ const archiveModes = [
   { title: '复制保留原文件', value: 'copy', description: '归档时复制字体到字体库目录' },
   { title: '移动原文件', value: 'move', description: '归档时移动字体到字体库目录' },
 ]
-// 压缩包清理方式（archive_cleanup_action）：长文案用单选而非下拉，手机端不截断
-const archiveCleanupActions = [
-  { title: '正常清理：直接删除（不保留，默认）', value: 'delete', description: '处理成功后立即删除原压缩包：不再占用空间，但删了找不回' },
-  { title: '保留：移到「已处理」/（可找回）', value: 'move', description: '在系统目录或自定义根目录下的「已处理/」单独存放，确认无用后可自行删除' },
+// 压缩包处理方式：delete=正常清理删除；retain=保留移到已处理/
+const torrentKeywordModes = [
+  { title: '默认（font / fonts / 字体）', value: 'default' },
+  { title: '自定义（追加默认关键词）', value: 'custom' },
 ]
+const archiveCleanupModes = [
+  { title: '正常清理：直接删除（默认）', value: 'delete' },
+  { title: '保留：移到「已处理/」（可找回）', value: 'retain' },
+]
+const cleanupMode = computed({
+  get() {
+    return config.value.archive_cleanup_action === 'move' ? 'retain' : 'delete'
+  },
+  set(value) {
+    config.value.archive_cleanup_enabled = true
+    config.value.archive_cleanup_action = value === 'retain' ? 'move' : 'delete'
+  },
+})
 // 字幕压缩包：一个包常同时有 SC（简体）/ TC（繁体）两个字幕，按文件名选择要处理的
 // 已处理压缩包根目录
 const archiveDoneModes = [
-  { title: '系统目录（跟随各监控目录）', value: 'system' },
+  { title: '系统目录（插件数据目录）', value: 'system' },
   { title: '自定义目录（统一存放）', value: 'custom' },
 ]
 const subtitleArchiveFilters = [
@@ -217,9 +231,6 @@ const torrentBusy = ref(false)
 const torrentClearing = ref(false)
 // 种子卡默认折叠：折叠时只显示总开关 + 一行状态摘要
 const torrentExpanded = ref(false)
-// 一键安装容器内解压工具（.7z/.rar 上传与种子字体收集都依赖它）
-const archiveToolInstalling = ref(false)
-
 const TORRENT_STATUS_TEXT = { done: '完成', empty: '无字体', failed: '失败', partial: '部分成功' }
 const recordStatusText = (s) => TORRENT_STATUS_TEXT[s] || s || ''
 const torrentToolText = computed(() => {
@@ -291,21 +302,6 @@ async function scanTorrents() {
     emit('notify', e.message || '检查下载器失败')
   } finally {
     torrentBusy.value = false
-  }
-}
-
-// 一键在容器内安装解压工具（apt/apk 安装 unar/7zip）；容器重建/更新镜像后需要重新安装
-async function installArchiveTools() {
-  if (archiveToolInstalling.value) return
-  archiveToolInstalling.value = true
-  try {
-    const res = await apiModule.post(props.api, '/archive/tools/install', {})
-    emit('notify', res?.message || '解压工具安装完成', 'success')
-    await loadTorrentStatus()
-  } catch (e) {
-    emit('notify', e.message || '安装解压工具失败')
-  } finally {
-    archiveToolInstalling.value = false
   }
 }
 
@@ -476,35 +472,19 @@ watch(() => config.value.auto_subset, (v) => {
         <!-- 压缩包处理 -->
         <div class="zt-subblock mt-4">
           <div class="zt-option-label mb-1">压缩包处理</div>
-          <div class="zt-switch-row">
-            <div class="flex-grow-1">
-              <div class="zt-switch-title">解压整理后自动清理压缩包</div>
-              <div class="zt-switch-desc">作用于字体监控目录（只解字体）和两个 ASS 字幕目录（只解 .ass）：处理成功后按下面方式清理；正常清理默认直接删除，选「保留」才移到「已处理/」；待定/失败/放错目录不会走这条</div>
-            </div>
-            <v-switch v-model="config.archive_cleanup_enabled" color="primary" density="compact" hide-details></v-switch>
-          </div>
-          <v-radio-group
-            v-model="config.archive_cleanup_action"
+          <div class="zt-option-label mb-1">压缩包处理方式</div>
+          <v-select
+            v-model="cleanupMode"
+            :items="archiveCleanupModes"
+            item-title="title"
+            item-value="value"
             density="compact"
-            :disabled="!config.archive_cleanup_enabled"
-            :class="['mt-1 zt-cleanup-radios', { 'is-off': !config.archive_cleanup_enabled }]"
-          >
-            <v-radio
-              v-for="act in archiveCleanupActions"
-              :key="act.value"
-              :value="act.value"
-            >
-              <template #label>
-                <div>
-                  <div class="zt-radio-title">{{ act.title }}</div>
-                  <div class="zt-radio-desc">{{ act.description }}</div>
-                </div>
-              </template>
-            </v-radio>
-          </v-radio-group>
+            variant="outlined"
+            hide-details
+          ></v-select>
           <div class="zt-hint">
-            开 = 自动执行开启、处理无失败时清理：默认直接删除；选「保留」才移到「已处理/」。
-            放错目录、不支持格式 → 移到「错误/」；待确认/待检查/待处理、有失败 → 保留。
+            处理成功后压缩包只有两种去向：正常清理 = 直接删除；保留 = 移到「已处理/」可找回。
+            放错目录/不支持格式会移到「错误/」；待确认/待检查/待处理、有失败时保留。
           </div>
 
           <div class="zt-option-label mb-1 mt-4">已处理压缩包根目录</div>
@@ -529,8 +509,8 @@ watch(() => config.value.auto_subset, (v) => {
             persistent-hint
           ></v-text-field>
           <div class="zt-hint">
-            系统目录 = 各监控目录下的「已处理压缩包/」；自定义目录 = 三个来源统一放一个根目录。
-            放错目录的压缩包会移到「错误/」并提醒，不再留在原目录。
+            系统目录 = 插件数据目录下的 archives/（默认，不放到监控目录里）；自定义目录 = 统一放你指定的根目录。
+            放错目录/不支持格式的压缩包会移到「错误/」并提醒，不再留在原目录。
           </div>
 
           <div class="zt-option-label mb-1 mt-4">字幕压缩包：处理哪些字幕</div>
@@ -561,24 +541,6 @@ watch(() => config.value.auto_subset, (v) => {
           </div>
         </div>
 
-        <!-- 解压工具（从种子卡移入：上传压缩包与种子收集都依赖它） -->
-        <div class="zt-subblock mt-4">
-          <div class="zt-option-label mb-1">解压工具</div>
-          <div class="zt-hint">解压能力：{{ torrentToolStatusText }}<span v-if="torrentStatus.tools?.hint"> · {{ torrentStatus.tools.hint }}</span></div>
-          <div class="d-flex flex-wrap ga-2 mt-2">
-            <v-btn
-              size="small" color="warning" variant="tonal"
-              :loading="archiveToolInstalling"
-              :disabled="torrentStatus.tools?.can_install === false"
-              title="在容器内用 apt/apk 安装/修复 unar（可解 .7z/.rar）；容器重建后需要重新安装"
-              @click="installArchiveTools"
-            >
-              <v-icon start size="16">mdi-archive-arrow-up-outline</v-icon>
-              安装/修复解压工具
-            </v-btn>
-          </div>
-          <div class="zt-hint">安装/修复仅在容器内生效，容器重建或更新镜像后需要重新点一次。</div>
-        </div>
       </v-card-text>
     </v-card>
 
@@ -800,11 +762,22 @@ watch(() => config.value.auto_subset, (v) => {
               ></v-text-field>
             </v-col>
             <v-col cols="12" sm="6">
+              <v-select
+                v-model="config.torrent_keyword_mode"
+                :items="torrentKeywordModes"
+                item-title="title"
+                item-value="value"
+                label="压缩包关键词"
+                density="compact" variant="outlined"
+                hide-details
+              ></v-select>
+            </v-col>
+            <v-col v-if="config.torrent_keyword_mode === 'custom'" cols="12">
               <v-text-field
                 v-model="config.torrent_keywords"
-                label="关键词（逗号分隔）"
+                label="自定义关键词（逗号分隔，追加到默认关键词）"
                 density="compact" variant="outlined"
-                hint="只对压缩包生效；裸字体文件命中后缀即收，不看关键词"
+                hint="默认：font / fonts / 字体；这里填的名称会追加"
                 persistent-hint
               ></v-text-field>
             </v-col>
@@ -829,13 +802,6 @@ watch(() => config.value.auto_subset, (v) => {
               ></v-text-field>
             </v-col>
           </v-row>
-          <div class="zt-switch-row mt-2">
-            <div class="flex-grow-1">
-              <div class="zt-switch-title">收集后进「待整理」</div>
-              <div class="zt-switch-desc">开：截取到的字体先进待整理等你确认；关：直接归档进字体库（默认，走哈希去重与厂商归档）</div>
-            </div>
-            <v-switch v-model="config.torrent_to_pending" color="primary" density="compact" hide-details></v-switch>
-          </div>
           <div class="zt-hint">
             下载器：{{ torrentDownloaderStatusText }}<br>
             解压能力：{{ torrentToolStatusText }}<span v-if="torrentStatus.tools?.hint"> · {{ torrentStatus.tools.hint }}</span><br>

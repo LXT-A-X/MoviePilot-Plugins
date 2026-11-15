@@ -124,18 +124,19 @@ def test_monitor_dirs_requires_configured_existing_dirs(tmp_path):
     assert str((tmp_path / "missing-dir").resolve()) not in dirs
 
 
-def test_archive_cleanup_off_keeps_package(tmp_path):
+def test_archive_cleanup_default_deletes_package(tmp_path):
     plugin, handled = _page_plugin(tmp_path)
     archive = tmp_path / "input" / "pack.zip"
     _make_zip(archive)
 
     assert plugin._handle_font_archive(archive) is True
-    assert archive.is_file()
+    # 成功处理后只有两种去向：正常清理（默认删除）或保留；默认删除
+    assert not archive.exists()
     assert handled
     entry = plugin._notify_agg["archives"][-1]
     assert entry["added"] == 1
-    assert entry["action"] == ""
-    assert "未开启" in entry["keep_reason"]
+    assert entry["action"] == "deleted"
+    assert entry["keep_reason"] == ""
 
 
 def test_archive_cleanup_move_to_done_dir(tmp_path):
@@ -145,7 +146,7 @@ def test_archive_cleanup_move_to_done_dir(tmp_path):
 
     assert plugin._handle_font_archive(archive) is True
     assert not archive.exists()
-    assert (tmp_path / "input" / "已处理压缩包" / "已处理" / "pack.zip").is_file()
+    assert (tmp_path / "archives" / "已处理" / "pack.zip").is_file()
     assert plugin._notify_agg["archives"][-1]["action"] == "moved"
 
 
@@ -195,7 +196,7 @@ def test_font_dir_subtitle_archive_kept_with_upload_hint(tmp_path):
 
     assert plugin._handle_font_archive(archive) is True
     assert not archive.exists()
-    assert (tmp_path / "input" / "已处理压缩包" / "错误" / "subtitle.zip").is_file()
+    assert (tmp_path / "archives" / "错误" / "subtitle.zip").is_file()
     assert not handled
     entry = plugin._notify_agg["archives"][-1]
     assert entry["total"] == 0
@@ -216,7 +217,7 @@ def test_archive_in_wrong_dir_notified_and_kept(tmp_path):
     _make_zip(archive)
     plugin._log_dir_mismatch(archive, "lib", False, False, True)
     assert not archive.exists()
-    assert (tmp_path / "lib" / "已处理压缩包" / "错误" / "fonts.zip").is_file()
+    assert (tmp_path / "archives" / "错误" / "fonts.zip").is_file()
     assert plugin._notify_agg["archives_wrong_dir"][-1]["label"] == "字体库目录"
     assert plugin._notify_agg["archives_wrong_dir"][-1]["action"] == "moved_error"
     assert any("放错目录" in msg for _, msg in plugin._db.logs)
@@ -255,7 +256,7 @@ def test_subtitle_archive_sc_filter_and_cleanup(tmp_path):
     assert [p.name for p in checked] == ["ep01.sc.ass"]
     assert not queued
     # 字幕检查在稳定副本上完成，原压缩包按策略移入该 ASS 目录的 已处理压缩包/
-    assert (tmp_path / "ass" / "已处理压缩包" / "已处理" / "show.zip").is_file()
+    assert (tmp_path / "archives" / "已处理" / "show.zip").is_file()
     entry = plugin._notify_agg["archives"][-1]
     assert entry["kind"] == "subtitle"
     assert entry["matched"] == 1
@@ -277,11 +278,11 @@ def test_subtitle_archive_custom_keywords_subset(tmp_path):
     assert plugin._handle_subtitle_archive(archive, "subset") is True
     assert [p.name for p in queued] == ["ep.chs.ass"]
     assert not checked
-    # 未开启清理：原包保留
-    assert archive.is_file()
+    # 成功处理后默认正常清理：原包删除
+    assert not archive.exists()
     entry = plugin._notify_agg["archives"][-1]
     assert entry["queued"] == 1
-    assert entry["action"] == ""
+    assert entry["action"] == "deleted"
 
 
 def test_subtitle_archive_no_match_keeps_package(tmp_path):
@@ -335,7 +336,7 @@ def test_subtitle_archive_srt_only_explains_not_ass(tmp_path):
 
     assert plugin._handle_subtitle_archive(archive, "ass") is True
     assert not archive.exists()
-    assert (tmp_path / "ass" / "已处理压缩包" / "错误" / "crunchyroll.zip").is_file()
+    assert (tmp_path / "archives" / "错误" / "crunchyroll.zip").is_file()
     assert not checked and not queued
     entry = plugin._notify_agg["archives"][-1]
     assert entry["total"] == 0

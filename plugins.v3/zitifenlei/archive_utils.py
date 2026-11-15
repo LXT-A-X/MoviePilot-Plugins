@@ -69,6 +69,8 @@ class ExtractedFile:
 class ExtractResult:
     files: List[ExtractedFile] = field(default_factory=list)
     skipped: List[Tuple[str, str]] = field(default_factory=list)
+    # 检测到加密/密码错误：调用方应转「待解压」，不要当普通无字体/错误包处理
+    password_required: bool = False
     errors: List[Tuple[str, str]] = field(default_factory=list)
     total_bytes: int = 0
 
@@ -317,6 +319,7 @@ def extract_zip(
     max_members: int = DEFAULT_MAX_MEMBERS,
     max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES,
     max_member_bytes: int = DEFAULT_MAX_MEMBER_BYTES,
+    password: str = "",
 ) -> ExtractResult:
     """安全解压 zip，只保留扩展名白名单内的文件。"""
     result = ExtractResult()
@@ -348,8 +351,9 @@ def extract_zip(
                 member = _zip_member_name(info)
                 if info.is_dir():
                     continue
-                if info.flag_bits & 0x1:
-                    result.skipped.append((member, "加密的压缩包成员（不支持密码）"))
+                if info.flag_bits & 0x1 and not password:
+                    result.password_required = True
+                    result.skipped.append((member, "压缩包已加密，需要解压码"))
                     continue
                 suffix = Path(member.replace("\\", "/")).suffix.lower()
                 if _is_junk_member(member):
@@ -374,7 +378,8 @@ def extract_zip(
                 try:
                     target.parent.mkdir(parents=True, exist_ok=True)
                     written = 0
-                    with zf.open(info) as src, target.open("wb") as dst:
+                    opener = zf.open(info, pwd=password.encode("utf-8")) if (info.flag_bits & 0x1) else zf.open(info)
+                    with opener as src, target.open("wb") as dst:
                         while True:
                             chunk = src.read(1024 * 1024)
                             if not chunk:
@@ -386,7 +391,12 @@ def extract_zip(
                     result.total_bytes += written
                     result.files.append(ExtractedFile(path=target, member=member, size=written))
                 except Exception as err:
-                    result.errors.append((member, f"解压失败: {err}"))
+                    text = str(err)
+                    if info.flag_bits & 0x1 or "password" in text.lower() or "encrypted" in text.lower():
+                        result.password_required = True
+                        result.errors.append((member, "解压码错误或 zip 使用了不支持的加密方式（AES 请用 7z/unar）"))
+                    else:
+                        result.errors.append((member, f"解压失败: {err}"))
                     try:
                         target.unlink(missing_ok=True)
                     except Exception:
@@ -423,16 +433,30 @@ def _host_unpack(archive: Path, outdir: Path) -> Optional[str]:
         return str(err)
 
 
-def _tool_cmd(tool: str, exe: str, archive: Path, outdir: Path) -> List[str]:
+def _tool_cmd(tool: str, exe: str, archive: Path, outdir: Path, password: str = "") -> List[str]:
     """不同解压工具的命令行（统一解到 outdir，不保留压缩包内顶层目录限制由调用方处理）。"""
+    pwd = str(password or "")
     if tool in ("7z", "7zz", "7za", "7zr"):
-        return [exe, "x", "-y", "-bd", f"-o{outdir.as_posix()}", archive.as_posix()]
+        cmd = [exe, "x", "-y", "-bd"]
+        if pwd:
+            cmd.append(f"-p{pwd}")
+        return cmd + [f"-o{outdir.as_posix()}", archive.as_posix()]
     if tool == "unar":
-        return [exe, "-q", "-f", "-o", outdir.as_posix(), "-D", archive.as_posix()]
+        cmd = [exe, "-q", "-f", "-o", outdir.as_posix(), "-D"]
+        if pwd:
+            cmd += ["-p", pwd]
+        return cmd + [archive.as_posix()]
     if tool in ("unrar", "unrar-free"):
-        return [exe, "x", "-o+", "-y", archive.as_posix(), outdir.as_posix() + "/"]
+        cmd = [exe, "x", "-o+", "-y"]
+        if pwd:
+            cmd.append(f"-p{pwd}")
+        return cmd + [archive.as_posix(), outdir.as_posix() + "/"]
     if tool == "bsdtar":
-        return [exe, "-xf", archive.as_posix(), "-C", outdir.as_posix()]
+        cmd = [exe, "-xf", archive.as_posix(), "-C", outdir.as_posix()]
+        if pwd:
+            cmd.insert(3, "--passphrase")
+            cmd.insert(4, pwd)
+        return cmd
     return []
 
 
@@ -441,18 +465,18 @@ def _precheck_with_7z(
     archive: Path,
     max_members: int,
     max_total_bytes: int,
+    password: str = "",
 ) -> Optional[str]:
     """用 7z l -slt 预检成员数与解压后总大小；超限返回原因，正常返回 None。
 
     预检失败（工具不支持该格式/输出不可解析）时返回 None，交给解压后的二次校验兜底。
     """
     try:
-        proc = subprocess.run(
-            [exe, "l", "-slt", archive.as_posix()],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
+        cmd = [exe, "l", "-slt"]
+        if password:
+            cmd.append(f"-p{password}")
+        cmd.append(archive.as_posix())
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     except Exception:
         return None
     if proc.returncode != 0:
@@ -503,6 +527,7 @@ def extract_external(
     max_members: int = DEFAULT_MAX_MEMBERS,
     max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES,
     max_member_bytes: int = DEFAULT_MAX_MEMBER_BYTES,
+    password: str = "",
 ) -> ExtractResult:
     """用系统解压工具解 .7z/.rar：先解到隔离临时目录，再校验后复制到目标目录。
 
@@ -536,7 +561,7 @@ def extract_external(
     staged: List[Path] = []
     for tool, exe in candidates:
         if tool in ("7z", "7zz", "7za", "7zr"):
-            precheck = _precheck_with_7z(exe, archive, max_members, max_total_bytes)
+            precheck = _precheck_with_7z(exe, archive, max_members, max_total_bytes, password)
             if precheck:
                 # 预检已确认成员数/总大小超限：换工具也一样超限，直接判失败，避免白解一遍
                 result.errors.append((archive.name, precheck))
@@ -546,7 +571,7 @@ def extract_external(
             attempt_dir.mkdir(parents=True, exist_ok=True)
             try:
                 proc = subprocess.run(
-                    _tool_cmd(tool, exe, archive, attempt_dir),
+                    _tool_cmd(tool, exe, archive, attempt_dir, password),
                     capture_output=True,
                     text=True,
                     timeout=600,
@@ -564,6 +589,9 @@ def extract_external(
                 staging, staged = attempt_dir, found
                 break
             detail = ((proc.stderr or proc.stdout or "").strip().splitlines() or [""])[-1]
+            low = detail.lower()
+            if "password" in low or "encrypted" in low or "密码" in detail:
+                result.password_required = True
             attempts.append(f"{tool}: {detail[:160] or f'退出码 {proc.returncode}'}")
         finally:
             if attempt_dir is not staging:
@@ -787,18 +815,34 @@ def extract_archive(
     max_members: int = DEFAULT_MAX_MEMBERS,
     max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES,
     max_member_bytes: int = DEFAULT_MAX_MEMBER_BYTES,
+    password: str = "",
 ) -> ExtractResult:
     """按后缀分派解压：.zip 走标准库，.7z/.rar 走系统工具（缺工具时明确报错）。"""
     suffix = Path(archive_path).suffix.lower()
     if suffix in ZIP_EXTENSIONS:
-        return extract_zip(
+        result = extract_zip(
             archive_path,
             dest_dir,
             allowed_exts,
             max_members=max_members,
             max_total_bytes=max_total_bytes,
             max_member_bytes=max_member_bytes,
+            password=password,
         )
+        # Python zipfile 不支持 AES 加密 zip：带密码时回退 7z/unar 再试一次
+        if password and result.password_required:
+            fallback = extract_external(
+                archive_path,
+                dest_dir,
+                allowed_exts,
+                max_members=max_members,
+                max_total_bytes=max_total_bytes,
+                max_member_bytes=max_member_bytes,
+                password=password,
+            )
+            if fallback.files or not fallback.password_required:
+                return fallback
+        return result
     if suffix in EXTERNAL_ARCHIVE_EXTENSIONS:
         return extract_external(
             archive_path,
@@ -807,6 +851,7 @@ def extract_archive(
             max_members=max_members,
             max_total_bytes=max_total_bytes,
             max_member_bytes=max_member_bytes,
+            password=password,
         )
     result = ExtractResult()
     result.errors.append((Path(archive_path).name, f"不支持的压缩包格式：{suffix or '（无后缀）'}"))

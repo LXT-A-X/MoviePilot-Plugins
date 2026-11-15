@@ -114,6 +114,9 @@ function handleAction(payload) {
   if (payload && typeof payload === 'object' && payload.type === 'goto_missing') {
     active.value = 'missing'
   }
+  if (payload && typeof payload === 'object' && payload.type === 'goto_archives') {
+    active.value = 'archives'
+  }
   emit('action', payload)
 }
 

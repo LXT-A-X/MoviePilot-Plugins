@@ -281,9 +281,8 @@ def test_torrent_job_empty_archive_is_not_failure(tmp_path, monkeypatch):
 
 
 def test_torrent_job_pending_is_reported(tmp_path, monkeypatch):
-    """「收集后进待整理」开启时，待整理数量要回传给检查通知。"""
+    """归档层返回的 pending 数量要回传给通知（下载器来源默认不再主动进待整理）。"""
     plugin, _lib = _plugin(tmp_path)
-    plugin._config["torrent_to_pending"] = True
     dl = tmp_path / "dl"
     dl.mkdir()
     (dl / "a.ttf").write_bytes(b"fake")

@@ -47,6 +47,19 @@ const clearConfirm = ref(false)
 const checkingId = ref(null)
 // 全量扫描（字体监控目录字体直接入库）
 const scanning = ref(false)
+const unlockTasks = ref([])
+
+async function loadUnlockTasks() {
+  try {
+    const data = await apiModule.get(props.api, '/archives/unlock/tasks', { operation: 'check' })
+    unlockTasks.value = Array.isArray(data?.items) ? data.items : []
+  } catch (e) {
+    unlockTasks.value = []
+  }
+}
+function gotoArchives() {
+  emit('action', { type: 'goto_archives' })
+}
 
 const activeRecord = computed(() =>
   records.value.find(r => r.id === selectedId.value) || null
@@ -466,6 +479,7 @@ watch(() => props.refreshKey, () => {
 
 onMounted(async () => {
   await loadRecords(true)
+  loadUnlockTasks()
   startPolling()
 })
 
@@ -473,6 +487,7 @@ onMounted(async () => {
 // 并重拉列表（Q14 后切 Tab 不再由 Page 广播刷新键，各视图自查自刷）
 onActivated(() => {
   refreshRecordsSoft()
+  loadUnlockTasks()
   startPolling()
 })
 
@@ -489,6 +504,21 @@ onUnmounted(() => {
 
 <template>
   <div class="zt-check">
+    <v-alert
+      v-if="unlockTasks.length"
+      type="warning"
+      variant="tonal"
+      density="compact"
+      class="mb-3"
+    >
+      <div class="d-flex align-center flex-wrap ga-2">
+        <span>⚠️ 有 {{ unlockTasks.length }} 个字体压缩包需要解压码，检查任务未完成</span>
+        <v-btn size="x-small" variant="text" @click="gotoArchives">去待解压</v-btn>
+      </div>
+      <div class="zt-hint">
+        {{ unlockTasks.map((t) => t.name).join('、') }}
+      </div>
+    </v-alert>
     <!-- 顶部操作栏：上传 + 检查（检查左侧已选/最近上传的字幕） -->
     <div class="d-flex align-center flex-wrap mb-4">
       <v-btn

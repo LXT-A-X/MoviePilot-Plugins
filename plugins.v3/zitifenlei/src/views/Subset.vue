@@ -35,6 +35,19 @@ const uploadRef = ref(null)
 const uploading = ref(false)
 // 处理中：按钮转圈禁用，防重复点击
 const scanning = ref(false)
+const unlockTasks = ref([])
+
+async function loadUnlockTasks() {
+  try {
+    const data = await apiModule.get(props.api, '/archives/unlock/tasks', { operation: 'subset' })
+    unlockTasks.value = Array.isArray(data?.items) ? data.items : []
+  } catch (e) {
+    unlockTasks.value = []
+  }
+}
+function gotoArchives() {
+  emit('action', { type: 'goto_archives' })
+}
 
 // ===== 右栏结果：按剧名/目录分组，折叠抽屉 + 前端渐进渲染 =====
 const records = ref([])
@@ -568,6 +581,7 @@ async function clearRecords() {
 onMounted(() => {
   loadStatus()
   loadPending()
+  loadUnlockTasks()
   loadRecords()
   startPolling()
 })
@@ -576,6 +590,7 @@ onMounted(() => {
 onActivated(() => {
   loadStatus()
   loadPending()
+  loadUnlockTasks()
   refreshCurrentPage()
   startPolling()
 })
@@ -606,6 +621,21 @@ function stopPolling() {
 
 <template>
   <div class="zt-subset">
+    <v-alert
+      v-if="unlockTasks.length"
+      type="warning"
+      variant="tonal"
+      density="compact"
+      class="mb-3"
+    >
+      <div class="d-flex align-center flex-wrap ga-2">
+        <span>⚠️ 有 {{ unlockTasks.length }} 个字体压缩包需要解压码，子集化任务未完成</span>
+        <v-btn size="x-small" variant="text" @click="gotoArchives">去待解压</v-btn>
+      </div>
+      <div class="zt-hint">
+        {{ unlockTasks.map((t) => t.name).join('、') }}
+      </div>
+    </v-alert>
     <!-- 顶部操作栏 -->
     <div class="zt-topbar">
       <v-btn
