@@ -465,7 +465,7 @@ class Zitifenlei(_PluginBase):
     plugin_name = "字体分类管家"
     plugin_desc = "字体归档整理与 ASS 字幕字体检查插件：扫描/上传字体到字体库，检查字幕缺失字体。"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/zitifenlei.png"
-    plugin_version = "3.8.1"
+    plugin_version = "3.8.2"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "zitifenlei_"
@@ -5966,6 +5966,79 @@ class Zitifenlei(_PluginBase):
             return self._err(f"预览失败: {err}")
 
     @staticmethod
+    def _normalize_preview_font(raw: bytes) -> bytes:
+        """把浏览器不认/损坏的 cmap 重建成 format 4/12，供 FontFace 预览。
+
+        典型：老中文 TTF 只有 format 0 + format 2（fontTools 能读，Chrome/Edge
+        的 FontFace 会直接判 Invalid font data）。这里只在缺少浏览器支持的
+        Unicode cmap 时重建，不影响正常字体。
+        """
+        try:
+            import io as _io
+            from fontTools.ttLib import TTFont
+            from fontTools.ttLib.tables._c_m_a_p import CmapSubtable, table__c_m_a_p
+
+            font = TTFont(_io.BytesIO(raw), lazy=False)
+            try:
+                if "cmap" not in font:
+                    return raw
+                tables = list(font["cmap"].tables)
+                supported = any(
+                    int(getattr(t, "format", -1)) in (4, 12)
+                    and int(getattr(t, "platformID", -1)) in (0, 3)
+                    for t in tables
+                )
+                if supported:
+                    return raw
+                merged: Dict[int, str] = {}
+                for table in tables:
+                    try:
+                        merged.update({int(cp): str(g) for cp, g in table.cmap.items()})
+                    except Exception:
+                        continue
+                if not merged:
+                    return raw
+                bmp = {cp: g for cp, g in merged.items() if 0 <= cp <= 0xFFFF}
+                full = {cp: g for cp, g in merged.items() if 0 <= cp <= 0x10FFFF}
+                new_tables = []
+                if bmp:
+                    sub4 = CmapSubtable.newSubtable(4)
+                    sub4.platformID, sub4.platEncID, sub4.format, sub4.language = 3, 1, 4, 0
+                    sub4.cmap = bmp
+                    new_tables.append(sub4)
+                if any(cp > 0xFFFF for cp in full):
+                    sub12 = CmapSubtable.newSubtable(12)
+                    sub12.platformID, sub12.platEncID, sub12.format, sub12.language = 3, 10, 12, 0
+                    sub12.cmap = full
+                    new_tables.append(sub12)
+                if not new_tables:
+                    return raw
+                cmap = table__c_m_a_p()
+                cmap.tableVersion = 0
+                cmap.tables = new_tables
+                font["cmap"] = cmap
+                out = _io.BytesIO()
+                font.save(out)
+                data = out.getvalue()
+                probe = TTFont(_io.BytesIO(data), lazy=False)
+                try:
+                    for t in probe["cmap"].tables:
+                        _ = t.cmap
+                finally:
+                    try:
+                        probe.close()
+                    except Exception:
+                        pass
+                return data
+            finally:
+                try:
+                    font.close()
+                except Exception:
+                    pass
+        except Exception:
+            return raw
+
+    @staticmethod
     def _split_ttc_face(raw: bytes, file_path: str, face_index: int = 0) -> bytes:
         """把 TTC（ttcf 容器）拆出「第一个可被浏览器解析」的单 face 数据。
 
@@ -6297,6 +6370,8 @@ class Zitifenlei(_PluginBase):
             # TTC/OTC 按 face_index 只拆选中的 face；浏览器 FontFace 不认 ttcf 容器。
             if raw[:4] == b"ttcf":
                 raw = self._split_ttc_face(raw, file_path, int(face_index or 0))
+            # 老中文字体常见只有 cmap format 0/2：fontTools 能读，浏览器 FontFace 拒载
+            raw = self._normalize_preview_font(raw)
             data = base64.b64encode(raw).decode("ascii")
             char_count = 0
             face_count = 0
