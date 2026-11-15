@@ -178,6 +178,8 @@ _DEFAULT_CONFIG = {
     # 清理压缩包（移到「已处理压缩包」子目录 或 直接删除）只在「自动执行开 + 全部处理无失败」时执行，
     # 放错目录、待定、有失败时一律保留并提醒。
     "archive_cleanup_enabled": True,
+    # 大批量压缩包模式：单包 5000 成员 / 解压后 2GB；默认关闭（500 成员 / 512MB）
+    "bulk_archive_enabled": False,
     # delete=正常清理（直接删除，默认）；move=保留（移到 已处理/，可找回）
     "archive_cleanup_action": "delete",
     # 已处理压缩包根目录：system=跟随各监控目录（<目录>/已处理压缩包/）；
@@ -237,7 +239,9 @@ _ARCH_DUP_DEL_FAILED = -4  # 同上跳过，但删除重复源文件失败
 # 避免全量扫描/重启后反复解压同一个大包；只保留最近若干条。
 _ARCHIVE_DONE_SETTING = "monitored_archive_done"
 _ARCHIVE_DONE_LIMIT = 300
-_ARCHIVE_MAX_MEMBERS = 500  # 与上传解压一致：一个包最多 500 个成员
+_ARCHIVE_MAX_MEMBERS = 500  # 普通模式：一个包最多 500 个成员
+_ARCHIVE_BULK_MAX_MEMBERS = 5000  # 大批量模式：最多 5000 个成员
+_ARCHIVE_BULK_MAX_BYTES = 2 * 1024 * 1024 * 1024  # 大批量模式：解压后最多 2GB
 # 清理压缩包时移入的子目录名（位于对应监控目录下；插件会整体忽略该目录）
 _ARCHIVE_DONE_DIR_NAME = "已处理压缩包"
 # 「已处理压缩包」下的分类子目录：成功清理 / 放错或不支持格式
@@ -461,7 +465,7 @@ class Zitifenlei(_PluginBase):
     plugin_name = "字体分类管家"
     plugin_desc = "字体归档整理与 ASS 字幕字体检查插件：扫描/上传字体到字体库，检查字幕缺失字体。"
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/zitifenlei.png"
-    plugin_version = "3.6.2"
+    plugin_version = "3.7.0"
     plugin_author = "LXT-A-X"
     author_url = "https://github.com/LXT-A-X"
     plugin_config_prefix = "zitifenlei_"
@@ -2416,6 +2420,12 @@ class Zitifenlei(_PluginBase):
                 item["operation"] = operation
         self._save_unlock_tasks(tasks)
 
+    def _archive_limits(self) -> Tuple[int, int]:
+        """返回当前压缩包解压上限 (成员数, 解压后总字节)。"""
+        if bool(self.get_resource_or_config("bulk_archive_enabled")):
+            return _ARCHIVE_BULK_MAX_MEMBERS, _ARCHIVE_BULK_MAX_BYTES
+        return _ARCHIVE_MAX_MEMBERS, MAX_UPLOAD_TOTAL_BYTES
+
     def _handle_encrypted_archive(self, archive_path: Path, operation: str) -> Optional[str]:
         """加密包只复制到待解压，原件不移动；记录待处理任务并发通知。"""
         try:
@@ -2483,10 +2493,11 @@ class Zitifenlei(_PluginBase):
         except Exception as err:
             self._db.add_log(f"{prefix} {name}: 读取大小失败 {err}", "warning")
             return True
-        if size > MAX_UPLOAD_TOTAL_BYTES:
+        limit_bytes = self._archive_limits()[1]
+        if size > limit_bytes:
             self._db.add_log(
                 f"{prefix} {name}: 超过单次处理总量上限"
-                f"（{MAX_UPLOAD_TOTAL_BYTES // (1024 * 1024)}MB），已跳过（压缩包保留）",
+                f"（{limit_bytes // (1024 * 1024)}MB），已跳过（压缩包保留）",
                 "warning",
             )
             return True
@@ -2502,13 +2513,14 @@ class Zitifenlei(_PluginBase):
         base_dir = Path(
             self.get_resource_or_config("ass_dir" if dir_kind == "ass" else "subset_dir") or ""
         )
+        archive_max_members, archive_max_bytes = self._archive_limits()
         try:
             result = arch.extract_archive(
                 archive_path,
                 extract_dir,
                 ASS_EXTENSIONS,
-                max_members=_ARCHIVE_MAX_MEMBERS,
-                max_total_bytes=MAX_UPLOAD_TOTAL_BYTES,
+                max_members=archive_max_members,
+                max_total_bytes=archive_max_bytes,
                 max_member_bytes=MAX_ASS_FILE_BYTES,
             )
             if result.password_required:
@@ -2716,10 +2728,11 @@ class Zitifenlei(_PluginBase):
         except Exception as err:
             self._db.add_log(f"监控压缩包 {name}: 读取大小失败 {err}", "warning")
             return True
-        if size > MAX_UPLOAD_TOTAL_BYTES:
+        limit_bytes = self._archive_limits()[1]
+        if size > limit_bytes:
             self._db.add_log(
                 f"监控压缩包 {name}: 超过单次处理总量上限"
-                f"（{MAX_UPLOAD_TOTAL_BYTES // (1024 * 1024)}MB），已跳过（压缩包保留）",
+                f"（{limit_bytes // (1024 * 1024)}MB），已跳过（压缩包保留）",
                 "warning",
             )
             return True
@@ -2730,13 +2743,14 @@ class Zitifenlei(_PluginBase):
             pass
         dest = tmp_root / f"watch_archive_{uuid.uuid4().hex}"
         auto_collect = self.get_resource_or_config("auto_collect") is not False
+        archive_max_members, archive_max_bytes = self._archive_limits()
         try:
             result = arch.extract_archive(
                 archive_path,
                 dest,
                 FONT_EXTENSIONS,
-                max_members=_ARCHIVE_MAX_MEMBERS,
-                max_total_bytes=MAX_UPLOAD_TOTAL_BYTES,
+                max_members=archive_max_members,
+                max_total_bytes=archive_max_bytes,
                 max_member_bytes=max_font_file_bytes(),
             )
             if result.password_required:
@@ -2749,7 +2763,15 @@ class Zitifenlei(_PluginBase):
             pending = 0
             failed = 0
             added_names: List[str] = []
-            for font in fonts:
+            total_fonts = len(fonts)
+            for idx, font in enumerate(fonts, 1):
+                if idx % 100 == 0 and self._db is not None:
+                    try:
+                        self._db.add_log(
+                            f"大批量压缩包 {name}: 已处理 {idx}/{total_fonts} 个字体", "info"
+                        )
+                    except Exception:
+                        pass
                 target = font
                 if not auto_collect:
                     # 待确认会保留源文件引用：先复制到稳定路径，避免解压目录清理后变幽灵
@@ -4713,7 +4735,7 @@ class Zitifenlei(_PluginBase):
                             dst,
                             extract_dir,
                             FONT_EXTENSIONS,
-                            max_members=max(1, max_files),
+                            max_members=self._archive_limits()[0],
                             max_total_bytes=max(1, max_mb) * 1024 * 1024,
                             max_member_bytes=max_font_file_bytes(),
                         )
@@ -6383,7 +6405,7 @@ class Zitifenlei(_PluginBase):
                         zip_path,
                         dest,
                         exts,
-                        max_members=500,
+                        max_members=self._archive_limits()[0],
                         max_total_bytes=MAX_UPLOAD_TOTAL_BYTES,
                         max_member_bytes=member_limit,
                     )
@@ -9654,8 +9676,8 @@ class Zitifenlei(_PluginBase):
                 target,
                 extract_dir,
                 exts,
-                max_members=_ARCHIVE_MAX_MEMBERS,
-                max_total_bytes=MAX_UPLOAD_TOTAL_BYTES,
+                max_members=self._archive_limits()[0],
+                max_total_bytes=self._archive_limits()[1],
                 max_member_bytes=max_font_file_bytes() if action == "font" else MAX_ASS_FILE_BYTES,
                 password=password,
             )

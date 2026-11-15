@@ -19,6 +19,7 @@ const DEFAULT_CONFIG = {
   subset_dir: '',
   // 字体监控目录内的压缩包：解压整理成功后是否自动清理（只作用于直接归档成功的包）
   archive_cleanup_enabled: true,
+  bulk_archive_enabled: false,
   // 清理方式：delete = 正常清理（直接删除）；move = 保留（移到「已处理/」）
   archive_cleanup_action: 'delete',
   // 已处理压缩包根目录：system=各监控目录下；custom=统一自定义目录
@@ -483,6 +484,14 @@ watch(() => config.value.auto_subset, (v) => {
           <div class="zt-hint">
             处理成功后压缩包只有两种去向：正常清理 = 直接删除；保留 = 移到「已处理/」可找回。
             放错目录/不支持格式会移到「错误/」；待确认/待检查/待处理、有失败时保留。
+          </div>
+
+          <div class="zt-switch-row mt-3">
+            <div class="flex-grow-1">
+              <div class="zt-switch-title">大批量压缩包模式</div>
+              <div class="zt-switch-desc">开启后单个压缩包最多 5000 个成员、解压后最多 2GB；适合几千个字体的合集。默认关闭（500 个成员 / 512MB）。大批量建议走监控目录或种子，不要走网页上传。</div>
+            </div>
+            <v-switch v-model="config.bulk_archive_enabled" color="primary" density="compact" hide-details></v-switch>
           </div>
 
           <div class="zt-option-label mb-1 mt-4">已处理压缩包根目录</div>
