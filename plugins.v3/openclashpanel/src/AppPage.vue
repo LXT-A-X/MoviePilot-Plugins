@@ -1723,9 +1723,18 @@ onBeforeUnmount(() => {
   .ocp-log-text {
     grid-area: text;
   }
+  .ocp-chips {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    padding-bottom: 4px;
+  }
   .ocp-chips [class~='v-chip'] {
+    flex: 0 0 auto;
     height: 34px !important;
     font-size: 12px;
+    white-space: nowrap;
   }
   .ocp-delay {
     height: 34px !important;
