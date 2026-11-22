@@ -62,7 +62,7 @@ MoviePilot-Plugins/
 | **字幕字体代理** FontInAssProxy | 反代 Emby/Jellyfin 字幕流，实时子集化字体并内嵌进 ASS | — | ✅ 3.1.2 | [V3 手册](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v3/fontinassproxy/README.md) |
 | **Emby 演职人员中文化** EmbyPeopleLocalize | 用 LLM 把 Emby 演职人员姓名与角色名翻译成简体中文并写回 nfo | ✅ 1.3.11 | ✅ 4.7.13 | [V3 手册](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v3/embypeoplelocalize/README.md) |
 | **字体分类管家** Zitifenlei | 字体归档整理 + ASS 字幕缺字体检查 + 字体子集化内嵌 | ✅ 1.2.24 | ✅ 3.8.3 | [V3 手册](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v3/zitifenlei/README.md) · [V2 手册](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v2/zitifenlei/%E4%BD%BF%E7%94%A8%E6%89%8B%E5%86%8C.md) |
-| **OpenClash 控制面板** OpenClashPanel | MoviePilot 内查看/管理 OpenClash·Mihomo：状态、策略组、测速、访问检查、OpenWrt 管理 | — | ✅ 1.12.1 | [V3 手册](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v3/openclashpanel/README.md) |
+| **OpenClash 控制面板** OpenClashPanel | MoviePilot 内查看/管理 OpenClash·Mihomo：状态、策略组、测速、访问检查、OpenWrt 管理 | — | ✅ 1.12.4 | [V3 手册](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v3/openclashpanel/README.md) |
 | **MKV 工具箱** MkvToolkit | MKV 容器层编辑：字幕内封、音轨增删排序、字体附件、章节标题，支持队列/历史回滚 | — | ✅ 0.1.51 | [V3 手册](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v3/mkvtoolkit/README.md) |
 
 > 版本号与 `package.v2.json` / `package.v3.json` 索引保持一致；「—」表示该版本暂无此插件。
@@ -143,7 +143,7 @@ V2 版手册：[plugins.v2/zitifenlei/使用手册.md](https://github.com/LXT-A-
 
 ### OpenClash 控制面板 OpenClashPanel
 
-**V3 1.12.3 · 适用 MoviePilot V3**
+**V3 1.12.4 · 适用 MoviePilot V3**
 
 在 MoviePilot 里直接查看和管理 **OpenClash / Mihomo**：状态总览、策略组与节点切换、延迟测速、访问检查（内核 / MP / OpenClash 三视角）、插件与内核日志，可选 OpenWrt 服务管理；支持 Telegram 分页按钮命令与仪表盘全宽组件。
 
@@ -153,6 +153,7 @@ V2 版手册：[plugins.v2/zitifenlei/使用手册.md](https://github.com/LXT-A-
 - **策略组**：按 OpenClash 配置文件顺序排列（与 zashboard 一致），支持节点切换、单项/整组测速（进度与成功/超时统计）；Smart 智能组支持手动选择锁定（插件持续守护，访问检查/内核健康检查不会重置锁定）；点「恢复自动」重新测速解锁。
 - **访问检查**：内核视角（与官方一致）/ MP 网络视角 / OpenClash 代理视角，逐站加载、30 秒自动采集。
 - **OpenWrt 管理（可选）**：填 LuCI 地址/用户名/密码后，可启动/停止/重启、切换运行模式（基础/增强 TUN/混合 MIX）、切换配置、更新订阅、清缓存、区域绕过/域名嗅探/DNS 代理/流媒体解锁等。
+- **手机适配**：手机竖屏下拆分子页签、弹窗顶栏与页签吸顶，优化节点与按钮触控尺寸，设置页分区并吸底保存。
 - **TG 命令**：`/oc_status`、`/oc_check`、`/oc_node`（分页按钮选组/节点）、`/oc_mode`、`/oc_refresh`、`/oc_help`。
 - **仪表盘组件**：全宽卡片（状态 + 访问检查 + 策略组/节点）。
 - **日志**：插件日志 + 内核实时日志。

@@ -1,10 +1,10 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import { c as createApi } from './api-BhchXaeF.js';
+import { _ as _export_sfc, c as createApi } from './_plugin-vue_export-helper-C3yvUx_P.js';
 
 const {resolveComponent:_resolveComponent,openBlock:_openBlock,createBlock:_createBlock,createCommentVNode:_createCommentVNode,createElementVNode:_createElementVNode,createTextVNode:_createTextVNode,withCtx:_withCtx,createVNode:_createVNode,Fragment:_Fragment,createElementBlock:_createElementBlock} = await importShared('vue');
 
 
-const {getCurrentInstance,inject,onMounted,ref} = await importShared('vue');
+const {computed,getCurrentInstance,inject,onBeforeUnmount,onMounted,ref} = await importShared('vue');
 
 const DEFAULT_SITES_TEXT =
   '百度搜索|https://www.baidu.com/|direct\n' +
@@ -19,9 +19,10 @@ const _sfc_main = {
   api: { type: Object, default: () => ({}) },
   pluginId: { type: String, default: 'OpenClashPanel' },
   initialConfig: { type: Object, default: () => ({}) },
+  showSave: { type: Boolean, default: true },
 },
   emits: ['save', 'close', 'switch'],
-  setup(__props, { emit: __emit }) {
+  setup(__props, { expose: __expose, emit: __emit }) {
 
 const props = __props;
 
@@ -64,6 +65,16 @@ const sitesText = ref(DEFAULT_SITES_TEXT);
 const saving = ref(false);
 const loading = ref(true);
 
+const mobilePortraitQuery = typeof window !== 'undefined'
+  ? window.matchMedia('(max-width: 760px) and (orientation: portrait)')
+  : null;
+const isMobilePortrait = ref(Boolean(mobilePortraitQuery?.matches));
+const fieldDensity = computed(() => (isMobilePortrait.value ? 'compact' : 'comfortable'));
+
+function onMobilePortraitChange(event) {
+  isMobilePortrait.value = event.matches;
+}
+
 function sitesToText(sites) {
   if (!Array.isArray(sites) || !sites.length) return DEFAULT_SITES_TEXT
   return sites
@@ -93,6 +104,7 @@ function toastMsg(kind, message) {
 
 onMounted(async () => {
   instance?.emit('layout', { maxWidth: '68rem' });
+  mobilePortraitQuery?.addEventListener?.('change', onMobilePortraitChange);
   try {
     const cur = await api.get('/config');
     cfg.value = { ...DEFAULTS, ...(props.initialConfig || {}), ...(cur || {}) };
@@ -115,11 +127,17 @@ function save() {
   }
 }
 
+onBeforeUnmount(() => {
+  mobilePortraitQuery?.removeEventListener?.('change', onMobilePortraitChange);
+});
+
+__expose({ save });
+
 return (_ctx, _cache) => {
   const _component_v_skeleton_loader = _resolveComponent("v-skeleton-loader");
   const _component_v_alert = _resolveComponent("v-alert");
-  const _component_v_switch = _resolveComponent("v-switch");
   const _component_v_col = _resolveComponent("v-col");
+  const _component_v_switch = _resolveComponent("v-switch");
   const _component_v_text_field = _resolveComponent("v-text-field");
   const _component_v_select = _resolveComponent("v-select");
   const _component_v_textarea = _resolveComponent("v-textarea");
@@ -129,7 +147,7 @@ return (_ctx, _cache) => {
 
   return (_openBlock(), _createBlock(_component_v_card, {
     variant: "tonal",
-    class: "pa-4"
+    class: "pa-4 ocp-config"
   }, {
     default: _withCtx(() => [
       (loading.value)
@@ -156,6 +174,12 @@ return (_ctx, _cache) => {
             _createVNode(_component_v_row, { dense: "" }, {
               default: _withCtx(() => [
                 _createVNode(_component_v_col, { cols: "12" }, {
+                  default: _withCtx(() => [...(_cache[22] || (_cache[22] = [
+                    _createElementVNode("div", { class: "ocp-cfg-section" }, "连接", -1)
+                  ]))]),
+                  _: 1
+                }),
+                _createVNode(_component_v_col, { cols: "12" }, {
                   default: _withCtx(() => [
                     _createVNode(_component_v_switch, {
                       modelValue: cfg.value.enabled,
@@ -179,8 +203,8 @@ return (_ctx, _cache) => {
                       placeholder: "http://192.168.1.1:9090",
                       hint: "external-controller 根地址（默认 9090），不要填 zashboard 的 /ui 地址",
                       "persistent-hint": "",
-                      density: "comfortable"
-                    }, null, 8, ["modelValue"])
+                      density: fieldDensity.value
+                    }, null, 8, ["modelValue", "density"])
                   ]),
                   _: 1
                 }),
@@ -196,8 +220,8 @@ return (_ctx, _cache) => {
                       type: "password",
                       hint: "OpenClash → 插件设置 → Dashboard 密码",
                       "persistent-hint": "",
-                      density: "comfortable"
-                    }, null, 8, ["modelValue"])
+                      density: fieldDensity.value
+                    }, null, 8, ["modelValue", "density"])
                   ]),
                   _: 1
                 }),
@@ -215,9 +239,15 @@ return (_ctx, _cache) => {
                       min: "2",
                       hint: "默认 8 秒",
                       "persistent-hint": "",
-                      density: "comfortable"
-                    }, null, 8, ["modelValue"])
+                      density: fieldDensity.value
+                    }, null, 8, ["modelValue", "density"])
                   ]),
+                  _: 1
+                }),
+                _createVNode(_component_v_col, { cols: "12" }, {
+                  default: _withCtx(() => [...(_cache[23] || (_cache[23] = [
+                    _createElementVNode("div", { class: "ocp-cfg-section" }, "刷新与日志", -1)
+                  ]))]),
                   _: 1
                 }),
                 _createVNode(_component_v_col, {
@@ -234,8 +264,8 @@ return (_ctx, _cache) => {
                       min: "0",
                       hint: "0 表示关闭自动刷新，默认 10 秒",
                       "persistent-hint": "",
-                      density: "comfortable"
-                    }, null, 8, ["modelValue"])
+                      density: fieldDensity.value
+                    }, null, 8, ["modelValue", "density"])
                   ]),
                   _: 1
                 }),
@@ -251,9 +281,15 @@ return (_ctx, _cache) => {
                       label: "日志采集级别",
                       hint: "Clash /logs 的 level 参数",
                       "persistent-hint": "",
-                      density: "comfortable"
-                    }, null, 8, ["modelValue"])
+                      density: fieldDensity.value
+                    }, null, 8, ["modelValue", "density"])
                   ]),
+                  _: 1
+                }),
+                _createVNode(_component_v_col, { cols: "12" }, {
+                  default: _withCtx(() => [...(_cache[24] || (_cache[24] = [
+                    _createElementVNode("div", { class: "ocp-cfg-section" }, "访问检查", -1)
+                  ]))]),
                   _: 1
                 }),
                 _createVNode(_component_v_col, {
@@ -268,8 +304,8 @@ return (_ctx, _cache) => {
                       label: "访问检查视角",
                       hint: "内核：由 OpenClash 内核测速（官方同款，数字最低）；MP 网络/OpenClash：由 MP 容器测速",
                       "persistent-hint": "",
-                      density: "comfortable"
-                    }, null, 8, ["modelValue"])
+                      density: fieldDensity.value
+                    }, null, 8, ["modelValue", "density"])
                   ]),
                   _: 1
                 }),
@@ -287,8 +323,8 @@ return (_ctx, _cache) => {
                       min: "0",
                       hint: "默认 60，0 表示只手动检查",
                       "persistent-hint": "",
-                      density: "comfortable"
-                    }, null, 8, ["modelValue"])
+                      density: fieldDensity.value
+                    }, null, 8, ["modelValue", "density"])
                   ]),
                   _: 1
                 }),
@@ -306,8 +342,8 @@ return (_ctx, _cache) => {
                       min: "2",
                       hint: "默认 6",
                       "persistent-hint": "",
-                      density: "comfortable"
-                    }, null, 8, ["modelValue"])
+                      density: fieldDensity.value
+                    }, null, 8, ["modelValue", "density"])
                   ]),
                   _: 1
                 }),
@@ -321,9 +357,15 @@ return (_ctx, _cache) => {
                       "auto-grow": "",
                       hint: "每行一个：名称|URL|direct/proxy；direct=直连，proxy=国外站点走所选通道",
                       "persistent-hint": "",
-                      density: "comfortable"
-                    }, null, 8, ["modelValue"])
+                      density: fieldDensity.value
+                    }, null, 8, ["modelValue", "density"])
                   ]),
+                  _: 1
+                }),
+                _createVNode(_component_v_col, { cols: "12" }, {
+                  default: _withCtx(() => [...(_cache[25] || (_cache[25] = [
+                    _createElementVNode("div", { class: "ocp-cfg-section" }, "命令", -1)
+                  ]))]),
                   _: 1
                 }),
                 _createVNode(_component_v_col, { cols: "12" }, {
@@ -336,6 +378,12 @@ return (_ctx, _cache) => {
                       "persistent-hint": ""
                     }, null, 8, ["modelValue"])
                   ]),
+                  _: 1
+                }),
+                _createVNode(_component_v_col, { cols: "12" }, {
+                  default: _withCtx(() => [...(_cache[26] || (_cache[26] = [
+                    _createElementVNode("div", { class: "ocp-cfg-section" }, "OpenWrt 管理", -1)
+                  ]))]),
                   _: 1
                 }),
                 _createVNode(_component_v_col, { cols: "12" }, {
@@ -362,8 +410,8 @@ return (_ctx, _cache) => {
                       placeholder: "192.168.1.1",
                       hint: "路由器 IP 或域名（不含 http://）",
                       "persistent-hint": "",
-                      density: "comfortable"
-                    }, null, 8, ["modelValue"])
+                      density: fieldDensity.value
+                    }, null, 8, ["modelValue", "density"])
                   ]),
                   _: 1
                 }),
@@ -377,8 +425,8 @@ return (_ctx, _cache) => {
                       "onUpdate:modelValue": _cache[13] || (_cache[13] = $event => ((cfg.value.openwrt_scheme) = $event)),
                       items: ['http', 'https'],
                       label: "协议",
-                      density: "comfortable"
-                    }, null, 8, ["modelValue"])
+                      density: fieldDensity.value
+                    }, null, 8, ["modelValue", "density"])
                   ]),
                   _: 1
                 }),
@@ -392,8 +440,8 @@ return (_ctx, _cache) => {
                       "onUpdate:modelValue": _cache[14] || (_cache[14] = $event => ((cfg.value.openwrt_username) = $event)),
                       label: "LuCI 用户名",
                       placeholder: "root",
-                      density: "comfortable"
-                    }, null, 8, ["modelValue"])
+                      density: fieldDensity.value
+                    }, null, 8, ["modelValue", "density"])
                   ]),
                   _: 1
                 }),
@@ -409,9 +457,15 @@ return (_ctx, _cache) => {
                       label: "LuCI 密码",
                       hint: "仅用于登录路由器，不会写日志",
                       "persistent-hint": "",
-                      density: "comfortable"
-                    }, null, 8, ["modelValue"])
+                      density: fieldDensity.value
+                    }, null, 8, ["modelValue", "density"])
                   ]),
+                  _: 1
+                }),
+                _createVNode(_component_v_col, { cols: "12" }, {
+                  default: _withCtx(() => [...(_cache[27] || (_cache[27] = [
+                    _createElementVNode("div", { class: "ocp-cfg-section" }, "测速与完整面板", -1)
+                  ]))]),
                   _: 1
                 }),
                 _createVNode(_component_v_col, {
@@ -425,8 +479,8 @@ return (_ctx, _cache) => {
                       label: "测速地址",
                       hint: "默认 https://www.gstatic.com/generate_204",
                       "persistent-hint": "",
-                      density: "comfortable"
-                    }, null, 8, ["modelValue"])
+                      density: fieldDensity.value
+                    }, null, 8, ["modelValue", "density"])
                   ]),
                   _: 1
                 }),
@@ -444,8 +498,8 @@ return (_ctx, _cache) => {
                       min: "1000",
                       hint: "默认 5000",
                       "persistent-hint": "",
-                      density: "comfortable"
-                    }, null, 8, ["modelValue"])
+                      density: fieldDensity.value
+                    }, null, 8, ["modelValue", "density"])
                   ]),
                   _: 1
                 }),
@@ -464,8 +518,8 @@ return (_ctx, _cache) => {
                       max: "32",
                       hint: "默认 8",
                       "persistent-hint": "",
-                      density: "comfortable"
-                    }, null, 8, ["modelValue"])
+                      density: fieldDensity.value
+                    }, null, 8, ["modelValue", "density"])
                   ]),
                   _: 1
                 }),
@@ -481,8 +535,8 @@ return (_ctx, _cache) => {
                       placeholder: "http://192.168.1.1:9090/ui/zashboard/",
                       hint: "“完整面板”按钮打开的地址",
                       "persistent-hint": "",
-                      density: "comfortable"
-                    }, null, 8, ["modelValue"])
+                      density: fieldDensity.value
+                    }, null, 8, ["modelValue", "density"])
                   ]),
                   _: 1
                 }),
@@ -505,24 +559,27 @@ return (_ctx, _cache) => {
               ]),
               _: 1
             }),
-            _createVNode(_component_v_row, {
-              class: "justify-end mt-2",
-              "no-gutters": ""
-            }, {
-              default: _withCtx(() => [
-                _createVNode(_component_v_btn, {
-                  color: "primary",
-                  loading: saving.value,
-                  onClick: save
+            (props.showSave)
+              ? (_openBlock(), _createBlock(_component_v_row, {
+                  key: 0,
+                  class: "justify-end mt-2",
+                  "no-gutters": ""
                 }, {
-                  default: _withCtx(() => [...(_cache[22] || (_cache[22] = [
-                    _createTextVNode("保存配置", -1)
-                  ]))]),
+                  default: _withCtx(() => [
+                    _createVNode(_component_v_btn, {
+                      color: "primary",
+                      loading: saving.value,
+                      onClick: save
+                    }, {
+                      default: _withCtx(() => [...(_cache[28] || (_cache[28] = [
+                        _createTextVNode("保存配置", -1)
+                      ]))]),
+                      _: 1
+                    }, 8, ["loading"])
+                  ]),
                   _: 1
-                }, 8, ["loading"])
-              ]),
-              _: 1
-            })
+                }))
+              : _createCommentVNode("", true)
           ], 64))
     ]),
     _: 1
@@ -531,5 +588,6 @@ return (_ctx, _cache) => {
 }
 
 };
+const Config = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-e52da9ba"]]);
 
-export { _sfc_main as default };
+export { Config as default };

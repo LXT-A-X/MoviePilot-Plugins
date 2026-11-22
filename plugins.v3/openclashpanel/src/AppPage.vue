@@ -1,5 +1,5 @@
 <script setup>
-import { computed, getCurrentInstance, inject, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, getCurrentInstance, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { createApi } from './api.js'
 import Config from './Config.vue'
 
@@ -32,6 +32,46 @@ const delays = ref({})
 const testingOne = ref({})
 const activeGroupName = ref('')
 const config = ref({ ...props.initialConfig })
+
+// ------------------------------------------------------------------ 手机竖屏
+const mobilePortraitQuery = typeof window !== 'undefined'
+  ? window.matchMedia('(max-width: 760px) and (orientation: portrait)')
+  : null
+const isMobilePortrait = ref(Boolean(mobilePortraitQuery?.matches))
+const panelSection = ref('status')
+const rootRef = ref(null)
+const configRef = ref(null)
+const PANEL_SECTIONS = [
+  { value: 'status', label: '状态' },
+  { value: 'strategy', label: '策略组' },
+  { value: 'access', label: '访问检查' },
+  { value: 'service', label: '服务' },
+]
+
+/** 桌面端始终展示全部卡片；手机竖屏按子页签过滤。 */
+function showSection(key) {
+  return !isMobilePortrait.value || panelSection.value === key
+}
+
+function onMobilePortraitChange(event) {
+  isMobilePortrait.value = event.matches
+}
+
+/** 切子页签后回到内容顶部：弹窗里滚 VCard，全页里滚窗口。 */
+function scrollContentToTop() {
+  const el = rootRef.value
+  if (!el) return
+  let parent = el.parentElement
+  while (parent && parent !== document.body) {
+    const style = window.getComputedStyle(parent)
+    if (/(auto|scroll)/.test(style.overflowY) && parent.scrollHeight > parent.clientHeight) {
+      parent.scrollTo({ top: 0, behavior: 'smooth' })
+      return
+    }
+    parent = parent.parentElement
+  }
+  window.scrollTo({ top: 0, behavior: 'smooth' })
+}
 
 const logs = ref([])
 const logsRunning = ref(false)
@@ -77,6 +117,10 @@ const apiEndpoint = computed(() => {
   }
 })
 const mixedPort = computed(() => ocweb.value.mixed_port || '7893')
+const cpuText = computed(() => {
+  const cpu = ocwebInfo.value.toolbar?.cpu
+  return cpu ? `${cpu}%` : '—'
+})
 const ocwebInfo = ref({ toolbar: {}, subinfo: {} })
 
 const subinfoItems = computed(() => {
@@ -503,6 +547,10 @@ async function onConfigSaved(cfg) {
   }
 }
 
+function saveConfig() {
+  configRef.value?.save()
+}
+
 function openDashboard() {
   const url = config.value.dashboard_url || 'http://192.168.1.1:9090/ui/zashboard/'
   window.open(url, '_blank', 'noopener')
@@ -567,8 +615,15 @@ watch(logSource, () => loadLogs())
 
 watch(netMode, () => checkNet(true))
 
+// 手机子页签切换后回到内容顶部，避免沿用上一段的滚动位置。
+watch(panelSection, async () => {
+  await nextTick()
+  scrollContentToTop()
+})
+
 onMounted(async () => {
   instance?.emit('layout', { maxWidth: '82rem' })
+  mobilePortraitQuery?.addEventListener?.('change', onMobilePortraitChange)
   await loadConfig()
   await loadAll()
   const savedMode = config.value.netcheck_mode
@@ -591,6 +646,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  mobilePortraitQuery?.removeEventListener?.('change', onMobilePortraitChange)
   if (refreshTimer) clearInterval(refreshTimer)
   if (netTimer) clearInterval(netTimer)
   refreshTimer = null
@@ -599,54 +655,56 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="ocp-page">
-    <div class="ocp-header">
-      <div class="d-flex align-center flex-wrap ga-2">
-        <v-icon icon="mdi-shield-network-outline" color="primary" size="24" />
-        <span class="text-h6 ocp-title">OpenClash</span>
-        <v-chip v-if="status.meta" size="x-small" variant="tonal">Mihomo</v-chip>
-        <v-spacer />
-        <v-btn
-          size="small"
-          variant="text"
-          icon="mdi-refresh"
-          title="刷新"
-          :loading="loading"
-          @click="loadAll()"
-        />
-        <!-- 桌面：文字按钮 -->
-        <v-btn
-          v-if="config.show_dashboard !== false"
-          class="d-none d-sm-flex"
-          size="small"
-          variant="tonal"
-          prepend-icon="mdi-open-in-new"
-          @click="openDashboard"
-        >
-          完整面板
-        </v-btn>
-        <v-btn class="d-none d-sm-flex" size="small" variant="text" prepend-icon="mdi-close" @click="exitPanel">
-          退出
-        </v-btn>
-        <!-- 手机：图标按钮 -->
-        <v-btn
-          v-if="config.show_dashboard !== false"
-          class="d-flex d-sm-none"
-          size="small"
-          variant="tonal"
-          icon="mdi-open-in-new"
-          title="完整面板"
-          @click="openDashboard"
-        />
-        <v-btn class="d-flex d-sm-none" size="small" variant="text" icon="mdi-close" title="退出" @click="exitPanel" />
+  <div ref="rootRef" class="ocp-page">
+    <div class="ocp-topbar" :class="{ 'ocp-topbar--sticky': isMobilePortrait && props.showClose }">
+      <div class="ocp-header">
+        <div class="d-flex align-center flex-wrap ga-2">
+          <v-icon icon="mdi-shield-network-outline" color="primary" size="24" />
+          <span class="text-h6 ocp-title">OpenClash</span>
+          <v-chip v-if="status.meta" class="ocp-mihomo-chip" size="x-small" variant="tonal">Mihomo</v-chip>
+          <v-spacer />
+          <v-btn
+            size="small"
+            variant="text"
+            icon="mdi-refresh"
+            title="刷新"
+            :loading="loading"
+            @click="loadAll()"
+          />
+          <!-- 桌面：文字按钮 -->
+          <v-btn
+            v-if="config.show_dashboard !== false"
+            class="d-none d-sm-flex"
+            size="small"
+            variant="tonal"
+            prepend-icon="mdi-open-in-new"
+            @click="openDashboard"
+          >
+            完整面板
+          </v-btn>
+          <v-btn class="d-none d-sm-flex" size="small" variant="text" prepend-icon="mdi-close" @click="exitPanel">
+            退出
+          </v-btn>
+          <!-- 手机：图标按钮 -->
+          <v-btn
+            v-if="config.show_dashboard !== false"
+            class="d-flex d-sm-none"
+            size="small"
+            variant="tonal"
+            icon="mdi-open-in-new"
+            title="完整面板"
+            @click="openDashboard"
+          />
+          <v-btn class="d-flex d-sm-none" size="small" variant="text" icon="mdi-close" title="退出" @click="exitPanel" />
+        </div>
       </div>
-    </div>
 
-    <v-tabs v-model="tab" density="compact" color="primary" class="mt-1 mb-2">
-      <v-tab value="panel" prepend-icon="mdi-view-dashboard-outline">面板</v-tab>
-      <v-tab value="logs" prepend-icon="mdi-text-box-outline">日志</v-tab>
-      <v-tab value="settings" prepend-icon="mdi-cog-outline">设置</v-tab>
-    </v-tabs>
+      <v-tabs v-model="tab" density="compact" color="primary" class="ocp-tabs mt-1 mb-2">
+        <v-tab value="panel" prepend-icon="mdi-view-dashboard-outline">面板</v-tab>
+        <v-tab value="logs" prepend-icon="mdi-text-box-outline">日志</v-tab>
+        <v-tab value="settings" prepend-icon="mdi-cog-outline">设置</v-tab>
+      </v-tabs>
+    </div>
 
     <v-alert v-if="error" type="error" variant="tonal" density="compact" closable class="mb-2" @click:close="error = ''">
       {{ error }}
@@ -657,8 +715,21 @@ onBeforeUnmount(() => {
       <v-skeleton-loader v-if="loading && !groups.length" type="card, list-item@3" />
 
       <template v-else>
+        <v-btn-toggle
+          v-if="isMobilePortrait"
+          v-model="panelSection"
+          mandatory
+          divided
+          density="compact"
+          class="ocp-subtabs mb-2"
+        >
+          <v-btn v-for="item in PANEL_SECTIONS" :key="item.value" :value="item.value" size="small">
+            {{ item.label }}
+          </v-btn>
+        </v-btn-toggle>
+
         <div class="ocp-tiles">
-          <v-card variant="tonal" class="ocp-tile ocp-tile--full">
+          <v-card v-if="showSection('status')" variant="tonal" class="ocp-tile ocp-tile--full">
             <div class="d-flex align-center flex-wrap ga-2">
               <span class="ocp-tile-title" style="margin: 0">总状态</span>
               <v-chip v-if="ocweb.run_mode" size="x-small" variant="tonal" color="info">{{ runModeLabel(ocweb.run_mode) }}</v-chip>
@@ -668,7 +739,7 @@ onBeforeUnmount(() => {
               <v-btn size="x-small" variant="tonal" :loading="ocwebLoading" @click="loadOcweb">刷新</v-btn>
             </div>
             <div class="ocp-statgrid mt-1">
-              <div class="ocp-statbox">
+              <div class="ocp-statbox ocp-statbox--wide">
                 <div class="ocp-statbox-label">内核</div>
                 <div class="ocp-statbox-value">{{ status.version || '—' }}</div>
               </div>
@@ -690,7 +761,7 @@ onBeforeUnmount(() => {
               </div>
               <div class="ocp-statbox">
                 <div class="ocp-statbox-label">CPU</div>
-                <div class="ocp-statbox-value">{{ ocwebInfo.toolbar.cpu || '—' }}%</div>
+                <div class="ocp-statbox-value">{{ cpuText }}</div>
               </div>
               <div class="ocp-statbox">
                 <div class="ocp-statbox-label">负载</div>
@@ -715,9 +786,9 @@ onBeforeUnmount(() => {
             </div>
           </v-card>
 
-          <v-card variant="tonal" class="ocp-tile ocp-tile--wide">
+          <v-card v-if="showSection('service')" variant="tonal" class="ocp-tile ocp-tile--wide">
             <div class="ocp-tile-title text-center">快捷操作</div>
-            <div class="ocp-center-actions">
+            <div class="ocp-center-actions ocp-quick-actions">
               <v-btn size="small" variant="tonal" color="error" :loading="ocwebLoading"
                 @click="ocwebAction('close_connections', {}, '断开全部代理连接？')">关闭连接</v-btn>
               <v-btn size="small" variant="tonal" :loading="ocwebLoading"
@@ -729,9 +800,9 @@ onBeforeUnmount(() => {
             </div>
           </v-card>
 
-          <v-card variant="tonal" class="ocp-tile ocp-tile--wide">
+          <v-card v-if="showSection('service')" variant="tonal" class="ocp-tile ocp-tile--wide">
             <div class="ocp-tile-title">快捷设置</div>
-            <div class="d-flex align-center flex-wrap ga-3">
+            <div class="d-flex align-center flex-wrap ga-3 ocp-quickset">
               <v-select :model-value="ocweb.oversea"
                 :items="[{ title: '关闭', value: '0' }, { title: '绕过大陆', value: '1' }, { title: '绕过海外', value: '2' }]"
                 label="区域绕过" density="compact" hide-details style="max-width: 150px"
@@ -745,7 +816,7 @@ onBeforeUnmount(() => {
             </div>
           </v-card>
 
-          <v-card variant="tonal" class="ocp-tile ocp-tile--wide">
+          <v-card v-if="showSection('service')" variant="tonal" class="ocp-tile ocp-tile--wide">
             <div class="ocp-modepair">
               <div class="ocp-statbox">
                 <div class="ocp-statbox-label text-center">运行模式</div>
@@ -768,7 +839,7 @@ onBeforeUnmount(() => {
             </div>
           </v-card>
 
-          <v-card variant="tonal" class="ocp-tile ocp-tile--wide">
+          <v-card v-if="showSection('service')" variant="tonal" class="ocp-tile ocp-tile--wide">
             <div class="ocp-tile-title">订阅源</div>
             <template v-if="providers.length">
               <div v-for="p in providers" :key="p.name" class="ocp-tile-line">
@@ -788,19 +859,22 @@ onBeforeUnmount(() => {
             </template>
           </v-card>
 
-          <v-card variant="tonal" class="ocp-tile ocp-tile--full">
-            <div class="d-flex align-center flex-wrap ga-2">
-              <span class="ocp-tile-title" style="margin: 0">访问检查</span>
-              <div class="ocp-center-actions">
-                <v-btn v-for="item in netModeOptions" :key="item.value" size="x-small"
-                  :variant="netMode === item.value ? 'flat' : 'outlined'"
-                  :color="netMode === item.value ? 'primary' : undefined"
-                  @click="netMode = item.value">{{ item.label }}</v-btn>
+          <v-card v-if="showSection('access')" variant="tonal" class="ocp-tile ocp-tile--full">
+            <div class="ocp-section-head">
+              <div class="ocp-section-head-main">
+                <span class="ocp-tile-title" style="margin: 0">访问检查</span>
+                <div class="ocp-center-actions">
+                  <v-btn v-for="item in netModeOptions" :key="item.value" size="x-small"
+                    :variant="netMode === item.value ? 'flat' : 'outlined'"
+                    :color="netMode === item.value ? 'primary' : undefined"
+                    @click="netMode = item.value">{{ item.label }}</v-btn>
+                </div>
               </div>
-              <v-spacer />
-              <v-chip v-if="netChecking" size="x-small" variant="tonal" color="info">检查中</v-chip>
-              <span v-if="netUpdatedAt" class="text-caption text-medium-emphasis">{{ netUpdatedText }}</span>
-              <v-btn size="x-small" variant="text" icon="mdi-refresh" :loading="netLoading" @click="checkNet(true)" />
+              <div class="ocp-section-head-side">
+                <v-chip v-if="netChecking" size="x-small" variant="tonal" color="info">检查中</v-chip>
+                <span v-if="netUpdatedAt" class="text-caption text-medium-emphasis">{{ netUpdatedText }}</span>
+                <v-btn size="x-small" variant="text" icon="mdi-refresh" :loading="netLoading" @click="checkNet(true)" />
+              </div>
             </div>
             <div class="ocp-netgrid mt-1">
               <div v-for="site in netSites" :key="site.name" class="ocp-netcard">
@@ -819,7 +893,7 @@ onBeforeUnmount(() => {
             <div v-if="netNote" class="text-caption text-medium-emphasis mt-1">{{ netNote }}</div>
           </v-card>
 
-          <v-card variant="tonal" class="ocp-tile ocp-tile--wide">
+          <v-card v-if="showSection('status')" variant="tonal" class="ocp-tile ocp-tile--wide">
             <div class="ocp-tile-title">端口</div>
             <div class="ocp-statgrid">
               <div class="ocp-statbox">
@@ -849,20 +923,22 @@ onBeforeUnmount(() => {
             </div>
           </v-card>
 
-          <v-card variant="tonal" class="ocp-tile ocp-tile--wide">
+          <v-card v-if="showSection('service')" variant="tonal" class="ocp-tile ocp-tile--wide">
             <div class="ocp-tile-title">配置文件</div>
-            <div class="d-flex align-center flex-wrap ga-2">
+            <div class="ocp-config-row">
               <v-select v-model="ocweb.config_name" :items="ocweb.config_files" density="compact" hide-details
-                label="配置文件" style="max-width: 200px" />
-              <v-btn size="small" variant="tonal" :loading="ocwebLoading"
-                @click="ocwebAction('switch_config', { config_name: ocweb.config_name }, '切换配置文件会重启 OpenClash！')">切换</v-btn>
-              <v-btn size="small" variant="tonal" :loading="ocwebLoading"
-                @click="ocwebAction('update_config', { filename: ocweb.config_name }, '更新当前订阅？')">更新订阅</v-btn>
+                label="配置文件" class="ocp-config-select" style="max-width: 200px" />
+              <div class="ocp-config-actions">
+                <v-btn size="small" variant="tonal" :loading="ocwebLoading"
+                  @click="ocwebAction('switch_config', { config_name: ocweb.config_name }, '切换配置文件会重启 OpenClash！')">切换</v-btn>
+                <v-btn size="small" variant="tonal" :loading="ocwebLoading"
+                  @click="ocwebAction('update_config', { filename: ocweb.config_name }, '更新当前订阅？')">更新订阅</v-btn>
+              </div>
             </div>
           </v-card>
         </div>
 
-        <v-card variant="tonal" class="pa-2 mt-2">
+        <v-card v-if="showSection('strategy')" variant="tonal" class="pa-2 mt-2">
           <div class="d-flex align-center flex-wrap ga-2">
             <span class="text-subtitle-2">策略组</span>
             <span class="text-caption text-medium-emphasis">{{ groups.length }} 个</span>
@@ -972,7 +1048,7 @@ onBeforeUnmount(() => {
 
     <!-- ================= 日志 ================= -->
     <div v-else-if="tab === 'logs'">
-      <div class="d-flex align-center flex-wrap ga-2 mb-2">
+      <div class="ocp-logs-head mb-2">
         <span class="text-subtitle-2">日志</span>
         <v-btn-toggle v-model="logSource" mandatory density="compact" variant="outlined" divided>
           <v-btn value="plugin" size="small">插件日志</v-btn>
@@ -985,17 +1061,18 @@ onBeforeUnmount(() => {
         <v-chip v-if="logSource === 'plugin' && !logsExists" size="x-small" color="warning" variant="tonal">
           文件未生成
         </v-chip>
-        <v-spacer />
-        <v-select
-          v-model="logLevel"
-          :items="logLevels"
-          label="级别"
-          density="compact"
-          hide-details
-          variant="outlined"
-          style="max-width: 120px"
-        />
-        <v-btn size="small" variant="text" icon="mdi-refresh" :loading="logsLoading" @click="loadLogs" />
+        <div class="ocp-logs-head-right">
+          <v-select
+            v-model="logLevel"
+            :items="logLevels"
+            label="级别"
+            density="compact"
+            hide-details
+            variant="outlined"
+            class="ocp-log-level-select"
+          />
+          <v-btn size="small" variant="text" icon="mdi-refresh" :loading="logsLoading" @click="loadLogs" />
+        </div>
       </div>
 
       <v-alert
@@ -1027,17 +1104,23 @@ onBeforeUnmount(() => {
     </div>
 
     <!-- ================= 设置 ================= -->
-    <div v-else-if="tab === 'settings'">
-      <v-alert type="info" variant="tonal" density="compact" class="mb-2">
-        保存会写回 MoviePilot 并立即生效；api_url 只填 <code>http://路由器IP:9090</code>（误填 <code>/ui/...</code> 也会自动纠正）。
-      </v-alert>
+    <div v-else-if="tab === 'settings'" class="ocp-settings">
       <Config
+        ref="configRef"
         :api="props.api"
         :plugin-id="props.pluginId"
         :initial-config="config"
+        :show-save="!isMobilePortrait"
         @save="onConfigSaved"
       />
-      <div v-if="saving" class="text-caption text-medium-emphasis mt-2">正在保存…</div>
+      <div
+        v-if="isMobilePortrait"
+        class="ocp-save-bar"
+        :class="{ 'ocp-save-bar--dialog': props.showClose }"
+      >
+        <span v-if="saving" class="text-caption text-medium-emphasis">正在保存…</span>
+        <v-btn color="primary" :loading="saving" @click="saveConfig">保存配置</v-btn>
+      </div>
     </div>
   </div>
 </template>
@@ -1449,6 +1532,251 @@ onBeforeUnmount(() => {
   }
   100% {
     background-position: 0 0;
+  }
+}
+
+/* ---------------- 手机竖屏结构 ---------------- */
+.ocp-topbar {
+  position: relative;
+}
+.ocp-topbar--sticky {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: rgba(var(--v-theme-surface), 0.94);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+.ocp-section-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  width: 100%;
+}
+.ocp-section-head-main {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+.ocp-section-head-side {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+.ocp-config-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+.ocp-config-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ocp-logs-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.ocp-logs-head-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+.ocp-log-level-select {
+  max-width: 120px;
+}
+
+@media (max-width: 760px) and (orientation: portrait) {
+  .ocp-page {
+    padding: 0 4px 8px;
+  }
+  .ocp-topbar--sticky {
+    margin: 0 -2px;
+    padding: 4px 2px 2px;
+    border-bottom: 1px solid rgba(128, 128, 128, 0.18);
+  }
+  .ocp-tabs {
+    width: 100%;
+  }
+  .ocp-tabs [class~='v-tab'] {
+    flex: 1 1 0;
+    min-width: 0;
+    height: 40px !important;
+    font-size: 13px;
+  }
+  .ocp-subtabs {
+    display: flex;
+    width: 100%;
+  }
+  .ocp-subtabs [class~='v-btn'] {
+    flex: 1 1 0;
+    min-width: 0;
+    height: 34px !important;
+    padding: 0 6px;
+    font-size: 12px;
+  }
+  .ocp-statgrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .ocp-statbox--wide {
+    grid-column: span 2;
+  }
+  .ocp-tile {
+    padding: 10px 12px;
+  }
+  .ocp-tile-line {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    justify-content: flex-start;
+    text-align: left;
+  }
+  .ocp-tile-line > [class~='v-btn'] {
+    margin-left: auto;
+  }
+  .ocp-quick-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .ocp-quick-actions [class~='v-btn'] {
+    width: 100%;
+  }
+  .ocp-quickset {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px 12px;
+    align-items: center;
+  }
+  .ocp-quickset > [class~='v-select'] {
+    max-width: none !important;
+    width: 100%;
+  }
+  .ocp-section-head {
+    width: 100%;
+  }
+  .ocp-section-head-main {
+    width: 100%;
+    justify-content: space-between;
+  }
+  .ocp-section-head-main .ocp-center-actions {
+    margin-left: auto;
+  }
+  .ocp-section-head-side {
+    width: 100%;
+    margin-left: 0;
+    justify-content: flex-end;
+  }
+  .ocp-config-row {
+    width: 100%;
+    justify-content: stretch;
+  }
+  .ocp-config-select {
+    max-width: none !important;
+    width: 100%;
+  }
+  .ocp-config-actions {
+    width: 100%;
+  }
+  .ocp-config-actions [class~='v-btn'] {
+    flex: 1;
+  }
+  .ocp-logs-head-right {
+    width: 100%;
+    margin-left: 0;
+  }
+  .ocp-log-level-select {
+    max-width: none !important;
+    flex: 1;
+  }
+  .ocp-logs {
+    max-height: none;
+    overflow-y: visible;
+    font-size: 11px;
+  }
+  .ocp-log-line {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    grid-template-areas:
+      'time level'
+      'text text';
+    gap: 1px 8px;
+    padding: 4px 0;
+  }
+  .ocp-log-time {
+    grid-area: time;
+  }
+  .ocp-log-level {
+    grid-area: level;
+    flex: none;
+  }
+  .ocp-log-text {
+    grid-area: text;
+  }
+  .ocp-chips [class~='v-chip'] {
+    height: 34px !important;
+    font-size: 12px;
+  }
+  .ocp-delay {
+    height: 34px !important;
+    padding: 0 10px !important;
+    font-size: 12px;
+  }
+  .ocp-node {
+    min-height: 52px;
+  }
+  .ocp-node [class~='v-btn'] {
+    width: 36px !important;
+    height: 36px !important;
+  }
+  .ocp-node-name {
+    -webkit-line-clamp: 1;
+    font-size: 13px;
+  }
+  .ocp-page [class~='v-btn']:not([class~='v-btn--icon']):not([class~='v-tab']) {
+    height: 34px !important;
+  }
+  .ocp-page .ocp-save-bar [class~='v-btn']:not([class~='v-btn--icon']) {
+    height: 40px !important;
+    min-width: 96px;
+  }
+  .ocp-settings {
+    padding-bottom: 64px;
+  }
+  .ocp-save-bar {
+    position: sticky;
+    bottom: calc(8px + var(--layout-footer-dock-height, 0px));
+    z-index: 15;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 8px;
+    padding: 8px 10px;
+    border: 1px solid rgba(128, 128, 128, 0.18);
+    border-radius: 12px;
+    background: rgba(var(--v-theme-surface), 0.94);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+  }
+  .ocp-save-bar--dialog {
+    bottom: 8px;
+  }
+}
+
+@media (max-width: 370px) {
+  .ocp-mihomo-chip {
+    display: none;
   }
 }
 </style>

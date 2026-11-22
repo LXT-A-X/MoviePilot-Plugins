@@ -1,11 +1,12 @@
 <script setup>
-import { getCurrentInstance, inject, onMounted, ref } from 'vue'
+import { computed, getCurrentInstance, inject, onBeforeUnmount, onMounted, ref } from 'vue'
 import { createApi } from './api.js'
 
 const props = defineProps({
   api: { type: Object, default: () => ({}) },
   pluginId: { type: String, default: 'OpenClashPanel' },
   initialConfig: { type: Object, default: () => ({}) },
+  showSave: { type: Boolean, default: true },
 })
 
 const emit = defineEmits(['save', 'close', 'switch'])
@@ -53,6 +54,16 @@ const sitesText = ref(DEFAULT_SITES_TEXT)
 const saving = ref(false)
 const loading = ref(true)
 
+const mobilePortraitQuery = typeof window !== 'undefined'
+  ? window.matchMedia('(max-width: 760px) and (orientation: portrait)')
+  : null
+const isMobilePortrait = ref(Boolean(mobilePortraitQuery?.matches))
+const fieldDensity = computed(() => (isMobilePortrait.value ? 'compact' : 'comfortable'))
+
+function onMobilePortraitChange(event) {
+  isMobilePortrait.value = event.matches
+}
+
 function sitesToText(sites) {
   if (!Array.isArray(sites) || !sites.length) return DEFAULT_SITES_TEXT
   return sites
@@ -82,6 +93,7 @@ function toastMsg(kind, message) {
 
 onMounted(async () => {
   instance?.emit('layout', { maxWidth: '68rem' })
+  mobilePortraitQuery?.addEventListener?.('change', onMobilePortraitChange)
   try {
     const cur = await api.get('/config')
     cfg.value = { ...DEFAULTS, ...(props.initialConfig || {}), ...(cur || {}) }
@@ -103,16 +115,25 @@ function save() {
     saving.value = false
   }
 }
+
+onBeforeUnmount(() => {
+  mobilePortraitQuery?.removeEventListener?.('change', onMobilePortraitChange)
+})
+
+defineExpose({ save })
 </script>
 
 <template>
-  <v-card variant="tonal" class="pa-4">
+  <v-card variant="tonal" class="pa-4 ocp-config">
     <v-skeleton-loader v-if="loading" type="list-item@6" />
     <template v-else>
       <v-alert type="info" variant="tonal" density="compact" class="mb-3">
         API 地址只填 <code>http://路由器IP:9090</code>，不要带 <code>/ui/...</code>（误填会自动纠正）。
       </v-alert>
       <v-row dense>
+        <v-col cols="12">
+          <div class="ocp-cfg-section">连接</div>
+        </v-col>
         <v-col cols="12">
           <v-switch
             v-model="cfg.enabled"
@@ -128,7 +149,7 @@ function save() {
             placeholder="http://192.168.1.1:9090"
             hint="external-controller 根地址（默认 9090），不要填 zashboard 的 /ui 地址"
             persistent-hint
-            density="comfortable"
+            :density="fieldDensity"
           />
         </v-col>
         <v-col cols="12" md="4">
@@ -138,7 +159,7 @@ function save() {
             type="password"
             hint="OpenClash → 插件设置 → Dashboard 密码"
             persistent-hint
-            density="comfortable"
+            :density="fieldDensity"
           />
         </v-col>
         <v-col cols="12" md="4">
@@ -149,8 +170,11 @@ function save() {
             min="2"
             hint="默认 8 秒"
             persistent-hint
-            density="comfortable"
+            :density="fieldDensity"
           />
+        </v-col>
+        <v-col cols="12">
+          <div class="ocp-cfg-section">刷新与日志</div>
         </v-col>
         <v-col cols="12" md="4">
           <v-text-field
@@ -160,7 +184,7 @@ function save() {
             min="0"
             hint="0 表示关闭自动刷新，默认 10 秒"
             persistent-hint
-            density="comfortable"
+            :density="fieldDensity"
           />
         </v-col>
         <v-col cols="12" md="4">
@@ -170,8 +194,11 @@ function save() {
             label="日志采集级别"
             hint="Clash /logs 的 level 参数"
             persistent-hint
-            density="comfortable"
+            :density="fieldDensity"
           />
+        </v-col>
+        <v-col cols="12">
+          <div class="ocp-cfg-section">访问检查</div>
         </v-col>
         <v-col cols="12" md="4">
           <v-select
@@ -180,7 +207,7 @@ function save() {
             label="访问检查视角"
             hint="内核：由 OpenClash 内核测速（官方同款，数字最低）；MP 网络/OpenClash：由 MP 容器测速"
             persistent-hint
-            density="comfortable"
+            :density="fieldDensity"
           />
         </v-col>
         <v-col cols="12" md="4">
@@ -191,7 +218,7 @@ function save() {
             min="0"
             hint="默认 60，0 表示只手动检查"
             persistent-hint
-            density="comfortable"
+            :density="fieldDensity"
           />
         </v-col>
         <v-col cols="12" md="4">
@@ -202,7 +229,7 @@ function save() {
             min="2"
             hint="默认 6"
             persistent-hint
-            density="comfortable"
+            :density="fieldDensity"
           />
         </v-col>
         <v-col cols="12">
@@ -213,8 +240,11 @@ function save() {
             auto-grow
             hint="每行一个：名称|URL|direct/proxy；direct=直连，proxy=国外站点走所选通道"
             persistent-hint
-            density="comfortable"
+            :density="fieldDensity"
           />
+        </v-col>
+        <v-col cols="12">
+          <div class="ocp-cfg-section">命令</div>
         </v-col>
         <v-col cols="12">
           <v-switch
@@ -223,6 +253,9 @@ function save() {
             hint="关闭后 /oc_node、/oc_mode、/oc_refresh 只返回提示；查询命令不受影响"
             persistent-hint
           />
+        </v-col>
+        <v-col cols="12">
+          <div class="ocp-cfg-section">OpenWrt 管理</div>
         </v-col>
         <v-col cols="12">
           <v-switch
@@ -239,7 +272,7 @@ function save() {
             placeholder="192.168.1.1"
             hint="路由器 IP 或域名（不含 http://）"
             persistent-hint
-            density="comfortable"
+            :density="fieldDensity"
           />
         </v-col>
         <v-col cols="6" md="2">
@@ -247,7 +280,7 @@ function save() {
             v-model="cfg.openwrt_scheme"
             :items="['http', 'https']"
             label="协议"
-            density="comfortable"
+            :density="fieldDensity"
           />
         </v-col>
         <v-col cols="6" md="3">
@@ -255,7 +288,7 @@ function save() {
             v-model="cfg.openwrt_username"
             label="LuCI 用户名"
             placeholder="root"
-            density="comfortable"
+            :density="fieldDensity"
           />
         </v-col>
         <v-col cols="12" md="3">
@@ -265,8 +298,11 @@ function save() {
             label="LuCI 密码"
             hint="仅用于登录路由器，不会写日志"
             persistent-hint
-            density="comfortable"
+            :density="fieldDensity"
           />
+        </v-col>
+        <v-col cols="12">
+          <div class="ocp-cfg-section">测速与完整面板</div>
         </v-col>
         <v-col cols="12" md="8">
           <v-text-field
@@ -274,7 +310,7 @@ function save() {
             label="测速地址"
             hint="默认 https://www.gstatic.com/generate_204"
             persistent-hint
-            density="comfortable"
+            :density="fieldDensity"
           />
         </v-col>
         <v-col cols="12" md="4">
@@ -285,7 +321,7 @@ function save() {
             min="1000"
             hint="默认 5000"
             persistent-hint
-            density="comfortable"
+            :density="fieldDensity"
           />
         </v-col>
         <v-col cols="12" md="4">
@@ -297,7 +333,7 @@ function save() {
             max="32"
             hint="默认 8"
             persistent-hint
-            density="comfortable"
+            :density="fieldDensity"
           />
         </v-col>
         <v-col cols="12" md="8">
@@ -307,7 +343,7 @@ function save() {
             placeholder="http://192.168.1.1:9090/ui/zashboard/"
             hint="“完整面板”按钮打开的地址"
             persistent-hint
-            density="comfortable"
+            :density="fieldDensity"
           />
         </v-col>
         <v-col cols="12" md="4" class="d-flex align-center">
@@ -320,9 +356,38 @@ function save() {
         </v-col>
       </v-row>
 
-      <v-row class="justify-end mt-2" no-gutters>
+      <v-row v-if="props.showSave" class="justify-end mt-2" no-gutters>
         <v-btn color="primary" :loading="saving" @click="save">保存配置</v-btn>
       </v-row>
     </template>
   </v-card>
 </template>
+
+<style scoped>
+.ocp-cfg-section {
+  margin: 10px 0 2px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  opacity: 0.68;
+}
+.ocp-cfg-section:first-child {
+  margin-top: 0;
+}
+
+@media (max-width: 760px) and (orientation: portrait) {
+  .ocp-config {
+    padding: 12px !important;
+  }
+  .ocp-config :deep([class~='v-field']) {
+    min-height: 40px;
+  }
+  .ocp-config :deep([class~='v-messages']) {
+    font-size: 11px;
+    line-height: 1.3;
+  }
+  .ocp-config :deep([class~='v-input__details']) {
+    padding-top: 1px;
+  }
+}
+</style>

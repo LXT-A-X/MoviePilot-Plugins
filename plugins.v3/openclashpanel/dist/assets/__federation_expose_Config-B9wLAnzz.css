@@ -1,0 +1,26 @@
+
+.ocp-cfg-section[data-v-e52da9ba] {
+  margin: 10px 0 2px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  opacity: 0.68;
+}
+.ocp-cfg-section[data-v-e52da9ba]:first-child {
+  margin-top: 0;
+}
+@media (max-width: 760px) and (orientation: portrait) {
+.ocp-config[data-v-e52da9ba] {
+    padding: 12px !important;
+}
+.ocp-config[data-v-e52da9ba] [class~='v-field'] {
+    min-height: 40px;
+}
+.ocp-config[data-v-e52da9ba] [class~='v-messages'] {
+    font-size: 11px;
+    line-height: 1.3;
+}
+.ocp-config[data-v-e52da9ba] [class~='v-input__details'] {
+    padding-top: 1px;
+}
+}
