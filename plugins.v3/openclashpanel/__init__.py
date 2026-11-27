@@ -178,7 +178,7 @@ class OpenClashPanel(_PluginBase):
         "支持 Smart 智能组、TG 按钮命令、仪表盘全宽组件。"
     )
     plugin_icon = "https://raw.githubusercontent.com/LXT-A-X/MoviePilot-Plugins/main/icons/openclashpanel.png"
-    plugin_version = "1.12.5"
+    plugin_version = "1.12.6"
     plugin_author = "LXT-A-X"
     plugin_config_prefix = "openclashpanel_"
     plugin_order = 110

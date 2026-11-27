@@ -1490,7 +1490,7 @@ return (_ctx, _cache) => {
                               key: g.name,
                               size: "small",
                               variant: g.name === currentGroup.value?.name ? 'flat' : 'outlined',
-                              color: g.name === currentGroup.value?.name ? 'primary' : undefined,
+                              class: _normalizeClass(['ocp-group-chip', g.name === currentGroup.value?.name && 'ocp-group-chip--active']),
                               onClick: $event => (activeGroupName.value = g.name)
                             }, {
                               default: _withCtx(() => [
@@ -1498,7 +1498,7 @@ return (_ctx, _cache) => {
                                 _createElementVNode("span", _hoisted_66, _toDisplayString(g.count), 1)
                               ]),
                               _: 2
-                            }, 1032, ["variant", "color", "onClick"]))
+                            }, 1032, ["variant", "class", "onClick"]))
                           }), 128))
                         ]),
                         (currentGroup.value)
@@ -1562,9 +1562,8 @@ return (_ctx, _cache) => {
                               }, {
                                 default: _withCtx(() => [
                                   _createVNode(_component_v_card, {
-                                    variant: node.selected ? 'flat' : 'outlined',
-                                    color: node.selected ? 'primary' : undefined,
-                                    class: _normalizeClass(['ocp-node']),
+                                    variant: "outlined",
+                                    class: _normalizeClass(['ocp-node', node.selected && 'ocp-node--active']),
                                     onClick: $event => (switchNode(node))
                                   }, {
                                     default: _withCtx(() => [
@@ -1572,7 +1571,7 @@ return (_ctx, _cache) => {
                                         _createVNode(_component_v_icon, {
                                           icon: node.selected ? 'mdi-check-circle' : 'mdi-circle-outline',
                                           size: "16",
-                                          color: node.selected ? 'white' : 'medium-emphasis'
+                                          color: node.selected ? 'primary' : 'medium-emphasis'
                                         }, null, 8, ["icon", "color"]),
                                         _createElementVNode("span", {
                                           class: "ocp-node-name",
@@ -1602,7 +1601,7 @@ return (_ctx, _cache) => {
                                         }, null, 8, ["loading", "onClick"]),
                                         _createVNode(_component_v_chip, {
                                           size: "x-small",
-                                          variant: "flat",
+                                          variant: node.selected ? 'outlined' : 'flat',
                                           color: delayColor(node.name),
                                           class: "ocp-delay",
                                           title: "点击单独测速",
@@ -1612,11 +1611,11 @@ return (_ctx, _cache) => {
                                             _createTextVNode(_toDisplayString(delayText(node.name)), 1)
                                           ]),
                                           _: 2
-                                        }, 1032, ["color", "onClick"])
+                                        }, 1032, ["variant", "color", "onClick"])
                                       ])
                                     ]),
                                     _: 2
-                                  }, 1032, ["variant", "color", "onClick"])
+                                  }, 1032, ["class", "onClick"])
                                 ]),
                                 _: 2
                               }, 1024))
@@ -1806,6 +1805,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-247e8a83"]]);
+const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-0c0937e0"]]);
 
 export { AppPage as default };

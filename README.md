@@ -62,7 +62,7 @@ MoviePilot-Plugins/
 | **字幕字体代理** FontInAssProxy | 反代 Emby/Jellyfin 字幕流，实时子集化字体并内嵌进 ASS | — | ✅ 3.1.2 | [V3 手册](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v3/fontinassproxy/README.md) |
 | **Emby 演职人员中文化** EmbyPeopleLocalize | 用 LLM 把 Emby 演职人员姓名与角色名翻译成简体中文并写回 nfo | ✅ 1.3.11 | ✅ 4.7.13 | [V3 手册](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v3/embypeoplelocalize/README.md) |
 | **字体分类管家** Zitifenlei | 字体归档整理 + ASS 字幕缺字体检查 + 字体子集化内嵌 | ✅ 1.2.24 | ✅ 3.8.3 | [V3 手册](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v3/zitifenlei/README.md) · [V2 手册](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v2/zitifenlei/%E4%BD%BF%E7%94%A8%E6%89%8B%E5%86%8C.md) |
-| **OpenClash 控制面板** OpenClashPanel | MoviePilot 内查看/管理 OpenClash·Mihomo：状态、策略组、测速、访问检查、OpenWrt 管理 | — | ✅ 1.12.5 | [V3 手册](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v3/openclashpanel/README.md) |
+| **OpenClash 控制面板** OpenClashPanel | MoviePilot 内查看/管理 OpenClash·Mihomo：状态、策略组、测速、访问检查、OpenWrt 管理 | — | ✅ 1.12.6 | [V3 手册](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v3/openclashpanel/README.md) |
 | **MKV 工具箱** MkvToolkit | MKV 容器层编辑：字幕内封、音轨增删排序、字体附件、章节标题，支持队列/历史回滚 | — | ✅ 0.1.51 | [V3 手册](https://github.com/LXT-A-X/MoviePilot-Plugins/blob/main/plugins.v3/mkvtoolkit/README.md) |
 
 > 版本号与 `package.v2.json` / `package.v3.json` 索引保持一致；「—」表示该版本暂无此插件。
@@ -143,7 +143,7 @@ V2 版手册：[plugins.v2/zitifenlei/使用手册.md](https://github.com/LXT-A-
 
 ### OpenClash 控制面板 OpenClashPanel
 
-**V3 1.12.5 · 适用 MoviePilot V3**
+**V3 1.12.6 · 适用 MoviePilot V3**
 
 在 MoviePilot 里直接查看和管理 **OpenClash / Mihomo**：状态总览、策略组与节点切换、延迟测速、访问检查（内核 / MP / OpenClash 三视角）、插件与内核日志，可选 OpenWrt 服务管理；支持 Telegram 分页按钮命令与仪表盘全宽组件。
 

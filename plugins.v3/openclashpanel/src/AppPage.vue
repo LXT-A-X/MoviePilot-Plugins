@@ -964,7 +964,7 @@ onBeforeUnmount(() => {
               :key="g.name"
               size="small"
               :variant="g.name === currentGroup?.name ? 'flat' : 'outlined'"
-              :color="g.name === currentGroup?.name ? 'primary' : undefined"
+              :class="['ocp-group-chip', g.name === currentGroup?.name && 'ocp-group-chip--active']"
               @click="activeGroupName = g.name"
             >
               {{ g.name }}
@@ -994,16 +994,15 @@ onBeforeUnmount(() => {
               lg="3"
             >
               <v-card
-                :variant="node.selected ? 'flat' : 'outlined'"
-                :color="node.selected ? 'primary' : undefined"
-                :class="['ocp-node']"
+                variant="outlined"
+                :class="['ocp-node', node.selected && 'ocp-node--active']"
                 @click="switchNode(node)"
               >
                 <div class="d-flex align-center ga-2 pa-2">
                   <v-icon
                     :icon="node.selected ? 'mdi-check-circle' : 'mdi-circle-outline'"
                     size="16"
-                    :color="node.selected ? 'white' : 'medium-emphasis'"
+                    :color="node.selected ? 'primary' : 'medium-emphasis'"
                   />
                   <span class="ocp-node-name" :title="node.name">{{ node.name }}</span>
                   <v-chip v-if="node.is_group" size="x-small" variant="text" class="ocp-tag">组</v-chip>
@@ -1018,7 +1017,7 @@ onBeforeUnmount(() => {
                   />
                   <v-chip
                     size="x-small"
-                    variant="flat"
+                    :variant="node.selected ? 'outlined' : 'flat'"
                     :color="delayColor(node.name)"
                     class="ocp-delay"
                     title="点击单独测速"
@@ -1146,7 +1145,26 @@ onBeforeUnmount(() => {
 }
 .ocp-node {
   cursor: pointer;
-  transition: transform 0.12s ease, box-shadow 0.12s ease;
+  transition: transform 0.12s ease, box-shadow 0.12s ease, border-color 0.12s ease, background-color 0.12s ease;
+}
+/* 选中态不铺实心主题色：淡色底 + 主题描边 + 左侧色条，深浅主题下文字都清晰 */
+.ocp-node--active {
+  background-color: rgba(var(--v-theme-primary), 0.16) !important;
+  border-color: rgba(var(--v-theme-primary), 0.55) !important;
+  box-shadow: inset 3px 0 0 rgb(var(--v-theme-primary));
+}
+.ocp-node--active .ocp-node-name {
+  color: rgb(var(--v-theme-on-surface));
+  font-weight: 600;
+}
+.ocp-node--active .ocp-tag {
+  opacity: 0.9;
+}
+.ocp-group-chip--active {
+  background-color: rgba(var(--v-theme-primary), 0.22) !important;
+  border-color: rgba(var(--v-theme-primary), 0.65) !important;
+  color: rgb(var(--v-theme-on-surface)) !important;
+  font-weight: 600;
 }
 .ocp-node:hover {
   transform: translateY(-1px);
